@@ -1,0 +1,12 @@
+# Not applied by ./install.sh.
+# On a machine, copy this to ~/.config/git/config.local, fill it in, and add
+# this to that machine's ~/.config/git/config:
+#
+# [include]
+#     path = ~/.config/git/config.local
+#
+# Do not commit the filled-in file.
+
+[user]
+	name = Your Name
+	email = you@example.com

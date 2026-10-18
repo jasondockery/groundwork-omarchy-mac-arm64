@@ -1,0 +1,31 @@
+# Optional aarch64 packages. Not part of the Omarchy Mac install. The normal
+# ./install.sh setup installs Herdr, Tailscale, and keyd; T3 Code Nightly uses its official
+# checksum-verifying ARM64 CLI installer because the community Arch package is
+# not an ARM64 source of truth. Add optional packages one line at a time:
+#   omarchy pkg add <name>
+#
+# git, neovim, lazygit, ripgrep, fd, bat, eza, fzf, zoxide, starship,
+# mise, and docker already ship with Omarchy. Do not install Linuxbrew.
+
+# Apply this repo, and Caps Lock tap/hold.
+stow
+keyd
+
+# Terminal tools.
+atuin
+git-delta
+dust
+duf
+hyperfine
+tokei
+yazi
+uv
+direnv
+shellcheck
+go
+bitwarden-cli
+
+# Remote desktop experiments. See docs/decisions/0004-remote-access.md.
+# Sunshine, the Moonlight server, is not in the aarch64 repos, so it is not listed.
+# wayvnc
+# moonlight-qt

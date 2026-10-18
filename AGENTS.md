@@ -1,0 +1,35 @@
+# Agents
+
+This repo is a personal layer for Omarchy on Apple Silicon (aarch64). It is meant to be shared. Read these files before changing anything:
+
+- The original `groundwork` curriculum and north star for shared learning material. Curriculum stays there for now; the optional `core/` submodule is a read-only reference, not a setup prerequisite. Do not copy those pages into this repo.
+- `README.md` for what this environment installs and how.
+- `docs/status.md` for the current state of the reference machine.
+- `docs/decisions/` for choices that are already made.
+- `docs/keybindings.md` and `docs/remote-access.md` for first-run learning and private access.
+
+Shared engineering guidance belongs to [Compass](https://github.com/jasondockery/compass). Consult its current `COMPASS.md` and applicable skills for substantial engineering changes instead of inventing a competing local doctrine. This small repo currently links to that authority; it does not claim a receipt-verified Compass projection. Dependency policy extends the shared [renovate-config](https://github.com/jasondockery/renovate-config) preset; configuration alone does not prove central-runner coverage.
+
+## Rules
+
+- Omarchy Mac (`omacom/omarchy-mac`) owns the desktop, the package feed, and Apple Silicon support. Do not copy its stock Hyprland templates, shell aliases, tmux config, or git defaults into this repo.
+- Preserve Omarchy's desktop navigation, tmux, terminal, editor, shell, and AI-tool defaults. Do not add a replacement keybinding or tmux config unless Jason explicitly asks for it. The trackpad override and keyd Caps Lock tap-Escape/hold-Control default are intentional. `--without-keyd` skips keyd setup without disabling an existing service. See `docs/decisions/0007-learn-omarchy-defaults.md`.
+- Do not run `chezmoi apply` from `groundwork-mac` on an Omarchy machine. See `docs/decisions/0001-do-not-apply-groundwork-on-omarchy.md`.
+- `./install.sh` stows only `packages/hypr`, installs Herdr/Tailscale/keyd, enables the Tailscale and keyd daemons, and reconciles the newest official T3 Code Nightly CLI on each run, including existing stable installations. It backs up a different existing keyd config and reloads the mapping on every default install. It does not stow `core/`, and it does not write `/usr/share/omarchy`. Tailnet sign-in stays interactive and local. Shared Tailscale policy lives in `groundwork-core/docs/tailscale.md`; this repo owns only the Omarchy service and enrollment steps.
+- The reference M1 Mac mini's chosen migration track is the newest upstream Omarchy Mac Installer prerelease and signed edge catalog. The current catalog enables `apple,j274` and requires installer 2.2.0; see `README.md` and decision `docs/decisions/0002-stay-on-stable-channel.md`. This is an intentional bleeding-edge reinstall. This repo only applies user settings and never installs the OS. Preserve the actual installed version in machine/status notes until migration is completed.
+- Upstream bugs stay in `omacom/omarchy-mac`. Link to them. Do not refile them here.
+- Config that is stowed must work on any Apple Silicon Mac: Mac mini, MacBook Air, and MacBook Pro, M1 and later. `./install.sh` refuses a machine that is not aarch64. Machine-specific facts go in `docs/machines/`.
+- Never commit private keys, account emails, employer or org remotes, Wi-Fi names, or Tailscale addresses. Public SSH keys do not belong here either. Put account-specific Git and SSH config on the machine, outside this repo. Do not publish while an old commit still contains any of that.
+- `packages.txt` is optional Arch packages. Do not add Linuxbrew.
+- Run `bash -n install.sh scripts/migrate-from-groundwork.sh` and `python3 -B -m unittest discover -s tests -v` before handing off installer changes. Fixture success is not live desktop/input or cross-machine acceptance. Never mark machine status as installed or authenticated from package presence alone.
+
+## Layout
+
+| Path | Role |
+|---|---|
+| `core/` | Optional read-only reference submodule. Curriculum stays in `groundwork` for now. Not applied to the machine. |
+| `packages/hypr/` | Stow package. Personal Hyprland overrides only. |
+| `keyd/default.conf` | Default Caps Lock tap = Escape, hold = Control. Skip setup with `./install.sh --without-keyd`. |
+| `docs/decisions/` | One decision per file. Update the decision instead of appending a journal. |
+| `docs/status.md` | Replace this when the reference machine's state changes. |
+| `docs/machines/` | One file per computer. |

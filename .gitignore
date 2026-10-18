@@ -1,0 +1,10 @@
+**/*.local
+.config/git/config.local
+
+# Account material stays on the machine.
+**/*.pub
+**/id_ed25519*
+**/id_rsa*
+**/*.pem
+packages/ssh/
+packages/gitconfig/
