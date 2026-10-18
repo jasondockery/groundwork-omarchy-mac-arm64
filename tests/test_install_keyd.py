@@ -4,11 +4,29 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
 
 REPO = Path(__file__).resolve().parents[1]
+# Linux CI provides these as GNU tools under /usr/bin. A macOS proof uses
+# Homebrew coreutils when that path is absent, because the installer passes
+# GNU flags such as cp --backup.
+GNU_BIN = '/opt/homebrew/opt/coreutils/libexec/gnubin'
+
+
+def host_tool(name):
+    for directory in ('/usr/bin', GNU_BIN, '/bin'):
+        candidate = os.path.join(directory, name)
+        if os.path.exists(candidate):
+            return candidate
+    found = shutil.which(name)
+    if not found:
+        raise AssertionError('missing tool: ' + name)
+    return found
+
+
 STUB = '''#!/usr/bin/env python3
 import json, os, pathlib, subprocess, sys
 name = pathlib.Path(sys.argv[0]).name
@@ -19,6 +37,10 @@ with (root / 'calls.jsonl').open('a') as log:
 if name == 'uname':
     print(os.environ.get('FIXTURE_ARCH', 'aarch64'))
 elif name == 'sudo':
+    if args[:2] == ['-n', 'true']:
+        sys.exit(0 if os.environ.get('FIXTURE_SUDO_CACHED', '1') == '1' else 1)
+    if args == ['-v']:
+        sys.exit(int(os.environ.get('FIXTURE_SUDO_V_STATUS', '0')))
     if args[0] == 'keyd':
         sys.exit(int(os.environ.get('FIXTURE_RELOAD_STATUS', '0')))
     if args[0] == 'systemctl':
@@ -30,7 +52,15 @@ elif name == 'sudo':
             sys.exit(1)
     for prefix in ('/etc/keyd', '/usr/share/chromium/extensions'):
         args = [str(root / prefix.lstrip('/')) + arg[len(prefix):] if arg == prefix or arg.startswith(prefix + '/') else arg for arg in args]
-    sys.exit(subprocess.call(['/usr/bin/' + args[0], *args[1:]]))
+    host_binary = None
+    for directory in ('/usr/bin', '/opt/homebrew/opt/coreutils/libexec/gnubin', '/bin'):
+        candidate = directory + '/' + args[0]
+        if os.path.exists(candidate):
+            host_binary = candidate
+            break
+    if host_binary is None:
+        raise SystemExit('missing host tool: ' + args[0])
+    sys.exit(subprocess.call([host_binary, *args[1:]]))
 elif name == 'stow':
     source = pathlib.Path(args[args.index('--dir') + 1]) / 'hypr'
     target = pathlib.Path(args[args.index('--target') + 1])
@@ -76,14 +106,19 @@ class InstallKeydTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='groundwork-install-')
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        # Resolve macOS /var -> /private/var so the vault walk does not treat
+        # that directory symlink as part of the fixture path. Linux /tmp is
+        # already a real directory, so this stays the same path there.
+        self.root = Path(self.temp.name).resolve()
         self.bin = self.root / 'bin'
         self.bin.mkdir()
         # A private PATH keeps installed host tools (notably Herdr) from making
         # a missing-package fixture pass accidentally.
-        for name in ('bash', 'sh', 'python3', 'env', 'timeout', 'mktemp', 'dirname',
-                     'rm', 'mkdir', 'cp', 'chmod', 'mv', 'find', 'readlink'):
+        for name in ('bash', 'sh', 'python3', 'env'):
             (self.bin / name).symlink_to(shutil.which(name))
+        for name in ('timeout', 'mktemp', 'dirname', 'rm', 'mkdir', 'cp', 'chmod',
+                     'mv', 'find', 'readlink', 'sleep'):
+            (self.bin / name).symlink_to(host_tool(name))
         stub = self.bin / 'stub'
         stub.write_text(STUB)
         stub.chmod(0o755)
@@ -108,6 +143,47 @@ class InstallKeydTests(unittest.TestCase):
     def calls(self):
         log = self.root / 'calls.jsonl'
         return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+    def run_with_controlling_terminal(self, *args):
+        # pty.fork gives the install a controlling terminal, which is what
+        # /dev/tty requires. A captured subprocess has no terminal to answer.
+        helper = r"""
+import os, pty, select, sys, time
+command = sys.argv[1:]
+pid, master = pty.fork()
+if pid == 0:
+    os.execvpe(command[0], command, os.environ)
+deadline = time.monotonic() + 9
+chunks = []
+status = None
+while True:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        try:
+            os.kill(pid, 15)
+        except ProcessLookupError:
+            pass
+        raise SystemExit(124)
+    ready, _, _ = select.select([master], [], [], min(0.2, remaining))
+    if ready:
+        try:
+            data = os.read(master, 65536)
+        except OSError:
+            data = b""
+        if data:
+            chunks.append(data)
+    waited, candidate = os.waitpid(pid, os.WNOHANG)
+    if waited == pid:
+        status = candidate
+        break
+sys.stdout.buffer.write(b"".join(chunks))
+if status is None or not os.WIFEXITED(status):
+    raise SystemExit(124)
+raise SystemExit(os.WEXITSTATUS(status))
+"""
+        return subprocess.run(
+            [sys.executable, "-c", helper, "bash", str(REPO / "install.sh"), *args],
+            env=self.env, capture_output=True, timeout=10)
 
     def seed_config(self):
         self.config.parent.mkdir(parents=True)
@@ -278,6 +354,26 @@ class InstallKeydTests(unittest.TestCase):
         self.run_install(success=False)
         self.assertNotIn(['hyprctl', 'configerrors'], self.calls())
         self.assertNotIn(['sudo', 'keyd', 'reload'], self.calls())
+
+    def test_no_terminal_stops_before_any_install(self):
+        self.env['FIXTURE_SUDO_CACHED'] = '0'
+        result = subprocess.run(
+            ['bash', str(REPO / 'install.sh')],
+            env=self.env, capture_output=True, text=True, timeout=10,
+            start_new_session=True)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('no terminal is available', result.stderr)
+        self.assertFalse(any(call[:3] == ['omarchy', 'pkg', 'add'] for call in self.calls()))
+
+    def test_terminal_asks_once_before_privileged_steps(self):
+        self.env['FIXTURE_SUDO_CACHED'] = '0'
+        result = self.run_with_controlling_terminal()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertLess(
+            calls.index(['sudo', '-v']),
+            calls.index(['sudo', 'systemctl', 'enable', '--now', 'tailscaled']))
+        self.assertIn(['omarchy', 'pkg', 'add', 'herdr'], calls)
 
     def test_installer_download_failure_stops_before_home_changes(self):
         self.env['FIXTURE_CURL_STATUS'] = '1'
