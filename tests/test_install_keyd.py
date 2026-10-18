@@ -57,6 +57,14 @@ cp "$INSTALL_FIXTURE/nightly-t3" "$bin_dir/t3"
 chmod +x "$bin_dir/t3"
 exit "${FIXTURE_INSTALL_STATUS:-0}"
 """)
+elif name == 'flatpak':
+    if 'info' in args:
+        sys.exit(0 if (root / 'bitwarden-flatpak').exists() else 1)
+    if 'install' in args:
+        status = int(os.environ.get('FIXTURE_FLATPAK_STATUS', '0'))
+        if not status:
+            (root / 'bitwarden-flatpak').touch()
+        sys.exit(status)
 '''
 
 
@@ -75,7 +83,7 @@ class InstallKeydTests(unittest.TestCase):
         stub = self.bin / 'stub'
         stub.write_text(STUB)
         stub.chmod(0o755)
-        for name in ('uname', 'omarchy', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl'):
+        for name in ('uname', 'omarchy', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak'):
             (self.bin / name).symlink_to(stub)
         (self.root / 'home').mkdir()
         (self.root / 'nightly-t3').write_text('#!/bin/sh\nprintf "t3 0.0.0-nightly.20261018.1\\n"\n')
@@ -85,6 +93,7 @@ class InstallKeydTests(unittest.TestCase):
                         HOME=str(self.root / 'home'),
                         PATH=f'{self.root}/home/.local/bin:{self.bin}')
         self.env.pop('T3CODE_INSTALL_BIN_DIR', None)
+        self.env.pop('GROUNDWORK_OBSIDIAN_VAULT', None)
 
     def run_install(self, *args, success=True):
         result = subprocess.run(['bash', str(REPO / 'install.sh'), *args],
@@ -107,6 +116,11 @@ class InstallKeydTests(unittest.TestCase):
         calls = self.calls()
         self.assertIn(['omarchy', 'pkg', 'add', 'herdr'], calls)
         self.assertIn(['omarchy', 'pkg', 'add', 'tailscale'], calls)
+        self.assertIn(['omarchy', 'pkg', 'add', 'obsidian'], calls)
+        self.assertIn(['omarchy', 'pkg', 'add', 'bitwarden-cli'], calls)
+        self.assertTrue((self.root / 'bitwarden-flatpak').exists())
+        settings = self.root / 'home/Documents/Obsidian/my_obsidian_vault/.obsidian/app.json'
+        self.assertEqual(json.loads(settings.read_text()), {'vimMode': True})
         self.assertIn(['sudo', 'systemctl', 'enable', '--now', 'tailscaled'], calls)
         package = calls.index(['omarchy', 'pkg', 'add', 'keyd'])
         enable = calls.index(['sudo', 'systemctl', 'enable', '--now', 'keyd'])
@@ -121,6 +135,48 @@ class InstallKeydTests(unittest.TestCase):
         self.run_install()
         self.assertFalse(self.config.with_name('default.conf.~2~').exists())
         self.assertEqual(self.calls().count(['sudo', 'keyd', 'reload']), 2)
+
+    def test_existing_native_bitwarden_avoids_flatpak(self):
+        (self.bin / 'bitwarden').symlink_to(self.bin / 'stub')
+        self.run_install()
+        self.assertFalse(any(call[0] == 'flatpak' for call in self.calls()))
+        self.assertNotIn(['omarchy', 'pkg', 'add', 'flatpak'], self.calls())
+
+    def test_existing_flatpak_is_reused_without_install(self):
+        (self.root / 'bitwarden-flatpak').touch()
+        self.run_install()
+        self.assertFalse(any(call[0] == 'flatpak' and 'install' in call for call in self.calls()))
+
+    def test_failed_bitwarden_install_stops_before_configuration(self):
+        self.env['FIXTURE_FLATPAK_STATUS'] = '1'
+        result = self.run_install(success=False)
+        self.assertNotIn('are installed.', result.stdout)
+        self.assertFalse(any(call[0] in ('stow', 'hyprctl') for call in self.calls()))
+        self.assertFalse(self.config.exists())
+
+    def test_existing_obsidian_settings_and_custom_path_are_preserved(self):
+        vault = self.root / 'home/Notes'
+        settings = vault / '.obsidian/app.json'
+        settings.parent.mkdir(parents=True)
+        original = '{"vimMode": false, "attachmentFolderPath": "assets"}\n'
+        settings.write_text(original)
+        (vault / 'my-note.md').write_text('keep this note\n')
+        self.env['GROUNDWORK_OBSIDIAN_VAULT'] = str(vault)
+        self.run_install()
+        self.assertEqual(settings.read_text(), original)
+        self.assertEqual((vault / 'my-note.md').read_text(), 'keep this note\n')
+        self.assertFalse((self.root / 'home/Documents').exists())
+
+    def test_obsidian_symlink_destination_is_rejected(self):
+        vault = self.root / 'home/Notes'
+        outside = self.root / 'outside'
+        outside.mkdir()
+        vault.symlink_to(outside, target_is_directory=True)
+        self.env['GROUNDWORK_OBSIDIAN_VAULT'] = str(vault)
+        result = self.run_install(success=False)
+        self.assertIn('Refusing a symlink', result.stderr)
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertFalse(self.config.exists())
 
     def test_opt_out_preserves_existing_configuration_and_service(self):
         original = self.seed_config()
@@ -208,14 +264,16 @@ class InstallKeydTests(unittest.TestCase):
         self.assertFalse(any(call[0] in ('stow', 'hyprctl') for call in self.calls()))
 
     def test_package_helper_successful_skip_fails_before_configuration(self):
-        for package in ('herdr', 'tailscale'):
+        for package, executable in (('herdr', 'herdr'), ('tailscale', 'tailscale'),
+                                    ('obsidian', 'obsidian'), ('bitwarden-cli', 'bw'),
+                                    ('flatpak', 'flatpak')):
             with self.subTest(package=package):
-                (self.bin / package).unlink()
+                (self.bin / executable).unlink()
                 result = self.run_install(success=False)
                 self.assertIn(f'{package} is still unavailable', result.stderr)
                 self.assertNotIn('are installed.', result.stdout)
                 self.assertFalse(any(call[0] in ('curl', 'stow', 'hyprctl') for call in self.calls()))
-                (self.bin / package).symlink_to(self.bin / 'stub')
+                (self.bin / executable).symlink_to(self.bin / 'stub')
 
     def test_stable_t3_shadowing_is_reported_without_removing_it(self):
         self.env['PATH'] = f'{self.bin}:{self.root}/home/.local/bin'

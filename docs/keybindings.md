@@ -12,6 +12,15 @@ Omarchy owns the live keymap on this machine. This repo leaves it in place. Prac
 | `Super+Ctrl+K` | Show Herdr bindings |
 | `Super+Alt+Return` | Open tmux |
 | `Super+Ctrl+Return` | Open Herdr |
+| `Super+Arrow` | Focus the tiled window in that direction |
+| `Super+Shift+Arrow` | Swap the current tile in that direction |
+| `Alt+Tab` / `Alt+Shift+Tab` | Next/previous window on this workspace |
+| `Super+Tab` / `Super+Shift+Tab` | Next/previous workspace |
+| `Super+1` through `Super+9` | Select workspace |
+| `Super+Shift+1` through `Super+Shift+9` | Move the current window to that workspace |
+| `Super+Shift+O` | Open Obsidian |
+
+Stock directional desktop navigation uses arrows. To cycle without reaching for them, use `Alt+Tab` for windows or `Super+Tab` for workspaces. `Super+H/J/K/L` is not a stock directional keymap: `Super+K` already opens help and `Super+L` cycles layouts. This layer preserves those bindings. On Apple keyboards, `Super` is Command and `Alt` is Option.
 
 ## tmux and Herdr
 

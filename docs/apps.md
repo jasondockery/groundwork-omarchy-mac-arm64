@@ -1,0 +1,66 @@
+# Desktop apps and personal notes
+
+`./install.sh` ensures Obsidian, the Bitwarden CLI (`bw`), and the Bitwarden desktop app are available alongside T3 Code Nightly, Herdr, and Tailscale. Omarchy continues to own desktop bindings and application updates. Account sign-in, browser extensions, and sync enrollment stay local to each user.
+
+## Bitwarden
+
+Keep your existing Bitwarden account. No export or password-manager migration is needed. The [Omarchy manual](https://github.com/omacom/omarchy/blob/quattro/manual/24-commercial-apps-services.md#bitwarden) includes Bitwarden as a supported service. The current Apple Silicon feed has `bitwarden-cli` but lacks the native desktop package, so this layer uses the [Flathub desktop app](https://flathub.org/apps/com.bitwarden.desktop), which lists aarch64 support. An existing native `bitwarden` executable is reused instead. Package availability was checked on 2026-10-18; reconsider the fallback when the upstream ARM feed gains a desktop package.
+
+Launch **Bitwarden** from `Super+Space`, or run `flatpak run com.bitwarden.desktop` for the Flatpak installation. Sign in to the right region/server, finish MFA, and choose your vault timeout and lock behavior. Install the official [Bitwarden browser extension](https://bitwarden.com/download/#downloads-web-browser) in each browser profile you use, sign in, and test autofill on one familiar site. Keep the extension's own unlock flow; desktop biometric integration is not assumed for this sandboxed build. The CLI is optional for daily use; authenticate it only when needed and never save its session token in the repo or shell startup files.
+
+Arch packages update through `omarchy update`. User Flatpaks have a separate update step:
+
+```bash
+flatpak --user update
+```
+
+Rerunning this layer reuses an installed desktop app. If its installation fails, resolve that error and rerun; the installer stops before changing input settings. If its launcher is missing immediately after installing Flatpak for the first time, log out and back in to refresh desktop application discovery.
+
+To remove the layer-installed Flatpak, use `flatpak --user uninstall com.bitwarden.desktop`. Keep its local data unless you deliberately choose to remove it after checking account recovery. The shared Flathub remote and Flatpak runtime may serve other apps; leave those in place. Native apps and browser extensions are removed through their own package/browser controls.
+
+## Obsidian and the Markdown folder
+
+Obsidian is already in [Omarchy Mac's base packages](https://github.com/omacom/omarchy-mac/blob/quattro/install/omarchy-base.packages). This layer ensures its executable is available. Use stock **Super+Shift+O** to open it, then **Open folder as vault** and select:
+
+```text
+~/Documents/Obsidian/my_obsidian_vault
+```
+
+This keeps the former Groundwork vault name and Vim-mode preference, using a local folder accessible to Obsidian, Neovim, and agent tools on Linux. The helper seeds `.obsidian/app.json` only when absent; existing app settings and notes win. To use another local folder, close Obsidian and select it explicitly when running setup:
+
+```bash
+GROUNDWORK_OBSIDIAN_VAULT="$HOME/Documents/Obsidian/Notes" ./install.sh
+```
+
+The helper refuses symlinks in the destination path; pass the actual folder path instead. It does not register or switch vaults in Obsidian's global database. Select the folder in-app. For theme integration, select the **Omarchy** theme in Obsidian's Appearance settings as described in the [Omarchy guide](https://github.com/omacom/omarchy/blob/quattro/manual/22-guis.md#obsidian).
+
+Groundwork's former iCloud-only path is still appropriate for Apple-only use, but iCloud Drive has no native Linux client. Existing Mac notes stay where they are until you deliberately migrate them. Do not point two different sync tools at the same vault.
+
+### Plugins from the previous setup
+
+The [existing Groundwork plugin list](https://github.com/jasondockery/groundwork-mac/blob/v2.0.0/home/dot_local/share/groundwork/obsidian-plugins.txt) remains the reference for your previous setup. This layer carries over Vim mode automatically and leaves community plugin installation to Obsidian's **Settings → Community plugins → Browse**. Start with the plugins your notes use: Dataview, Templater, Tasks, Calendar/Periodic Notes, Linter, Omnisearch, and Advanced Tables. Add Excalidraw or Kanban for existing drawings/boards. The linked list includes the other former choices if you need them.
+
+This is a deliberate smaller starting point than automatically enabling the entire old plugin set. Community plugins execute with access to the vault. Smart Connections, Whisper, and other AI integrations remain optional; configure their providers and data access locally. Plugin credentials and `data.json` files do not belong in public Git history. Obsidian Git is optional version history, not the default mobile sync engine.
+
+### Free sync across operating systems
+
+For a vault shared with iPhone/iPad as well as Linux, macOS, Windows, or Android, use the free/basic [Remotely Save](https://github.com/remotely-save/remotely-save) community plugin with a supported personal storage account. Its [free tier](https://remotelysave.com/) supports **OneDrive for personal (App Folder)**, Dropbox, and WebDAV. Storage quotas still apply; Google Drive and OneDrive full-drive access are not the same free connector. This is a community sync method; [Obsidian Sync](https://obsidian.md/sync) is the paid first-party alternative.
+
+1. Close Obsidian on every device. Make a separate backup of the complete original vault, including attachments and hidden settings. Keep it until all devices are verified. Sync is not a backup.
+2. On one desktop, copy the existing notes into the chosen local vault outside iCloud or another sync root. Work from this copy; keep the old vault as recovery. Open it in Obsidian and check a few notes, links, and attachments.
+3. Install **Remotely Save** through Obsidian. Choose **OneDrive for personal (App Folder)** for the baseline free path, authorize your own personal account, and set an end-to-end encryption password before the first upload. Save that password in Bitwarden; losing it prevents recovery of the encrypted remote. Do not sync an unencrypted copy first and then assume encryption removes old provider versions.
+4. Leave hidden configuration/plugin syncing disabled initially. Sync the notes and attachments to completion. Exclude `.git` and device-specific workspace files if you later broaden the paths. Store sync credentials only in the local plugin settings; never commit or paste them into this repo.
+5. On each other device, create an empty local vault with the same name, install the plugin, select the same service/account and encryption password, and download before editing. On iOS, use **On My iPhone/iPad**, rather than an iCloud-backed vault, for this setup.
+6. Verify a disposable note, rename, and attachment in both directions. Sync before and after editing, especially when switching devices; avoid concurrent edits to the same note. On iOS, keep Obsidian open until sync completes—continuous background sync is not promised. Check conflicts instead of automatically discarding one copy.
+
+If something looks wrong, stop sync on all devices and compare with the backup before propagating more edits or deletions. Keep the original iCloud copy until you have accepted the new setup. Disabling the plugin stops this sync path; remote data and provider authorization are managed separately in the storage account. Never run this alongside iCloud, Syncthing, or Obsidian Sync on the same vault.
+
+For desktop-only file trees, Syncthing is another free option. Its iOS path needs additional third-party software and platform compromises, so it is not this guide's default. For occasional transfers, Omarchy already includes **LocalSend**; it does not provide continuous vault sync. **Omawrite** is also included for simple Markdown editing without a vault. These are useful starting apps without adding another service.
+
+## iMessage and session restoration
+
+There is no native Apple iMessage client in this setup. [Blip (`nixfred/blip`)](https://github.com/nixfred/blip) is an Omarchy community plugin that talks over SSH to a separate, awake Mac running macOS and Messages. The M1 booted into Omarchy cannot also be that macOS gateway. Its setup requires local macOS permission grants and a logged-in desktop. Its source states that SIP can remain enabled; this has not been validated on the reference machine.
+
+The official [marketplace registry](https://github.com/omacom/omarchy-plugin-marketplace/blob/b75ef157243702896ce1de658ec45695ebdfe676/registry.json) and catalog had no `nixfred.blip` entry when checked on 2026-10-18. Under the choice to include an iMessage app only when it is in that marketplace, this layer does not install it. An unrelated selection-actions plugin is also named Blip; check the repository identity. Reassess marketplace status and Apple Silicon support before adopting the messaging plugin.
+
+Desktop session restoration remains at Omarchy's native defaults. Community restoration plugins are not included. Save documents before rebooting; running terminal/agent processes do not survive a reboot.

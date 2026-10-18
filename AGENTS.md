@@ -21,6 +21,7 @@ Shared engineering guidance belongs to [Compass](https://github.com/jasondockery
 - Config that is stowed must work on any Apple Silicon Mac: Mac mini, MacBook Air, and MacBook Pro, M1 and later. `./install.sh` refuses a machine that is not aarch64. Machine-specific facts go in `docs/machines/`.
 - Never commit private keys, account emails, employer or org remotes, Wi-Fi names, or Tailscale addresses. Public SSH keys do not belong here either. Put account-specific Git and SSH config on the machine, outside this repo. Do not publish while an old commit still contains any of that.
 - `packages.txt` is optional Arch packages. Do not add Linuxbrew.
+- The default also ensures Obsidian and Bitwarden CLI (`bw`), reuses a native Bitwarden desktop when present, and otherwise installs its user-scoped aarch64 Flathub app. `docs/apps.md` owns sign-in, Flatpak updates/removal, and cross-platform notes guidance. `scripts/seed-obsidian.py` seeds Vim mode only when app settings are absent; never automatically move notes, replace existing settings, enable broad community plugins, or enroll a cloud account. `GROUNDWORK_OBSIDIAN_VAULT` selects an actual local folder. iMessage and session-restoration plugins remain outside the defaults.
 - Run `bash -n install.sh scripts/migrate-from-groundwork.sh` and `python3 -B -m unittest discover -s tests -v` before handing off installer changes. Fixture success is not live desktop/input or cross-machine acceptance. Never mark machine status as installed or authenticated from package presence alone.
 
 ## Layout

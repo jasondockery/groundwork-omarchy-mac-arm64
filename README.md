@@ -24,7 +24,7 @@ less install.sh
 
 For an existing checkout, use `git status` and review local edits before updating it; do not clone over it or reset it. Public HTTPS clones need no GitHub login. For a private copy, use an authorized account or your chosen SSH host alias/key instead. The installer does not configure GitHub credentials. A recursive submodule clone is unnecessary for setup.
 
-The default installs T3 Code Nightly, Herdr, Tailscale, and keyd, starts `tailscaled` and keyd, applies the trackpad preferences, and makes Caps Lock Escape on tap and Control while held. Different existing input/keyd files are backed up. `--without-keyd` skips keyd setup. Omarchy continues to own the desktop shortcuts, tmux, shell, editor, and terminal configuration. T3 Code and agent providers still need your local authentication.
+The default installs T3 Code Nightly, Herdr, Tailscale, keyd, Obsidian, and Bitwarden (desktop and CLI), starts `tailscaled` and keyd, applies the trackpad preferences, and makes Caps Lock Escape on tap and Control while held. Different existing input/keyd files are backed up. `--without-keyd` skips keyd setup. Omarchy continues to own the desktop shortcuts, tmux, shell, editor, and terminal configuration. T3 Code and agent providers still need your local authentication. Follow the [desktop apps guide](docs/apps.md) for Bitwarden sign-in, the local Obsidian vault, previous plugin choices, and free cross-platform sync. Existing notes are never moved automatically.
 
 Finish [Tailscale setup](docs/remote-access.md), including the tailnet policy review, interactive sign-in, and device approval. The local commands are:
 
@@ -44,6 +44,8 @@ Only enable SSH after reviewing that guide and your effective tailnet policy. No
 - `systemctl is-active tailscaled keyd` reports both services active for the default setup. `tailscale status` shows the device connected after sign-in and approval. Use the separate keyd recovery instructions below if needed.
 - `Super+Space` opens the Omarchy menu; `Super+K` shows desktop bindings. Launch tmux with `Super+Alt+Return` and Herdr with `Super+Ctrl+Return`. In either, use `Ctrl+Space`, then `?` for live help, and practice the [same pane keys](docs/keybindings.md).
 - Check that `t3 --version` identifies a Nightly build, then run `t3`, open its local interface, authenticate a provider already installed on this machine, and complete one small task in a disposable project. Installing the UI does not authenticate Codex or Claude.
+- Open Obsidian with `Super+Shift+O` and select the local vault printed by setup. A new vault has Vim mode enabled; existing settings are preserved. Verify your notes and the chosen sync path using the [apps guide](docs/apps.md).
+- Launch Bitwarden from the app menu, finish sign-in/MFA, and test the official browser extension in each browser profile. `bw --version` checks CLI availability; it does not prove vault sign-in. User Flatpak updates use `flatpak --user update` separately from Omarchy updates.
 - From another approved computer in the same tailnet, run `ssh LOCAL_USER@MACHINE` using this machine's local login and MagicDNS name. Confirm the hostname and attach to tmux or Herdr. Test the reverse direction too using the destination's supported SSH setup.
 
 If a step fails, keep its error and fix it before treating the setup as accepted. The automated fixtures test installer behavior; they cannot prove your physical input devices, desktop, accounts, or a second machine's connection.
@@ -140,7 +142,7 @@ omarchy pkg add stow
 ./install.sh
 ```
 
-`./install.sh` links the trackpad override, reloads and checks a detected Hyprland session, installs Herdr, Tailscale, and keyd, enables the Tailscale and keyd services, and installs T3 Code Nightly's official ARM64 CLI. Caps Lock sends Escape when tapped and Control while held by default, matching the Karabiner habit on macOS. Reboot or log out if it asks, then complete the first-run acceptance above. Use `--without-keyd` to skip keyboard remapping.
+`./install.sh` links the trackpad override, reloads and checks a detected Hyprland session, installs Herdr, Tailscale, keyd, Obsidian, and Bitwarden, enables the Tailscale and keyd services, and installs T3 Code Nightly's official ARM64 CLI. It seeds Vim mode only for an Obsidian vault without app settings. Caps Lock sends Escape when tapped and Control while held by default, matching the Karabiner habit on macOS. Reboot or log out if it asks, then complete the first-run acceptance above. Use `--without-keyd` to skip keyboard remapping.
 
 Still in an Omarchy terminal, complete the [private remote-access setup](docs/remote-access.md). This repo stores neither tailnet credentials nor your GitHub SSH key.
 
@@ -208,7 +210,7 @@ omarchy pkg add stow
 ./install.sh
 ```
 
-That links the trackpad override, installs Herdr, Tailscale, and keyd, enables `tailscaled` and `keyd`, and installs T3 Code's ARM64 CLI. If `~/.config/hypr/input.lua` already exists, the script moves it to `input.lua.bak-omarchy-groundwork`, preserving numbered predecessors if necessary, and then links the copy from this repo. It does not configure Git/SSH accounts. Complete the [Tailscale setup](docs/remote-access.md) after install.
+That links the trackpad override, installs Herdr, Tailscale, keyd, Obsidian, and Bitwarden, enables `tailscaled` and `keyd`, and installs T3 Code's ARM64 CLI. If `~/.config/hypr/input.lua` already exists, the script moves it to `input.lua.bak-omarchy-groundwork`, preserving numbered predecessors if necessary, and then links the copy from this repo. It does not configure Git/SSH accounts. Complete the [Tailscale setup](docs/remote-access.md) and [desktop apps setup](docs/apps.md) after install.
 
 ### Caps Lock: Escape on tap, Control while held
 

@@ -50,8 +50,8 @@ if ! command -v stow >/dev/null; then
 fi
 
 # Fail before installing packages or moving files when the checkout is incomplete.
-[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" ]] || {
-  echo "The checkout is incomplete: keyd/default.conf or the Hyprland input override is missing." >&2
+[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" ]] || {
+  echo "The checkout is incomplete: keyd config, Hyprland input override, or Obsidian helper is missing." >&2
   exit 1
 }
 
@@ -59,9 +59,9 @@ fi
 # Silicon Omarchy install. Authentication stays manual; no tailnet identity or
 # reusable auth key belongs in this repo.
 install_package() {
-  local package=$1
+  local package=$1 executable=${2:-$1}
   omarchy pkg add "$package"
-  if ! command -v "$package" >/dev/null; then
+  if ! command -v "$executable" >/dev/null; then
     echo "$package is still unavailable after omarchy pkg add. The helper may skip packages absent from the current feed." >&2
     echo "Update Omarchy and its package feed, resolve the package error, then rerun ./install.sh." >&2
     exit 1
@@ -70,6 +70,21 @@ install_package() {
 install_package herdr
 install_package tailscale
 sudo systemctl enable --now tailscaled
+
+# Omarchy owns Obsidian's package, theme, and launch shortcut. Bitwarden's
+# desktop package is absent from the current ARM feed; use its ARM64 Flathub
+# distribution unless a native desktop app is already available. Sign-in and
+# the browser extension remain user-owned, with no vault export in this repo.
+install_package obsidian
+install_package bitwarden-cli bw
+if ! command -v bitwarden >/dev/null; then
+  install_package flatpak
+  flatpak --user remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+  if ! flatpak --user info com.bitwarden.desktop >/dev/null 2>&1; then
+    flatpak --user install --noninteractive flathub com.bitwarden.desktop
+  fi
+  flatpak --user info com.bitwarden.desktop >/dev/null
+fi
 
 # Nightly is upstream's fast-moving train. Reconcile an existing stable CLI too;
 # executable presence is not evidence that the selected channel is installed.
@@ -98,6 +113,8 @@ if [[ $t3_version != *-nightly.* ]]; then
   printf 'Expected T3 Code Nightly, received: %s\n' "$t3_version" >&2
   exit 1
 fi
+
+python3 "$root/scripts/seed-obsidian.py" "${GROUNDWORK_OBSIDIAN_VAULT:-$HOME/Documents/Obsidian/my_obsidian_vault}"
 
 # Stow will not replace a real file. Move conflicting files aside so this
 # works on a fresh Omarchy install and on a machine that already has them.
@@ -148,7 +165,8 @@ if [[ $with_keyd -eq 1 ]]; then
 else
   echo "Skipped keyd setup; any existing keyd configuration and service were left alone."
 fi
-echo "Trackpad configuration, T3 Code, Herdr, and the Tailscale daemon are installed."
+echo "Trackpad configuration, T3 Code, Herdr, Tailscale, Obsidian, and Bitwarden are installed."
+echo "Open Obsidian with Super+Shift+O; finish vault, sync, and Bitwarden sign-in using docs/apps.md."
 echo "Remote access still requires your sign-in and tailnet policy; see docs/remote-access.md."
 echo "Complete tailnet sign-in with: sudo tailscale up --timeout=5m"
 echo "After reviewing the tailnet policy, enable private SSH with: sudo tailscale set --ssh"
