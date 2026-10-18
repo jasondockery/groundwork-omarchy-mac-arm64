@@ -50,8 +50,10 @@ if ! command -v stow >/dev/null; then
 fi
 
 # Fail before installing packages or moving files when the checkout is incomplete.
-[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" ]] || {
-  echo "The checkout is incomplete: keyd config, Hyprland input override, or Obsidian helper is missing." >&2
+bitwarden_extension=nngceckbapebfimnlniiiahkandclblb.json
+extension_source="$root/chromium/extensions/$bitwarden_extension"
+[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$extension_source" ]] || {
+  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, or Bitwarden extension manifest is missing." >&2
   exit 1
 }
 
@@ -73,8 +75,8 @@ sudo systemctl enable --now tailscaled
 
 # Omarchy owns Obsidian's package, theme, and launch shortcut. Bitwarden's
 # desktop package is absent from the current ARM feed; use its ARM64 Flathub
-# distribution unless a native desktop app is already available. Sign-in and
-# the browser extension remain user-owned, with no vault export in this repo.
+# distribution unless a native desktop app is already available. Sign-in
+# remains user-owned, with no vault export in this repo.
 install_package obsidian
 install_package bitwarden-cli bw
 if ! command -v bitwarden >/dev/null; then
@@ -84,6 +86,21 @@ if ! command -v bitwarden >/dev/null; then
     flatpak --user install --noninteractive flathub com.bitwarden.desktop
   fi
   flatpak --user info com.bitwarden.desktop >/dev/null
+fi
+
+# Use the same external-extension mechanism as Omarchy's 1Password service.
+# Chromium fetches and updates the official Web Store extension per profile;
+# no account state or browser preference database is written here.
+if command -v chromium >/dev/null; then
+  extension_dir=/usr/share/chromium/extensions
+  sudo mkdir -p "$extension_dir"
+  if ! sudo cmp -s "$extension_source" "$extension_dir/$bitwarden_extension"; then
+    sudo cp --backup=numbered --remove-destination "$extension_source" "$extension_dir/$bitwarden_extension"
+  fi
+  sudo chmod 644 "$extension_dir/$bitwarden_extension"
+  echo "Bitwarden's official extension is registered. Restart Chromium, approve it if prompted, and sign in in each profile."
+else
+  echo "Chromium is unavailable; skipped its Bitwarden extension. Rerun setup after installing Chromium."
 fi
 
 # Nightly is upstream's fast-moving train. Reconcile an existing stable CLI too;

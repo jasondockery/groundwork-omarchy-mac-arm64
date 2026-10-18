@@ -1,12 +1,20 @@
 # Desktop apps and personal notes
 
-`./install.sh` ensures Obsidian, the Bitwarden CLI (`bw`), and the Bitwarden desktop app are available alongside T3 Code Nightly, Herdr, and Tailscale. Omarchy continues to own desktop bindings and application updates. Account sign-in, browser extensions, and sync enrollment stay local to each user.
+`./install.sh` ensures Obsidian, the Bitwarden CLI (`bw`), and the Bitwarden desktop app are available alongside T3 Code Nightly, Herdr, and Tailscale. It registers the official Bitwarden extension for installed Chromium. Omarchy continues to own desktop bindings and application updates. Account sign-in, extension approval, and sync enrollment stay local to each user.
 
 ## Bitwarden
 
 Keep your existing Bitwarden account. No export or password-manager migration is needed. The [Omarchy manual](https://github.com/omacom/omarchy/blob/quattro/manual/24-commercial-apps-services.md#bitwarden) includes Bitwarden as a supported service. The current Apple Silicon feed has `bitwarden-cli` but lacks the native desktop package, so this layer uses the [Flathub desktop app](https://flathub.org/apps/com.bitwarden.desktop), which lists aarch64 support. An existing native `bitwarden` executable is reused instead. Package availability was checked on 2026-10-18; reconsider the fallback when the upstream ARM feed gains a desktop package.
 
-Launch **Bitwarden** from `Super+Space`, or run `flatpak run com.bitwarden.desktop` for the Flatpak installation. Sign in to the right region/server, finish MFA, and choose your vault timeout and lock behavior. Install the official [Bitwarden browser extension](https://bitwarden.com/download/#downloads-web-browser) in each browser profile you use, sign in, and test autofill on one familiar site. Keep the extension's own unlock flow; desktop biometric integration is not assumed for this sandboxed build. The CLI is optional for daily use; authenticate it only when needed and never save its session token in the repo or shell startup files.
+Launch **Bitwarden** from `Super+Space`, or run `flatpak run com.bitwarden.desktop` for the Flatpak installation. Sign in to the right region/server, finish MFA, and choose your vault timeout and lock behavior. Keep the extension's own unlock flow; desktop biometric integration is not assumed for this sandboxed build. The CLI is optional for daily use; authenticate it only when needed and never save its session token in the repo or shell startup files.
+
+### Chromium extension
+
+Setup registers the [official Bitwarden extension](https://chromewebstore.google.com/detail/bitwarden-password-manage/nngceckbapebfimnlniiiahkandclblb) using `/usr/share/chromium/extensions/nngceckbapebfimnlniiiahkandclblb.json`, following Omarchy's existing external-extension mechanism. Its ID and Google Web Store update URL match [Bitwarden's deployment guide](https://bitwarden.com/help/browserext-deploy/). Chromium downloads and updates the extension; the installer does not edit browser profile databases or sign in to accounts.
+
+Restart Chromium after setup. In each profile, approve/enable Bitwarden if prompted, pin its toolbar icon if useful, sign in, and test autofill on one familiar site. Existing profiles, accounts, and other extensions are preserved. If you previously removed or disabled it, Chromium may remember that decision; enable it at `chrome://extensions` or install it from the official store link. No forced-install policy is imposed. For other browsers, install their official Bitwarden extension separately. If Chromium is absent, setup reports the skip; rerun after installing it through Omarchy.
+
+A different existing manifest for this extension is backed up with a numbered suffix; unchanged reruns do not create extra backups. To stop offering it in Chromium, remove that exact manifest with `sudo rm /usr/share/chromium/extensions/nngceckbapebfimnlniiiahkandclblb.json`, then manage any already-installed copy through `chrome://extensions`. Restore the numbered backup instead if you need the former registration. Sign-out, extension removal, and vault data deletion are separate choices.
 
 Arch packages update through `omarchy update`. User Flatpaks have a separate update step:
 

@@ -23,9 +23,13 @@ elif name == 'sudo':
         sys.exit(int(os.environ.get('FIXTURE_RELOAD_STATUS', '0')))
     if args[0] == 'systemctl':
         sys.exit(0)
-    if args[0] not in ('mkdir', 'cmp', 'cp'):
+    if args[0] not in ('mkdir', 'cmp', 'cp', 'chmod'):
         raise SystemExit('Unexpected privileged operation: ' + repr(args))
-    args = [str(root / 'etc/keyd') + arg[len('/etc/keyd'):] if arg == '/etc/keyd' or arg.startswith('/etc/keyd/') else arg for arg in args]
+    if args[0] == 'cp' and '/usr/share/chromium/extensions/' in args[-1]:
+        if os.environ.get('FIXTURE_EXTENSION_WRITE_FAIL') == '1':
+            sys.exit(1)
+    for prefix in ('/etc/keyd', '/usr/share/chromium/extensions'):
+        args = [str(root / prefix.lstrip('/')) + arg[len(prefix):] if arg == prefix or arg.startswith(prefix + '/') else arg for arg in args]
     sys.exit(subprocess.call(['/usr/bin/' + args[0], *args[1:]]))
 elif name == 'stow':
     source = pathlib.Path(args[args.index('--dir') + 1]) / 'hypr'
@@ -83,7 +87,7 @@ class InstallKeydTests(unittest.TestCase):
         stub = self.bin / 'stub'
         stub.write_text(STUB)
         stub.chmod(0o755)
-        for name in ('uname', 'omarchy', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak'):
+        for name in ('uname', 'omarchy', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium'):
             (self.bin / name).symlink_to(stub)
         (self.root / 'home').mkdir()
         (self.root / 'nightly-t3').write_text('#!/bin/sh\nprintf "t3 0.0.0-nightly.20261018.1\\n"\n')
@@ -141,6 +145,37 @@ class InstallKeydTests(unittest.TestCase):
         self.run_install()
         self.assertFalse(any(call[0] == 'flatpak' for call in self.calls()))
         self.assertNotIn(['omarchy', 'pkg', 'add', 'flatpak'], self.calls())
+
+    def test_official_chromium_extension_and_other_manifests_are_preserved(self):
+        directory = self.root / 'usr/share/chromium/extensions'
+        directory.mkdir(parents=True)
+        other = directory / 'other.json'
+        other.write_text('{"keep": true}\n')
+        target = directory / 'nngceckbapebfimnlniiiahkandclblb.json'
+        original = '{"external_update_url": "https://old.example.invalid"}\n'
+        target.write_text(original)
+        self.run_install()
+        self.assertEqual(json.loads(target.read_text()), {
+            'external_update_url': 'https://clients2.google.com/service/update2/crx'})
+        self.assertEqual(target.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(target.with_name(target.name + '.~1~').read_text(), original)
+        self.assertEqual(other.read_text(), '{"keep": true}\n')
+        self.run_install()
+        self.assertFalse(target.with_name(target.name + '.~2~').exists())
+
+    def test_missing_chromium_skips_only_extension(self):
+        (self.bin / 'chromium').unlink()
+        result = self.run_install()
+        self.assertIn('skipped its Bitwarden extension', result.stdout)
+        self.assertFalse((self.root / 'usr/share/chromium').exists())
+        self.assertTrue(self.config.exists())
+
+    def test_extension_write_failure_stops_before_input_changes(self):
+        self.env['FIXTURE_EXTENSION_WRITE_FAIL'] = '1'
+        result = self.run_install(success=False)
+        self.assertNotIn('extension is registered', result.stdout)
+        self.assertFalse(self.config.exists())
+        self.assertFalse(any(call[0] in ('stow', 'hyprctl') for call in self.calls()))
 
     def test_existing_flatpak_is_reused_without_install(self):
         (self.root / 'bitwarden-flatpak').touch()
