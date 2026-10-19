@@ -43,7 +43,7 @@ elif name == 'sudo':
         sys.exit(int(os.environ.get('FIXTURE_SUDO_V_STATUS', '0')))
     if args[0] == 'keyd':
         sys.exit(int(os.environ.get('FIXTURE_RELOAD_STATUS', '0')))
-    if args[0] == 'systemctl':
+    if args[0] in ('systemctl', 'ufw'):
         sys.exit(0)
     if args[0] not in ('mkdir', 'install', 'cmp', 'cp', 'chmod'):
         raise SystemExit('Unexpected privileged operation: ' + repr(args))
@@ -120,6 +120,8 @@ elif name == 'flatpak':
         if not status:
             (root / 'bitwarden-flatpak').touch()
         sys.exit(status)
+elif name == 'systemctl':
+    sys.exit(int(os.environ.get('FIXTURE_USER_SYSTEMCTL_STATUS', '0')))
 '''
 
 
@@ -143,7 +145,7 @@ class InstallKeydTests(unittest.TestCase):
         stub = self.bin / 'stub'
         stub.write_text(STUB)
         stub.chmod(0o755)
-        for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise'):
+        for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw'):
             (self.bin / name).symlink_to(stub)
         (self.root / 'home').mkdir()
         (self.root / 'nightly-t3').write_text('#!/bin/sh\nprintf "t3 0.0.0-nightly.20261018.1\\n"\n')
@@ -228,6 +230,24 @@ raise SystemExit(os.WEXITSTATUS(status))
         reload = calls.index(['sudo', 'keyd', 'reload'])
         self.assertLess(package, enable)
         self.assertLess(enable, reload)
+        self.assertIn(['omarchy', 'pkg', 'add', 'wayvnc'], calls)
+        self.assertIn(['systemctl', '--user', 'enable', 'groundwork-screen-share.service'], calls)
+        self.assertIn(['sudo', 'ufw', 'allow', 'in', 'on', 'tailscale0', 'to', 'any', 'port', '5900', 'proto', 'tcp', 'comment', 'Groundwork screen sharing'], calls)
+
+    def test_screen_sharing_opt_out_preserves_existing_local_state(self):
+        directory = self.root / 'home/.config/groundwork/remote-desktop'
+        directory.mkdir(parents=True)
+        config = directory / 'wayvnc.conf'
+        config.write_text('user owned settings\n')
+        self.run_install('--without-screen-sharing')
+        self.assertEqual(config.read_text(), 'user owned settings\n')
+        self.assertFalse(any(call[0] == 'systemctl' for call in self.calls()))
+        self.assertNotIn(['omarchy', 'pkg', 'add', 'wayvnc'], self.calls())
+
+    def test_failed_screen_sharing_service_setup_stops_before_input_changes(self):
+        self.env['FIXTURE_USER_SYSTEMCTL_STATUS'] = '1'
+        self.run_install(success=False)
+        self.assertFalse(any(call[0] in ('stow', 'hyprctl') for call in self.calls()))
 
     def test_existing_config_backup_and_idempotent_rerun(self):
         original = self.seed_config()

@@ -27,7 +27,8 @@ shellcheck
 go
 bitwarden-cli
 
+# Desktop sharing is installed by default. See docs/remote-access.md.
+wayvnc
 # Remote desktop experiments. See docs/decisions/0004-remote-access.md.
 # Sunshine, the Moonlight server, is not in the aarch64 repos, so it is not listed.
-# wayvnc
 # moonlight-qt
