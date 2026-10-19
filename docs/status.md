@@ -12,7 +12,8 @@ Reference machine: Apple Mac mini (M1, 2020). Details are in `docs/machines/mac-
 | Wi-Fi drops while awake | Upstream [omarchy-mac#729](https://github.com/omacom/omarchy-mac/issues/729). No workaround applied. |
 | Trackpad | Personal override linked; Hyprland reload succeeded with no configuration errors. Bluetooth pairing works and was confirmed by the user. |
 | Caps Lock | keyd enabled and active; installed config matches the repo's tap-Escape/hold-Control default. Physical tap/hold acceptance remains to be checked by the user. |
-| Remote access | Tailscale installed; daemon enabled and active. Device is logged out; interactive enrollment and two-way SSH acceptance remain pending. Decision is `docs/decisions/0004-remote-access.md`. |
+| Remote access | Tailscale installed, enrolled and online; daemon enabled and active. Two-way SSH acceptance remains pending. Decision is `docs/decisions/0004-remote-access.md`. |
+| Screen sharing | WayVNC 0.10.2 installed; Groundwork user service enabled and active. Listener is restricted to the Tailscale address and `tailscale0` interface. Mac-client screen/control acceptance remains pending; a local firewall allow is also required. |
 | Apps | T3 Code Nightly, Cursor, Herdr, Obsidian, Bitwarden CLI and user Flatpak installed. Existing Obsidian settings preserved. Account sign-in, browser-extension approval/autofill, and note sync remain user acceptance. A new desktop session may be needed for the Flatpak launcher entry. |
 | Live setup findings | [Chromium registration directory permissions](https://github.com/jasondockery/groundwork-omarchy-mac-arm64/issues/4) and [missing provider behind a mise shim](https://github.com/jasondockery/groundwork-omarchy-mac-arm64/issues/5). Package/configuration checks do not prove authenticated app use. |
 
