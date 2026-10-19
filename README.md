@@ -251,3 +251,15 @@ Git identity, SSH keys, and work remotes stay on each machine. See `docs/decisio
 ## License
 
 [MIT](LICENSE), matching the Groundwork family.
+
+## Common developer setup and macOS containers
+
+The family uses one developer tool set across personal and managed machines, with independent identity and optional-app preferences. See the [shared setup guide](https://github.com/jasondockery/groundwork-core/blob/main/docs/developer-setup.md) for tool and platform ownership.
+
+For a macOS machine, Groundwork recommends Colima plus the Docker CLI. The single [Docker Desktop to Colima guide](https://github.com/jasondockery/groundwork-mac/blob/main/docs/docker-desktop-to-colima.md) covers migration scenarios, data transfer, verification, rollback, and Docker Desktop uninstallation after acceptance. This recommendation applies to macOS; this repository’s Linux, WSL, or Omarchy environment keeps its native container path.
+
+## Coding agents and desktop apps
+
+Setup preserves existing Codex, Claude Code, Grok Build, and OpenCode commands. A missing provider is installed through Omarchy’s declared mise tool, with a five-minute deadline; setup verifies that the command becomes available and stops on failure. Omarchy continues to own provider versions, updates, shortcuts, and default-agent selection. Run `omarchy update` through its supported workflow before setup to get current upstream declarations. Cursor uses the native `cursor-bin` package and still requires local sign-in. Package/feed availability on aarch64 is verified by the installer; an absent artifact is a failure with recovery guidance.
+
+ChatGPT and Claude have no official native Linux desktop app in this setup. Use their web apps on Omarchy; this repo does not install unofficial replacements. Tailscale remains a required native package and service, with interactive tailnet enrollment. Authentication and live desktop acceptance are separate from package fixtures.
