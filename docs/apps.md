@@ -10,6 +10,8 @@ Launch **Bitwarden** from `Super+Space`, or run `flatpak run com.bitwarden.deskt
 
 ### Chromium extension
 
+Setup gives `/usr/share/chromium` and its `extensions` directory mode `0755`, and the manifest mode `0644`, so Chromium can read the registration even when setup runs with a private umask. Rerunning setup repairs restrictive directory permissions left by an earlier run.
+
 Setup registers the [official Bitwarden extension](https://chromewebstore.google.com/detail/bitwarden-password-manage/nngceckbapebfimnlniiiahkandclblb) using `/usr/share/chromium/extensions/nngceckbapebfimnlniiiahkandclblb.json`, following Omarchy's existing external-extension mechanism. Its ID and Google Web Store update URL match [Bitwarden's deployment guide](https://bitwarden.com/help/browserext-deploy/). Chromium downloads and updates the extension; the installer does not edit browser profile databases or sign in to accounts.
 
 Restart Chromium after setup. In each profile, approve/enable Bitwarden if prompted, pin its toolbar icon if useful, sign in, and test autofill on one familiar site. Existing profiles, accounts, and other extensions are preserved. If you previously removed or disabled it, Chromium may remember that decision; enable it at `chrome://extensions` or install it from the official store link. No forced-install policy is imposed. For other browsers, install their official Bitwarden extension separately. If Chromium is absent, setup reports the skip; rerun after installing it through Omarchy.

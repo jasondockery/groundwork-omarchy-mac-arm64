@@ -45,12 +45,12 @@ elif name == 'sudo':
         sys.exit(int(os.environ.get('FIXTURE_RELOAD_STATUS', '0')))
     if args[0] == 'systemctl':
         sys.exit(0)
-    if args[0] not in ('mkdir', 'cmp', 'cp', 'chmod'):
+    if args[0] not in ('mkdir', 'install', 'cmp', 'cp', 'chmod'):
         raise SystemExit('Unexpected privileged operation: ' + repr(args))
     if args[0] == 'cp' and '/usr/share/chromium/extensions/' in args[-1]:
         if os.environ.get('FIXTURE_EXTENSION_WRITE_FAIL') == '1':
             sys.exit(1)
-    for prefix in ('/etc/keyd', '/usr/share/chromium/extensions'):
+    for prefix in ('/etc/keyd', '/usr/share/chromium'):
         args = [str(root / prefix.lstrip('/')) + arg[len(prefix):] if arg == prefix or arg.startswith(prefix + '/') else arg for arg in args]
     host_binary = None
     for directory in ('/usr/bin', '/opt/homebrew/opt/coreutils/libexec/gnubin', '/bin'):
@@ -61,10 +61,24 @@ elif name == 'sudo':
     if host_binary is None:
         raise SystemExit('missing host tool: ' + args[0])
     sys.exit(subprocess.call([host_binary, *args[1:]]))
+elif name == 'omarchy-mise-default-tools':
+    sys.exit(1 if os.environ.get('FIXTURE_MISE_OPTED_OUT') == '1' else 0)
 elif name == 'mise':
     if os.environ.get('FIXTURE_MISE_FAILURE') == '1':
         sys.exit(1)
     provider = args[-1]
+    if args[0] == 'which':
+        target = root / 'mise-installed' / provider
+        if target.is_file():
+            print(target)
+            sys.exit(0)
+        sys.exit(1)
+    if os.environ.get('FIXTURE_MISE_UNRESOLVED') == '1':
+        sys.exit(0)
+    installed = root / 'mise-installed' / provider
+    installed.parent.mkdir(exist_ok=True)
+    installed.write_text('#!/bin/sh\\nexit 0\\n')
+    installed.chmod(0o755)
     target = root / 'bin' / provider
     if not target.exists():
         target.symlink_to(root / 'bin' / 'stub')
@@ -129,7 +143,7 @@ class InstallKeydTests(unittest.TestCase):
         stub = self.bin / 'stub'
         stub.write_text(STUB)
         stub.chmod(0o755)
-        for name in ('uname', 'omarchy', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise'):
+        for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise'):
             (self.bin / name).symlink_to(stub)
         (self.root / 'home').mkdir()
         (self.root / 'nightly-t3').write_text('#!/bin/sh\nprintf "t3 0.0.0-nightly.20261018.1\\n"\n')
@@ -228,6 +242,21 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.run_install()
         self.assertFalse(any(call[0] == 'flatpak' for call in self.calls()))
         self.assertNotIn(['omarchy', 'pkg', 'add', 'flatpak'], self.calls())
+
+    def test_chromium_directories_are_readable_with_private_umask_and_on_rerun(self):
+        directory = self.root / 'usr/share/chromium/extensions'
+        for attempt in range(2):
+            if attempt:
+                directory.chmod(0o700)
+                directory.parent.chmod(0o700)
+            result = subprocess.run(
+                ['bash', '-c', 'umask 077; exec bash "$1"', 'fixture', str(REPO / 'install.sh')],
+                env=self.env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(directory.parent.stat().st_mode & 0o777, 0o755)
+            self.assertEqual(directory.stat().st_mode & 0o777, 0o755)
+            manifest = directory / 'nngceckbapebfimnlniiiahkandclblb.json'
+            self.assertEqual(manifest.stat().st_mode & 0o777, 0o644)
 
     def test_official_chromium_extension_and_other_manifests_are_preserved(self):
         directory = self.root / 'usr/share/chromium/extensions'
@@ -379,6 +408,37 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.env['FIXTURE_MISE_FAILURE'] = '1'
         self.run_install(success=False)
         self.assertNotIn(['hyprctl', 'reload'], self.calls())
+
+    def seed_missing_mise_provider(self, kind='shims'):
+        (self.bin / 'opencode').unlink()
+        data = self.root / 'mise'
+        shim = data / kind / 'opencode'
+        shim.parent.mkdir(parents=True)
+        shim.symlink_to(self.bin / 'stub')
+        self.env['MISE_DATA_DIR'] = str(data)
+        self.env['PATH'] = str(shim.parent) + ':' + self.env['PATH']
+
+    def test_existing_mise_dispatcher_with_missing_tool_is_repaired(self):
+        self.seed_missing_mise_provider()
+        self.run_install()
+        self.assertIn(['omarchy-mise-default-tools', 'declares', 'opencode'], self.calls())
+        self.assertIn(['mise', 'install', 'opencode'], self.calls())
+        self.assertEqual(self.calls().count(['mise', 'which', 'opencode']), 2)
+
+    def test_mise_wrapper_still_missing_after_successful_install_fails(self):
+        self.seed_missing_mise_provider('command-wrappers/bin')
+        self.env['FIXTURE_MISE_UNRESOLVED'] = '1'
+        result = self.run_install(success=False)
+        self.assertIn('opencode is still unavailable', result.stderr)
+        self.assertFalse(any(call[0] in ('stow', 'hyprctl') for call in self.calls()))
+
+    def test_opted_out_mise_defaults_are_not_reenabled(self):
+        self.seed_missing_mise_provider()
+        self.env['FIXTURE_MISE_OPTED_OUT'] = '1'
+        result = self.run_install(success=False)
+        self.assertIn('not an enabled Omarchy default tool', result.stderr)
+        self.assertFalse(any(call[:2] == ['mise', 'install'] for call in self.calls()))
+        self.assertFalse((self.root / 'home/.config/mise/config.toml').exists())
 
     def test_no_terminal_stops_before_any_install(self):
         self.env['FIXTURE_SUDO_CACHED'] = '0'
