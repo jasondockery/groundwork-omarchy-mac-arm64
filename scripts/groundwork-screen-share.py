@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import secrets
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -74,7 +75,7 @@ def config_text(password):
 
 
 def read_config(path):
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd) as source:
         info = os.fstat(source.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
@@ -136,6 +137,20 @@ def stop_child(child):
             child.wait(timeout=2)
 
 
+def start_server(address, runtime):
+    # Linux has weak-host routing: binding a Tailscale IP alone does not reject
+    # packets routed to it through a LAN interface. Pass an interface-bound
+    # listening descriptor to WayVNC instead. Failure never falls back to TCP.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'tailscale0\0')
+        listener.bind((address, 5900))
+        listener.listen(16)
+        return subprocess.Popen([
+            'wayvnc', '--config=' + str(config_path()),
+            '--socket=' + str(runtime / 'control'), '--log-level=error',
+            'fd:' + str(listener.fileno())], pass_fds=(listener.fileno(),))
+
+
 def serve():
     read_config(config_path())
     if not os.environ.get('WAYLAND_DISPLAY') or not os.environ.get('XDG_RUNTIME_DIR'):
@@ -154,10 +169,7 @@ def serve():
                 stop_child(child)
                 child = None
             if address and child is None:
-                child = subprocess.Popen([
-                    'wayvnc', '--config=' + str(config_path()),
-                    '--socket=' + str(runtime / 'control'), '--log-level=error',
-                    address + ':5900'])
+                child = start_server(address, runtime)
                 active = address
             time.sleep(5)
     finally:
