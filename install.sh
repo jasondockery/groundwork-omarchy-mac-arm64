@@ -129,15 +129,32 @@ install_package() {
 # Omarchy owns provider versions and configuration through its default mise
 # tools. Install those declarations without choosing a default agent or writing
 # a competing user config. Existing provider commands retain their owner.
+provider_ready() {
+  local provider=$1 executable underlying
+  executable=$(command -v "$provider") || return 1
+  case "$executable" in
+    "${MISE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mise}"/shims/* | \
+      "${MISE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mise}"/command-wrappers/bin/*)
+      # A dispatcher can exist before its configured tool is installed.
+      underlying=$(timeout --kill-after=2s 15 mise which "$provider") || return 1
+      [[ -x $underlying ]]
+      ;;
+    *) return 0 ;;
+  esac
+}
 for provider in claude codex opencode grok; do
-  if ! command -v "$provider" >/dev/null; then
+  if ! provider_ready "$provider"; then
     if ! command -v mise >/dev/null; then
       echo "Omarchy's mise tool manager is unavailable. Update Omarchy, then rerun ./install.sh." >&2
       exit 1
     fi
+    if ! command -v omarchy-mise-default-tools >/dev/null || ! omarchy-mise-default-tools declares "$provider"; then
+      echo "$provider is unavailable and is not an enabled Omarchy default tool. Reconcile your chosen provider setup, then rerun ./install.sh." >&2
+      exit 1
+    fi
     timeout --kill-after=5s 300 mise install "$provider"
     hash -r
-    if ! command -v "$provider" >/dev/null; then
+    if ! provider_ready "$provider"; then
       echo "$provider is still unavailable. Reconcile Omarchy's default mise tools, start a fresh shell, then rerun ./install.sh." >&2
       exit 1
     fi
@@ -169,7 +186,9 @@ fi
 # no account state or browser preference database is written here.
 if command -v chromium >/dev/null; then
   extension_dir=/usr/share/chromium/extensions
-  sudo mkdir -p "$extension_dir"
+  # Chromium must traverse both directories even when setup uses umask 077.
+  # Explicit modes also repair directories created by an earlier setup run.
+  sudo install -d -m 755 /usr/share/chromium "$extension_dir"
   if ! sudo cmp -s "$extension_source" "$extension_dir/$bitwarden_extension"; then
     sudo cp --backup=numbered --remove-destination "$extension_source" "$extension_dir/$bitwarden_extension"
   fi
