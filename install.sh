@@ -126,6 +126,25 @@ install_package() {
     exit 1
   fi
 }
+# Omarchy owns provider versions and configuration through its default mise
+# tools. Install those declarations without choosing a default agent or writing
+# a competing user config. Existing provider commands retain their owner.
+for provider in claude codex opencode grok; do
+  if ! command -v "$provider" >/dev/null; then
+    if ! command -v mise >/dev/null; then
+      echo "Omarchy's mise tool manager is unavailable. Update Omarchy, then rerun ./install.sh." >&2
+      exit 1
+    fi
+    timeout --kill-after=5s 300 mise install "$provider"
+    hash -r
+    if ! command -v "$provider" >/dev/null; then
+      echo "$provider is still unavailable. Reconcile Omarchy's default mise tools, start a fresh shell, then rerun ./install.sh." >&2
+      exit 1
+    fi
+  fi
+done
+install_package cursor-bin cursor
+
 install_package herdr
 install_package tailscale
 sudo systemctl enable --now tailscaled

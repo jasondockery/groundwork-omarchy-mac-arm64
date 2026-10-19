@@ -61,6 +61,13 @@ elif name == 'sudo':
     if host_binary is None:
         raise SystemExit('missing host tool: ' + args[0])
     sys.exit(subprocess.call([host_binary, *args[1:]]))
+elif name == 'mise':
+    if os.environ.get('FIXTURE_MISE_FAILURE') == '1':
+        sys.exit(1)
+    provider = args[-1]
+    target = root / 'bin' / provider
+    if not target.exists():
+        target.symlink_to(root / 'bin' / 'stub')
 elif name == 'stow':
     source = pathlib.Path(args[args.index('--dir') + 1]) / 'hypr'
     target = pathlib.Path(args[args.index('--target') + 1])
@@ -122,7 +129,7 @@ class InstallKeydTests(unittest.TestCase):
         stub = self.bin / 'stub'
         stub.write_text(STUB)
         stub.chmod(0o755)
-        for name in ('uname', 'omarchy', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium'):
+        for name in ('uname', 'omarchy', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise'):
             (self.bin / name).symlink_to(stub)
         (self.root / 'home').mkdir()
         (self.root / 'nightly-t3').write_text('#!/bin/sh\nprintf "t3 0.0.0-nightly.20261018.1\\n"\n')
@@ -354,6 +361,24 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.run_install(success=False)
         self.assertNotIn(['hyprctl', 'configerrors'], self.calls())
         self.assertNotIn(['sudo', 'keyd', 'reload'], self.calls())
+
+    def test_native_agents_are_preserved_and_cursor_is_installed(self):
+        self.run_install()
+        calls = self.calls()
+        self.assertIn(['omarchy', 'pkg', 'add', 'cursor-bin'], calls)
+        self.assertFalse(any(call[0] == 'mise' for call in calls))
+
+    def test_missing_agent_uses_omarchy_mise_without_user_configuration(self):
+        (self.bin / 'grok').unlink()
+        self.run_install()
+        self.assertIn(['mise', 'install', 'grok'], self.calls())
+        self.assertFalse((self.root / 'home/.config/mise/config.toml').exists())
+
+    def test_failed_agent_install_stops_before_hyprland_changes(self):
+        (self.bin / 'grok').unlink()
+        self.env['FIXTURE_MISE_FAILURE'] = '1'
+        self.run_install(success=False)
+        self.assertNotIn(['hyprctl', 'reload'], self.calls())
 
     def test_no_terminal_stops_before_any_install(self):
         self.env['FIXTURE_SUDO_CACHED'] = '0'
