@@ -5,12 +5,14 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 [--without-keyd]"
+  echo "Usage: $0 [--without-keyd] [--without-screen-sharing]"
   echo "Caps Lock defaults to Escape on tap and Control while held."
   echo "--without-keyd leaves any existing keyd configuration and service unchanged."
+  echo "--without-screen-sharing leaves any existing desktop-sharing service unchanged."
 }
 
 with_keyd=1
+with_screen_sharing=1
 keyd_choice=""
 for arg in "$@"; do
   case "$arg" in
@@ -23,6 +25,7 @@ for arg in "$@"; do
       [[ $arg == --with-keyd ]] && with_keyd=1 || with_keyd=0
       ;;
     --help | -h) usage; exit 0 ;;
+    --without-screen-sharing) with_screen_sharing=0 ;;
     *)
       echo "Unknown argument: $arg" >&2
       usage >&2
@@ -52,7 +55,7 @@ fi
 # Fail before installing packages or moving files when the checkout is incomplete.
 bitwarden_extension=nngceckbapebfimnlniiiahkandclblb.json
 extension_source="$root/chromium/extensions/$bitwarden_extension"
-[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$extension_source" ]] || {
+[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$extension_source" ]] || {
   echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, or Bitwarden extension manifest is missing." >&2
   exit 1
 }
@@ -226,6 +229,14 @@ if [[ $t3_version != *-nightly.* ]]; then
 fi
 
 python3 "$root/scripts/seed-obsidian.py" "${GROUNDWORK_OBSIDIAN_VAULT:-$HOME/Documents/Obsidian/my_obsidian_vault}"
+
+if [[ $with_screen_sharing -eq 1 ]]; then
+  install_package wayvnc
+  python3 "$root/scripts/groundwork-screen-share.py" configure
+  if command -v ufw >/dev/null; then
+    sudo ufw allow in on tailscale0 to any port 5900 proto tcp comment 'Groundwork screen sharing'
+  fi
+fi
 
 # Stow will not replace a real file. Move conflicting files aside so this
 # works on a fresh Omarchy install and on a machine that already has them.
