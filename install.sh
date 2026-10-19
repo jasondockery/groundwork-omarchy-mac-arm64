@@ -57,6 +57,63 @@ extension_source="$root/chromium/extensions/$bitwarden_extension"
   exit 1
 }
 
+# Ask once, before the first install or privileged write. The timestamp is
+# refreshed until this script exits so Tailscale, the browser extension, and
+# keyd do not each stop for a password. Nothing is installed if this fails.
+t3_installer=""
+sudo_keepalive_pid=""
+stop_sudo_keepalive() {
+  if [[ -n "${sudo_keepalive_pid}" ]]; then
+    kill "$sudo_keepalive_pid" 2>/dev/null || true
+    wait "$sudo_keepalive_pid" 2>/dev/null || true
+    sudo_keepalive_pid=""
+  fi
+}
+cleanup() {
+  stop_sudo_keepalive
+  if [[ -n "${t3_installer}" ]]; then
+    rm -f "$t3_installer"
+  fi
+}
+trap cleanup EXIT
+
+if [[ "$EUID" -ne 0 ]]; then
+  if ! sudo -n true 2>/dev/null; then
+    if [[ -r /dev/tty && -w /dev/tty ]] && : </dev/tty >/dev/null; then
+      echo "This install needs an administrator password for Tailscale, the browser extension, and keyd."
+      echo "Enter your password when asked. This approval covers the privileged steps in this run."
+      sudo_status=0
+      # sudo -v reads the password on its own standard input. Point that prompt
+      # at the terminal. These redirects are not a command run under sudo.
+      # shellcheck disable=SC2024
+      sudo -v </dev/tty >/dev/tty 2>/dev/tty || sudo_status=$?
+      if [[ "$sudo_status" -ne 0 ]]; then
+        echo "Administrator permission was not granted, so nothing was changed." >&2
+        echo "Run ./install.sh from a terminal and enter your password when asked." >&2
+        exit "$sudo_status"
+      fi
+    else
+      echo "This install needs an administrator password, and no terminal is available to ask for it." >&2
+      echo "Nothing was changed. Run ./install.sh from a terminal and enter your password when asked." >&2
+      exit 1
+    fi
+  fi
+  sudo_keepalive_pid=""
+  # Own the sleeper so the exit trap can stop the refresh immediately.
+  (
+    sleep_pid=""
+    trap 'if [[ -n "$sleep_pid" ]]; then kill "$sleep_pid" 2>/dev/null || true; fi; exit 0' TERM INT
+    while kill -0 "$$" 2>/dev/null; do
+      sleep 50 &
+      sleep_pid=$!
+      wait "$sleep_pid" || exit 0
+      sleep_pid=""
+      sudo -n true 2>/dev/null || exit 0
+    done
+  ) &
+  sudo_keepalive_pid=$!
+fi
+
 # Keep the AI workbench and private recovery path available on every Apple
 # Silicon Omarchy install. Authentication stays manual; no tailnet identity or
 # reusable auth key belongs in this repo.
@@ -106,12 +163,11 @@ fi
 # Nightly is upstream's fast-moving train. Reconcile an existing stable CLI too;
 # executable presence is not evidence that the selected channel is installed.
 t3_installer="$(mktemp)"
-trap 'rm -f "$t3_installer"' EXIT
 curl --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 10 --max-time 60 \
   -fsSL https://t3.codes/install.sh -o "$t3_installer"
 env -u T3CODE_VERSION T3CODE_CHANNEL=nightly timeout --kill-after=5s 300 sh "$t3_installer"
 rm -f "$t3_installer"
-trap - EXIT
+t3_installer=""
 
 # The upstream installer owns its symlink, but does not change shell startup
 # files. Detect an earlier npm/system t3 rather than claiming it was replaced.
