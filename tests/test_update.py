@@ -1,5 +1,6 @@
 """Real local Git transport; isolated home and mocked machine-owner commands."""
 import fcntl
+from contextlib import contextmanager
 import hashlib
 import importlib.util
 import json
@@ -247,6 +248,21 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             with self.assertRaisesRegex(updater.UpdateError, 'Another Groundwork'):
                 updater.update('layer')
+
+    def test_update_reads_choices_after_a_setup_completes_before_lock_acquisition(self):
+        updater.register(str(self.source), '1', '0', str(self.home / 'old-vault'))
+        real_transaction = updater.transaction
+        @contextmanager
+        def setup_finishes_first():
+            updater.register(str(self.source), '0', '0', str(self.home / 'new-vault'))
+            with real_transaction() as lock:
+                yield lock
+        with patch.object(updater, 'transaction', side_effect=setup_finishes_first):
+            updater.update('layer')
+        saved = json.loads(self.config.read_text())
+        self.assertFalse(saved['keyd'])
+        self.assertEqual(saved['obsidian_vault'], str(self.home / 'new-vault'))
+        self.assertNotIn('pending_keyd', saved)
 
     def test_changed_managed_file_or_symlink_settings_are_preserved(self):
         self.input.unlink()

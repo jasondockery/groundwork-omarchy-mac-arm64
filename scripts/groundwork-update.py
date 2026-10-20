@@ -255,11 +255,11 @@ def managed_files(value, source):
 def update(scope, check=False):
     if platform.system() != 'Linux' or platform.machine() != 'aarch64' or not shutil.which('omarchy'):
         raise UpdateError('This updater requires Apple Silicon Omarchy. Use your platform entry point on other systems.')
-    value = settings()
-    source = Path(value['source'])
-    if source.is_symlink() or not source.is_absolute() or source.resolve() != source:
-        raise UpdateError('The saved source must be an absolute, canonical checkout path.')
     with transaction() as lock:
+        value = settings()
+        source = Path(value['source'])
+        if source.is_symlink() or not source.is_absolute() or source.resolve() != source:
+            raise UpdateError('The saved source must be an absolute, canonical checkout path.')
         before, branch, remote, merge = preflight(source)
         managed_files(value, source)
         candidate_ref = f'refs/groundwork/update/{uuid.uuid4().hex}'
