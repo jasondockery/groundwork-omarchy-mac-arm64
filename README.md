@@ -41,7 +41,7 @@ Only enable SSH after reviewing that guide and your effective tailnet policy. No
 ### First-run acceptance
 
 - `hyprctl configerrors` prints no errors. The installer reloads and checks a detected Hyprland session; from SSH or a console, finish that check on the desktop with `hyprctl reload` and `hyprctl configerrors`.
-- Trackpad tapping, two-finger right-click, and three-finger drag behave as expected. Cursor speed on a large display and browser page scrolling should feel usable; tune `input.sensitivity` and `input.touchpad.scroll_factor` with `hyprctl reload` if not.
+- Trackpad traditional scrolling, tapping, two-finger right-click, and three-finger drag behave as expected. Cursor speed on a large display and browser page scrolling should feel usable; tune `input.sensitivity` and `input.touchpad.scroll_factor` with `hyprctl reload` if not.
 - Tap Caps Lock to leave Neovim insert mode; hold Caps Lock with `L` to send `Ctrl+L`, and with Space to send the multiplexer prefix. Physical Escape and Control still work.
 - `systemctl is-active tailscaled keyd` reports both services active for the default setup. `tailscale status` shows the device connected after sign-in and approval. Use the separate keyd recovery instructions below if needed.
 - `Super+Space` opens the Omarchy menu; `Super+K` shows desktop bindings. Launch tmux with `Super+Alt+Return` and Herdr with `Super+Ctrl+Return`. In either, use `Ctrl+Space`, then `?` for live help, and practice the [same pane keys](docs/keybindings.md).
@@ -171,7 +171,7 @@ Omarchy keeps its own desktop, tmux file, shell, and Super keybindings. Practice
 
 | Path | Why it is not already in Omarchy Mac |
 |---|---|
-| `packages/hypr/.config/hypr/input.lua` | Trackpad choices that differ from Omarchy's defaults: tap-to-click, three-finger drag, faster pointer, slower page scrolling |
+| `packages/hypr/.config/hypr/input.lua` | Trackpad choices that differ from Omarchy's defaults: traditional scrolling, tap-to-click, three-finger drag, faster pointer, slower page scrolling |
 | `keyd/default.conf` | Default Caps Lock behavior: tap = Escape, hold = Control, via keyd |
 | `packages.txt` | Optional aarch64 packages that are not part of the Omarchy Mac install |
 | `git/config.local.example` | Placeholder for a name and email. Not applied |
