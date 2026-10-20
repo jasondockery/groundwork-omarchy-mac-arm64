@@ -18,6 +18,6 @@ jobs:
         with:
           persist-credentials: false
       - name: Check shell syntax
-        run: bash -n install.sh scripts/migrate-from-groundwork.sh
+        run: bash -n install.sh scripts/apply-layer.sh scripts/migrate-from-groundwork.sh
       - name: Exercise isolated installer fixtures
         run: python3 -B -m unittest discover -s tests -v

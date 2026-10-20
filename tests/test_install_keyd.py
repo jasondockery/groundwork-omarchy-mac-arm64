@@ -153,6 +153,8 @@ class InstallKeydTests(unittest.TestCase):
         self.env = dict(os.environ, INSTALL_FIXTURE=str(self.root),
                         HYPRLAND_INSTANCE_SIGNATURE='',
                         HOME=str(self.root / 'home'),
+                        XDG_CONFIG_HOME=str(self.root / 'home/.config'),
+                        XDG_STATE_HOME=str(self.root / 'home/.local/state'),
                         PATH=f'{self.root}/home/.local/bin:{self.bin}')
         self.env.pop('T3CODE_INSTALL_BIN_DIR', None)
         self.env.pop('GROUNDWORK_OBSIDIAN_VAULT', None)
@@ -166,6 +168,31 @@ class InstallKeydTests(unittest.TestCase):
     def calls(self):
         log = self.root / 'calls.jsonl'
         return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+    def test_saved_exclusions_and_vault_survive_a_bare_rerun(self):
+        vault = self.root / 'home/Notes'
+        self.env['GROUNDWORK_OBSIDIAN_VAULT'] = str(vault)
+        self.run_install('--without-keyd', '--without-screen-sharing')
+        self.env.pop('GROUNDWORK_OBSIDIAN_VAULT')
+        (self.root / 'calls.jsonl').unlink()
+        self.run_install()
+        calls = self.calls()
+        self.assertNotIn(['sudo', 'keyd', 'reload'], calls)
+        self.assertNotIn(['systemctl', '--user', 'enable', 'groundwork-screen-share.service'], calls)
+        saved = json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())
+        self.assertFalse(saved['keyd'])
+        self.assertFalse(saved['screen_sharing'])
+        self.assertEqual(saved['obsidian_vault'], str(vault))
+
+    def test_routine_apply_preserves_exclusions_and_skips_t3_reinstallation(self):
+        self.run_install('--without-keyd', '--without-screen-sharing')
+        (self.root / 'calls.jsonl').unlink()
+        result = subprocess.run(['bash', str(REPO / 'scripts/apply-layer.sh'), '--update'],
+                                env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('finish vault', result.stdout)
+        self.assertFalse(any(call[0] == 'curl' for call in self.calls()))
+        self.assertNotIn(['sudo', 'keyd', 'reload'], self.calls())
 
     def run_with_controlling_terminal(self, *args):
         # pty.fork gives the install a controlling terminal, which is what
