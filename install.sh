@@ -12,4 +12,4 @@ for arg in "$@"; do
   esac
 done
 root=$(cd "$(dirname "$0")" && pwd)
-exec bash "$root/scripts/apply-layer.sh" "$@"
+exec python3 "$root/scripts/groundwork-update.py" setup "$root" "$@"

@@ -1,5 +1,6 @@
 """Real local Git transport; isolated home and mocked machine-owner commands."""
 import fcntl
+import hashlib
 import importlib.util
 import json
 import os
@@ -185,6 +186,53 @@ class UpdateTests(unittest.TestCase):
             updater.update('all')
         self.assertEqual(self.git('rev-parse', 'HEAD'), self.initial)
         self.assertEqual(self.machine_calls, [['omarchy', 'update']])
+
+    def test_failed_keyd_copy_and_newer_candidate_keep_both_retry_boundaries_recoverable(self):
+        installed = self.root / 'installed-keyd.conf'
+        installed.write_bytes((self.source / 'keyd/default.conf').read_bytes())
+        updater.register(str(self.source), '1', '0', str(self.home / 'Notes'))
+        (self.seed / 'keyd/default.conf').write_text('new desired mapping\n')
+        apply = self.seed / 'scripts/apply-layer.sh'
+        apply.write_text(f'''#!/bin/bash
+set -eu
+cp "{self.source}/keyd/default.conf" "{installed}"
+test -f "{self.root}/reload-ok" || exit 42
+python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 0 "{self.home}/Notes"
+''')
+        self.candidate()
+        def executed(args, **kwargs):
+            if args[0] in ('git', 'bash'):
+                return self.real_run(args, **dict(kwargs, capture=True))
+            return self.run_command(args, **kwargs)
+        with patch.object(updater, 'KEYD_CONFIG', installed), patch.object(updater, 'run', side_effect=executed):
+            with self.assertRaises(updater.UpdateError):
+                updater.update('layer')
+            pending = json.loads(self.config.read_text())['pending_keyd']
+            self.assertEqual(pending['sha256'], hashlib.sha256(installed.read_bytes()).hexdigest())
+            self.assertFalse((self.state / 'groundwork-update-last-success.json').exists())
+            copied_digest = hashlib.sha256(installed.read_bytes()).hexdigest()
+            (self.seed / 'keyd/default.conf').write_text('newer desired mapping\n')
+            apply.write_text(f'''#!/bin/bash
+set -eu
+test -f "{self.root}/copy-ok" || exit 43
+cp "{self.source}/keyd/default.conf" "{installed}"
+test -f "{self.root}/reload-ok" || exit 42
+python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 0 "{self.home}/Notes"
+''')
+            self.candidate()
+            with self.assertRaises(updater.UpdateError):
+                updater.update('layer')
+            pending = json.loads(self.config.read_text())['pending_keyd']
+            self.assertEqual(pending['previous_sha256'], copied_digest)
+            self.assertEqual(hashlib.sha256(installed.read_bytes()).hexdigest(), copied_digest)
+            (self.root / 'copy-ok').touch()
+            (self.root / 'reload-ok').touch()
+            updater.update('layer')
+            self.assertNotIn('pending_keyd', json.loads(self.config.read_text()))
+            self.assertEqual(installed.read_text(), 'newer desired mapping\n')
+            installed.write_text('user edit after apply')
+            with self.assertRaisesRegex(updater.UpdateError, 'changed locally'):
+                updater.update('layer')
 
     def test_t3_or_flatpak_failure_cannot_mark_full_success(self):
         for failure in ['t3', 'flatpak']:

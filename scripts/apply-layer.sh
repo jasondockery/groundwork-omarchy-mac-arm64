@@ -50,6 +50,7 @@ done
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
+python3 "$root/scripts/groundwork-update.py" verify-lock
 
 if [[ $(uname -m) != aarch64 ]]; then
   echo "This layer is for Apple Silicon Omarchy (aarch64). This machine is $(uname -m)." >&2
@@ -68,6 +69,7 @@ fi
 
 preference_mode=setup
 [[ $updating -eq 0 ]] || preference_mode=update
+python3 "$root/scripts/groundwork-update.py" validate "$root"
 stored=$(python3 "$root/scripts/groundwork-update.py" preferences "$preference_mode")
 if [[ -n $stored ]]; then
   mapfile -t preferences <<<"$stored"
