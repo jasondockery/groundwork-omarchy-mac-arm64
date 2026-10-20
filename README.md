@@ -55,13 +55,61 @@ If a step fails, keep its error and fix it before treating the setup as accepted
 
 ## Updating this layer
 
-Use `omarchy update` for the OS and Arch packages. For this repo, inspect `git status`, pull with `git pull --ff-only` when clean, review the diff, and rerun `./install.sh`. The installer is safe to rerun: it resolves the newest T3 Code Nightly CLI through its official installer, reuses the correct input symlink, and does not create another keyd backup when the config is unchanged. Update the T3 Code Nightly CLI with its own `t3 update` command. Nightly is the selected fast-moving train; unsupported preview artifacts are not selected. The installer reconciles an existing stable CLI as well, while preserving application data and provider authentication.
+After setup, run this from any directory for routine maintenance:
+
+```bash
+update-all
+```
+
+It checks this repo, runs the supported `omarchy update`, fast-forwards and
+applies your personal settings, updates T3 Code Nightly, and updates the installed
+Bitwarden user Flatpak. T3's background service may restart. Other Flatpaks and
+application sign-in remain outside this command. Omarchy owns the OS, Arch
+packages, default tools, and desktop; no second system updater is installed.
+
+For only repository configuration, run `groundwork-update`. It preserves saved
+keyd, screen-sharing, and Obsidian vault choices and does not request routine
+system or app upgrades. It can install a newly declared missing tool needed by
+the settings. Use `./install.sh` with explicit `--with-keyd`, `--without-keyd`,
+`--with-screen-sharing`, or `--without-screen-sharing` when changing those
+preferences. Skipping an existing feature does not disable its service.
+
+To inspect incoming repository changes first:
+
+```bash
+groundwork-update --check
+```
+
+The check fetches without advancing your checkout or changing the configuration
+linked into the desktop. `update-all --check` performs the same repository check;
+it does not inventory system or app updates. A normal update displays the
+fetched changes before advancing. Local edits, conflicting managed input files,
+detached or diverged branches, and simultaneous Groundwork updates stop with
+recovery guidance. There is no automatic stash, reset, or Core branch-tip update.
+Failures keep previous success receipts and report completed stages; repair the
+named problem and rerun the same command, even if the source already advanced.
+Receipts live under `$XDG_STATE_HOME/groundwork` (default
+`~/.local/state/groundwork`). Configuration-only success never marks full
+maintenance successful.
+
+Existing installations need one transition: fetch and review this repo while
+the checkout is clean, fast-forward to the reviewed commit, then run
+`./install.sh` once to install both commands. Repeat any previous `--without-*`
+choices on that first run because older installers did not store them. Later
+runs remember choices in `$XDG_CONFIG_HOME/groundwork/omarchy.json` (default
+`~/.config/groundwork/omarchy.json`). Keep the checkout at that saved path.
+The updater preserves its chosen Git remote and authentication method; a public
+HTTPS clone needs no GitHub login.
+
+Setup remains `./install.sh`. It installs the commands, applies preferences, and
+prints first-run acceptance instructions. Routine updates reuse the apply code
+and omit onboarding. They preserve application data and provider authentication.
 
 ## Repository checks
 
 Installation checks that the selected tools are actually available. If another `t3` shadows the Nightly symlink, it stops before applying input settings and prints the installed directory to prepend to your user PATH. Start a fresh shell and rerun after fixing PATH; existing npm/system installations are preserved. The effective `t3 --version` must identify Nightly. Package-feed skips also fail explicitly instead of claiming a missing tool was installed.
 
-Run `bash -n install.sh scripts/migrate-from-groundwork.sh` and `python3 -B -m unittest discover -s tests -v`. CI runs the same shell and isolated installer checks. They do not install packages, start host services, or change the developer's home directory. The shared Renovate preset is declared in `renovate.json`; the central runner must also grant this repo access before updates can arrive.
+Run `bash -n install.sh scripts/apply-layer.sh scripts/migrate-from-groundwork.sh` and `python3 -B -m unittest discover -s tests -v`. CI runs the same shell and isolated installer checks. They do not install packages, start host services, or change the developer's home directory. The shared Renovate preset is declared in `renovate.json`; the central runner must also grant this repo access before updates can arrive.
 
 ## Where each step runs
 
