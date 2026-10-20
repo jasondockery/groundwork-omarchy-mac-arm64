@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -157,7 +158,8 @@ class ScreenShareTests(unittest.TestCase):
         listener.bind.assert_not_called()
         spawn.assert_not_called()
 
-    @unittest.skipUnless(hasattr(socket, 'SO_BINDTODEVICE'), 'Linux socket interface isolation')
+    @unittest.skipUnless(sys.platform == 'linux' and hasattr(socket, 'SO_BINDTODEVICE'),
+                         'Linux socket interface isolation')
     def test_kernel_rejects_ingress_from_a_different_interface(self):
         others = [name for _, name in socket.if_nameindex() if name != 'lo']
         if not others:
