@@ -18,8 +18,13 @@ applied keyd digest locally. Bare reruns preserve them; explicit setup options
 change choices. Older installations repeat exclusions once during transition.
 The optional Core reference remains pinned and is never a setup prerequisite.
 
-An advisory file lock serializes Groundwork commands. Child stages have deadlines
-and their own process groups. Failed stages exit nonzero, preserve prior success
+An advisory file lock serializes setup and update commands. The apply child
+verifies the exact inherited lock descriptor. Interactive stages receive the
+foreground controlling terminal and restore it afterward; subprocess groups
+remain owned and bounded. A pending keyd apply records the intended and previously
+installed owned digests against the source commit so a failed copy/reload can be
+retried even when the next fetch delivers another candidate. Failed stages exit
+nonzero, preserve prior success
 receipts, report completed work, and support retry after source advancement.
 Configuration-only receipts are separate from full-maintenance receipts. Package
 commands completing do not establish app sign-in, physical input acceptance, or

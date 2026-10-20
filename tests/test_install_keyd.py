@@ -1,5 +1,6 @@
 """Exercise installer effects with fake package/service commands and a private /etc."""
 import json
+import fcntl
 import os
 from pathlib import Path
 import shutil
@@ -35,11 +36,18 @@ root = pathlib.Path(os.environ['INSTALL_FIXTURE'])
 with (root / 'calls.jsonl').open('a') as log:
     log.write(json.dumps([name, *args]) + '\\n')
 if name == 'uname':
-    print(os.environ.get('FIXTURE_ARCH', 'aarch64'))
+    print('Linux' if args == ['-s'] else os.environ.get('FIXTURE_ARCH', 'aarch64'))
 elif name == 'sudo':
     if args[:2] == ['-n', 'true']:
         sys.exit(0 if os.environ.get('FIXTURE_SUDO_CACHED', '1') == '1' else 1)
     if args == ['-v']:
+        if os.environ.get('FIXTURE_REQUIRE_TTY') == '1':
+            terminal = os.open('/dev/tty', os.O_RDWR)
+            os.write(terminal, b'Fixture password:')
+            answer = os.read(terminal, 128).strip()
+            os.close(terminal)
+            if answer != b'fixture-password':
+                sys.exit(1)
         sys.exit(int(os.environ.get('FIXTURE_SUDO_V_STATUS', '0')))
     if args[0] == 'keyd':
         sys.exit(int(os.environ.get('FIXTURE_RELOAD_STATUS', '0')))
@@ -187,14 +195,14 @@ class InstallKeydTests(unittest.TestCase):
     def test_routine_apply_preserves_exclusions_and_skips_t3_reinstallation(self):
         self.run_install('--without-keyd', '--without-screen-sharing')
         (self.root / 'calls.jsonl').unlink()
-        result = subprocess.run(['bash', str(REPO / 'scripts/apply-layer.sh'), '--update'],
+        result = subprocess.run(['python3', str(REPO / 'scripts/groundwork-update.py'), 'setup', str(REPO), '--update'],
                                 env=self.env, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn('finish vault', result.stdout)
         self.assertFalse(any(call[0] == 'curl' for call in self.calls()))
         self.assertNotIn(['sudo', 'keyd', 'reload'], self.calls())
 
-    def run_with_controlling_terminal(self, *args):
+    def run_with_controlling_terminal(self, *args, through_updater=False):
         # pty.fork gives the install a controlling terminal, which is what
         # /dev/tty requires. A captured subprocess has no terminal to answer.
         helper = r"""
@@ -222,6 +230,8 @@ while True:
             data = b""
         if data:
             chunks.append(data)
+            if b'Fixture password:' in data:
+                os.write(master, b'fixture-password\n')
     waited, candidate = os.waitpid(pid, os.WNOHANG)
     if waited == pid:
         status = candidate
@@ -231,9 +241,62 @@ if status is None or not os.WIFEXITED(status):
     raise SystemExit(124)
 raise SystemExit(os.WEXITSTATUS(status))
 """
+        command = ['bash', str(REPO / 'install.sh'), *args]
+        if through_updater:
+            bridge = "import os,runpy,sys;u=runpy.run_path(sys.argv[1]);u['run'](sys.argv[2:],capture=False,deadline=8);assert os.tcgetpgrp(0)==os.getpgrp();print('TTY restored')"
+            command = [sys.executable, '-c', bridge, str(REPO / 'scripts/groundwork-update.py'), *command]
         return subprocess.run(
-            [sys.executable, "-c", helper, "bash", str(REPO / "install.sh"), *args],
+            [sys.executable, "-c", helper, *command],
             env=self.env, capture_output=True, timeout=10)
+
+    def test_updater_hands_uncached_authorization_a_real_foreground_terminal(self):
+        self.env.update(FIXTURE_SUDO_CACHED='0', FIXTURE_REQUIRE_TTY='1')
+        result = self.run_with_controlling_terminal(through_updater=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(b'TTY restored', result.stdout)
+        self.assertIn(['sudo', '-v'], self.calls())
+
+    def test_other_checkout_ownership_is_checked_before_any_machine_mutation(self):
+        self.run_install()
+        settings = self.root / 'home/.config/groundwork/omarchy.json'
+        saved = json.loads(settings.read_text())
+        saved['source'] = str(self.root / 'another-checkout')
+        settings.write_text(json.dumps(saved))
+        original = settings.read_bytes()
+        input_path = self.root / 'home/.config/hypr/input.lua'
+        link = input_path.readlink()
+        mapping = self.config.read_bytes()
+        (self.root / 'calls.jsonl').unlink()
+        result = self.run_install(success=False)
+        self.assertIn('Another checkout owns', result.stderr)
+        self.assertEqual(settings.read_bytes(), original)
+        self.assertEqual(input_path.readlink(), link)
+        self.assertEqual(self.config.read_bytes(), mapping)
+        self.assertFalse(any(call[0] in ('sudo', 'omarchy', 'stow') for call in self.calls()))
+
+    def test_foreign_update_command_is_preserved_before_any_machine_mutation(self):
+        command = self.root / 'home/.local/bin/update-all'
+        command.parent.mkdir(parents=True)
+        command.write_text('user-owned updater')
+        self.seed_config()
+        mapping = self.config.read_bytes()
+        self.run_install(success=False)
+        self.assertEqual(command.read_text(), 'user-owned updater')
+        self.assertEqual(self.config.read_bytes(), mapping)
+        self.assertFalse(any(call[0] in ('sudo', 'omarchy', 'stow') for call in self.calls()))
+
+    def test_setup_cannot_change_saved_choices_while_an_update_holds_the_lock(self):
+        self.run_install()
+        settings = self.root / 'home/.config/groundwork/omarchy.json'
+        before = settings.read_bytes()
+        lock_path = self.root / 'home/.local/state/groundwork/update.lock'
+        (self.root / 'calls.jsonl').unlink()
+        with lock_path.open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self.run_install('--without-keyd', success=False)
+        self.assertIn('Another Groundwork', result.stderr)
+        self.assertEqual(settings.read_bytes(), before)
+        self.assertFalse(any(call[0] in ('sudo', 'omarchy', 'stow') for call in self.calls()))
 
     def seed_config(self):
         self.config.parent.mkdir(parents=True)

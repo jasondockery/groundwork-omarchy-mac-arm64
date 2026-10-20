@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Groundwork Omarchy updater. Groundwork owns this layer; Omarchy owns the OS."""
 import fcntl
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -17,17 +18,50 @@ import uuid
 MARKER = '# Groundwork Omarchy updater'
 CONFIG = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config')) / 'groundwork/omarchy.json'
 STATE = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local/state')) / 'groundwork'
+KEYD_CONFIG = Path('/etc/keyd/default.conf')
 
 
 class UpdateError(Exception):
     pass
 
 
-def private_parent(path):
+def check_path(path):
     for parent in [*reversed(path.parents), path]:
         if parent.is_symlink():
             raise UpdateError(f'Refusing a symbolic link in updater storage: {parent}')
+
+
+def private_parent(path):
+    check_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+
+
+@contextmanager
+def transaction():
+    private_parent(STATE / 'update.lock')
+    with (STATE / 'update.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise UpdateError('Another Groundwork update or setup is running. Let it finish, then retry.') from error
+        yield lock
+
+
+def verify_lock():
+    try:
+        fd = int(os.environ['GROUNDWORK_OMARCHY_LOCK_FD'])
+        expected = (STATE / 'update.lock').stat()
+        inherited = os.fstat(fd)
+        if (expected.st_dev, expected.st_ino) != (inherited.st_dev, inherited.st_ino):
+            raise UpdateError('The inherited update lock has a different identity.')
+        with (STATE / 'update.lock').open('r') as probe:
+            try:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return
+        raise UpdateError('The inherited update lock is not held.')
+    except (KeyError, ValueError, OSError) as error:
+        raise UpdateError('Run ./install.sh or the installed update command; direct apply requires its transaction lock.') from error
 
 
 def atomic_write(path, content, mode=0o600, owned=False):
@@ -63,15 +97,27 @@ def settings(required=True):
     return value
 
 
-def register(source, keyd, screen_sharing, vault):
+def validate_registration(source):
     source = Path(source).resolve()
     previous = settings(False)
     if previous and Path(previous['source']).resolve() != source:
         raise UpdateError('Another checkout owns this setup. Use its update commands; moving the source requires reviewing omarchy.json first.')
+    for path in [Path.home() / '.local/lib/groundwork/omarchy-update.py',
+                 Path.home() / '.local/bin/groundwork-update', Path.home() / '.local/bin/update-all']:
+        check_path(path)
+        if path.exists() and (not path.is_file() or MARKER not in path.read_text()):
+            raise UpdateError(f'An existing command belongs to another setup: {path}. Preserve it before installing this updater.')
+    return previous
+
+
+def register(source, keyd, screen_sharing, vault):
+    source = Path(source).resolve()
+    previous = validate_registration(source)
     value = dict(previous or {}, schema=1, source=str(source), keyd=keyd == '1',
                  screen_sharing=screen_sharing == '1', obsidian_vault=vault)
     if value['keyd']:
         value['keyd_sha256'] = hashlib.sha256((source / 'keyd/default.conf').read_bytes()).hexdigest()
+    value.pop('pending_keyd', None)
     atomic_write(CONFIG, json.dumps(value, indent=2) + '\n')
     runtime = Path.home() / '.local/lib/groundwork/omarchy-update.py'
     atomic_write(runtime, (source / 'scripts/groundwork-update.py').read_text(), owned=True)
@@ -101,13 +147,45 @@ def stop(process):
         process.wait(timeout=3)
 
 
-def run(args, cwd=None, deadline=20, capture=True):
-    process = subprocess.Popen(args, cwd=cwd, text=True, start_new_session=True,
-                               stdout=subprocess.PIPE if capture else None,
-                               stderr=subprocess.PIPE if capture else None,
-                               env=dict(os.environ, GIT_TERMINAL_PROMPT='0', GIT_PAGER='cat'))
+def foreground(fd, group):
+    previous = signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+    try:
+        os.tcsetpgrp(fd, group)
+    finally:
+        signal.signal(signal.SIGTTOU, previous)
+
+
+def run(args, cwd=None, deadline=20, capture=True, lock_fd=None):
+    terminal = None
+    original_group = None
+    process = None
+    group_options = dict(start_new_session=True)
+    if not capture and os.isatty(0) and os.isatty(2):
+        terminal = os.open('/dev/tty', os.O_RDWR | os.O_CLOEXEC)
+        original_group = os.tcgetpgrp(terminal)
+        if original_group != os.getpgrp():
+            os.close(terminal)
+            raise UpdateError('Run the updater in the foreground of your terminal so it can request authorization.')
+        # Keep the controlling terminal, but give this stage an owned process
+        # group. Hand terminal input and Ctrl+C to it, then restore the caller.
+        group_options = dict(process_group=0)
     started = time.monotonic()
     try:
+        environment = dict(os.environ, GIT_TERMINAL_PROMPT='0', GIT_PAGER='cat')
+        if lock_fd is not None:
+            environment['GROUNDWORK_OMARCHY_LOCK_FD'] = str(lock_fd)
+        process = subprocess.Popen(args, cwd=cwd, text=True, **group_options,
+                                   pass_fds=() if lock_fd is None else (lock_fd,),
+                                   stdout=subprocess.PIPE if capture else None,
+                                   stderr=subprocess.PIPE if capture else None,
+                                   env=environment)
+        if terminal is not None:
+            try:
+                foreground(terminal, process.pid)
+                os.killpg(process.pid, signal.SIGCONT)
+            except ProcessLookupError:
+                if process.poll() is None:
+                    raise
         while True:
             remaining = deadline - (time.monotonic() - started)
             if remaining <= 0:
@@ -117,14 +195,25 @@ def run(args, cwd=None, deadline=20, capture=True):
                 break
             except subprocess.TimeoutExpired:
                 print(f'Still running {args[0]}; elapsed {int(time.monotonic() - started)} seconds.', flush=True)
+        if process.returncode in (-signal.SIGINT, -signal.SIGTERM, -signal.SIGHUP, 130, 143, 129):
+            raise KeyboardInterrupt(abs(process.returncode) if process.returncode < 0 else process.returncode - 128)
         if process.returncode:
             raise UpdateError(f'{args[0]} failed (exit {process.returncode}).\n{stderr or "See the stage output above."}')
         return (stdout or '').strip()
     finally:
-        stop(process)
-        for stream in (process.stdout, process.stderr):
-            if stream:
-                stream.close()
+        try:
+            if process:
+                stop(process)
+        finally:
+            if terminal is not None:
+                try:
+                    foreground(terminal, original_group)
+                finally:
+                    os.close(terminal)
+            if process:
+                for stream in (process.stdout, process.stderr):
+                    if stream:
+                        stream.close()
 
 
 def git(source, *args, **kwargs):
@@ -151,8 +240,15 @@ def managed_files(value, source):
     if not target.is_symlink() or target.resolve() != expected.resolve():
         raise UpdateError('The Hyprland input override no longer links to this checkout. Preserve your local override and reconcile it before updating.')
     if value['keyd'] and value.get('keyd_sha256'):
-        installed = Path('/etc/keyd/default.conf')
-        if not installed.is_file() or installed.is_symlink() or hashlib.sha256(installed.read_bytes()).hexdigest() != value['keyd_sha256']:
+        installed = KEYD_CONFIG
+        allowed = {value['keyd_sha256']}
+        pending = value.get('pending_keyd')
+        if (isinstance(pending, dict) and pending.get('source') == git(source, 'rev-parse', 'HEAD')
+                and pending.get('sha256') == hashlib.sha256((source / 'keyd/default.conf').read_bytes()).hexdigest()):
+            allowed.add(pending['sha256'])
+            if isinstance(pending.get('previous_sha256'), str):
+                allowed.add(pending['previous_sha256'])
+        if not installed.is_file() or installed.is_symlink() or hashlib.sha256(installed.read_bytes()).hexdigest() not in allowed:
             raise UpdateError('The installed keyd configuration changed locally. Preserve and reconcile it before updating.')
 
 
@@ -163,12 +259,7 @@ def update(scope, check=False):
     source = Path(value['source'])
     if source.is_symlink() or not source.is_absolute() or source.resolve() != source:
         raise UpdateError('The saved source must be an absolute, canonical checkout path.')
-    private_parent(STATE / 'update.lock')
-    with (STATE / 'update.lock').open('a') as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise UpdateError('Another Groundwork update is running. Let it finish, then retry.') from error
+    with transaction() as lock:
         before, branch, remote, merge = preflight(source)
         managed_files(value, source)
         candidate_ref = f'refs/groundwork/update/{uuid.uuid4().hex}'
@@ -197,9 +288,14 @@ def update(scope, check=False):
                 raise UpdateError('Checkout or upstream changed during the update. Retry after reviewing it.')
             managed_files(value, source)
             git(source, 'merge', '--ff-only', '--no-edit', candidate)
+            if value['keyd']:
+                value['pending_keyd'] = dict(source=candidate,
+                                             sha256=hashlib.sha256((source / 'keyd/default.conf').read_bytes()).hexdigest(),
+                                             previous_sha256=hashlib.sha256(KEYD_CONFIG.read_bytes()).hexdigest())
+                atomic_write(CONFIG, json.dumps(value, indent=2) + '\n')
             print('Applying Groundwork settings using saved setup choices…', flush=True)
             run(['bash', str(source / 'scripts/apply-layer.sh'), '--update'],
-                deadline=900, capture=False)
+                deadline=900, capture=False, lock_fd=lock.fileno())
             value = settings()
             if value['keyd']:
                 value['keyd_sha256'] = hashlib.sha256((source / 'keyd/default.conf').read_bytes()).hexdigest()
@@ -251,6 +347,34 @@ def update(scope, check=False):
 
 def main(args):
     # Private setup adapters accept an exact argument count before any writes.
+    if args and args[0] == 'verify-lock' and len(args) == 1:
+        verify_lock()
+        return 0
+    if args and args[0] == 'setup' and len(args) >= 2:
+        source, *options = args[1:]
+        valid = {'--with-keyd', '--without-keyd', '--with-screen-sharing', '--without-screen-sharing', '--update', '--help', '-h'}
+        if any(option not in valid for option in options):
+            print('Unknown setup argument; nothing changed.', file=sys.stderr)
+            return 64
+        if ({'--with-keyd', '--without-keyd'} <= set(options)
+                or {'--with-screen-sharing', '--without-screen-sharing'} <= set(options)):
+            print('Choose only one option for each setup preference; nothing changed.', file=sys.stderr)
+            return 64
+        if '--help' in options or '-h' in options:
+            print('Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing]')
+            print('Saved setup choices are reused. Explicit options change those choices.')
+            return 0
+        if run(['uname', '-s']) != 'Linux' or run(['uname', '-m']) != 'aarch64' or not shutil.which('omarchy'):
+            raise UpdateError('This layer requires Apple Silicon Omarchy.')
+        validate_registration(source)
+        with transaction() as lock:
+            validate_registration(source)
+            run(['bash', str(Path(source) / 'scripts/apply-layer.sh'), *options],
+                deadline=900, capture=False, lock_fd=lock.fileno())
+        return 0
+    if args and args[0] == 'validate' and len(args) == 2:
+        validate_registration(args[1])
+        return 0
     if args and args[0] == 'preferences' and len(args) == 2 and args[1] in ('setup', 'update'):
         value = settings(args[1] == 'update')
         if value:
