@@ -133,7 +133,8 @@ elif name == 'curl':
         sys.exit(status)
     pathlib.Path(args[args.index('-o') + 1]).write_text("""#!/bin/sh
 printf '%s' "$T3CODE_CHANNEL" > "$INSTALL_FIXTURE/t3-channel"
-test -z "${T3CODE_VERSION:-}" || exit 1
+test -z "${T3CODE_VERSION:-}" || test "$T3CODE_VERSION" = "${FIXTURE_PINNED_T3:-}" || exit 1
+printf '%s' "${T3CODE_VERSION:-}" > "$INSTALL_FIXTURE/t3-version"
 if [ "${FIXTURE_INSTALL_STATUS:-0}" != 0 ]; then exit "$FIXTURE_INSTALL_STATUS"; fi
 bin_dir="${T3CODE_INSTALL_BIN_DIR:-$HOME/.local/bin}"
 mkdir -p "$bin_dir"
@@ -153,6 +154,8 @@ elif name == 'systemctl':
     if args[:1] in (['is-enabled'], ['is-active']):
         sys.exit(3 if args[-1] in os.environ.get('FIXTURE_SERVICES_DOWN', '').split() else 0)
     sys.exit(int(os.environ.get('FIXTURE_USER_SYSTEMCTL_STATUS', '0')))
+elif name == 'getconf':
+    print(os.environ.get('FIXTURE_PAGESIZE', '4096') if args == ['PAGESIZE'] else '')
 '''
 
 
@@ -176,7 +179,7 @@ class InstallKeydTests(unittest.TestCase):
         stub = self.bin / 'stub'
         stub.write_text(STUB)
         stub.chmod(0o755)
-        for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw'):
+        for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw', 'getconf', 'readelf'):
             (self.bin / name).symlink_to(stub)
         (self.root / 'home').mkdir()
         (self.root / 'nightly-t3').write_text('#!/bin/sh\nprintf "t3 0.0.0-nightly.20261018.1\\n"\n')
@@ -381,6 +384,14 @@ raise SystemExit(os.WEXITSTATUS(status))
                 self.assertEqual(privileged[0], ['sudo', '-n', '/usr/bin/true'])
                 self.assertEqual(oct(manifest.stat().st_mode & 0o777), '0o644')
                 self.assertEqual(manifest.read_bytes(), (REPO / 'chromium/extensions' / manifest.name).read_bytes())
+
+    def test_update_primes_sudo_when_readelf_is_missing(self):
+        self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
+        (self.bin / 'readelf').unlink()
+        self.env['FIXTURE_SUDO_CACHED'] = '1'
+        result = self.run_update()
+        self.assertNotIn('sudo was not used', result.stdout)
+        self.assertEqual(self.privileged_calls()[0], ['sudo', '-n', '/usr/bin/true'])
 
     def test_test_root_without_the_harness_guard_is_refused(self):
         del self.env['GROUNDWORK_TESTING']
@@ -823,6 +834,35 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertEqual((self.root / 't3-channel').read_text(), 'nightly')
         self.run_install()
         self.assertEqual(sum(call[0] == 'curl' for call in self.calls()), 2)
+
+    def test_small_pages_install_the_newest_nightly(self):
+        self.run_install()
+        self.assertEqual((self.root / 't3-version').read_text(), '')
+
+    def test_large_pages_pin_the_last_known_good_nightly(self):
+        self.env.update(FIXTURE_PAGESIZE='16384', FIXTURE_PINNED_T3='0.1.2-nightly.20261021.3499',
+                        T3CODE_VERSION='ambient-fixture')
+        result = self.run_install()
+        self.assertEqual((self.root / 't3-version').read_text(), '0.1.2-nightly.20261021.3499')
+        self.assertEqual((self.root / 't3-channel').read_text(), 'nightly')
+        self.assertIn('pingdotgg/t3code#23433', result.stdout)
+
+    def test_large_pages_keep_a_working_nightly_on_rerun(self):
+        self.env.update(FIXTURE_PAGESIZE='16384', FIXTURE_PINNED_T3='0.1.2-nightly.20261021.3499')
+        self.run_install()
+        (self.root / 'calls.jsonl').unlink()
+        (self.root / 't3-version').unlink()
+        (self.bin / 't3').unlink()
+        result = self.run_install()
+        self.assertFalse(any(call[0] == 'curl' for call in self.calls()))
+        self.assertFalse((self.root / 't3-version').exists())
+        self.assertIn('Keeping the installed T3 Code Nightly on this 16 KiB-page kernel', result.stdout)
+
+    def test_readelf_comes_from_binutils(self):
+        (self.bin / 'readelf').unlink()
+        result = self.run_install(success=False)
+        self.assertIn(['omarchy', 'pkg', 'add', 'binutils'], self.calls())
+        self.assertIn('binutils is still unavailable', result.stderr)
 
     def test_nightly_installer_failure_stops_before_home_changes(self):
         self.env['FIXTURE_INSTALL_STATUS'] = '1'
