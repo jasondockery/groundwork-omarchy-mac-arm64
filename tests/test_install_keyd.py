@@ -152,7 +152,7 @@ elif name == 'curl':
             sys.exit(1)
         payload = io.BytesIO()
         with zipfile.ZipFile(payload, 'w') as archive:
-            archive.writestr('bun-linux-aarch64/bun', b'\\x7fELFfixture-bun')
+            archive.writestr(zipfile.ZipInfo('bun-linux-aarch64/bun', date_time=(1980, 1, 1, 0, 0, 0)), b'\\x7fELFfixture-bun')
         data = payload.getvalue()
         if url.endswith('/bun-linux-aarch64.zip'):
             output.write_bytes(data)
