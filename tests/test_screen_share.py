@@ -199,6 +199,21 @@ class ScreenShareTests(unittest.TestCase):
         self.runtime_patch.start()
         self.addCleanup(self.runtime_patch.stop)
 
+    def _seed_matching_files(self, password='abcdefgh'):
+        config = screen_share.config_path()
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(screen_share.config_text(password))
+        binary = self.home / '.local/bin/groundwork-screen-share'
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_bytes(Path(screen_share.__file__).read_bytes())
+        unit = self.home / '.config/systemd/user/groundwork-screen-share.service'
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        unit.write_text(screen_share.UNIT)
+        return config, unit
+
+    def _commands(self, run):
+        return [call.args[0] for call in run.call_args_list]
+
     def test_configuration_is_private_idempotent_and_automatically_enabled(self):
         with patch.object(screen_share.subprocess, 'run') as run:
             with patch.dict(os.environ, {'WAYLAND_DISPLAY': 'fixture-wayland'}):
@@ -361,6 +376,207 @@ class ScreenShareTests(unittest.TestCase):
         self.assertIn(restart, [call.args[0] for call in run.call_args_list])
         self.assertIn('Restarting screen sharing; an active remote session will drop.', out.getvalue())
         self.assertFalse(marker.exists())
+
+    def test_restart_marker_is_recorded_before_daemon_reload(self):
+        marker = self.runtime / 'groundwork-screen-share' / 'restart-needed'
+        reload = ['systemctl', '--user', 'daemon-reload']
+
+        def fail_reload(command, **kwargs):
+            if command == reload:
+                self.assertEqual(marker.read_text(), 'pending\n')
+                raise subprocess.CalledProcessError(1, command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch.object(screen_share.subprocess, 'run', side_effect=fail_reload) as run:
+            with redirect_stdout(io.StringIO()):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    screen_share.configure()
+        self.assertEqual(marker.read_text(), 'pending\n')
+        self.assertNotIn(['systemctl', '--user', 'restart', 'groundwork-screen-share.service'],
+                         self._commands(run))
+
+    def test_active_service_restarts_without_a_wayland_display(self):
+        self._seed_matching_files()
+        unit = self.home / '.config/systemd/user/groundwork-screen-share.service'
+        unit.write_text(screen_share.UNIT.replace('RestartSec=10', 'RestartSec=11'))
+        marker = self.runtime / 'groundwork-screen-share' / 'restart-needed'
+        restart = ['systemctl', '--user', 'restart', 'groundwork-screen-share.service']
+        is_active = ['systemctl', '--user', 'is-active', '--quiet', 'groundwork-screen-share.service']
+        seen = []
+
+        def answer(command, **kwargs):
+            if command == ['systemctl', '--user', 'daemon-reload']:
+                seen.append(marker.read_text())
+            if command == is_active:
+                return subprocess.CompletedProcess(command, 0)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch.dict(os.environ):
+            os.environ.pop('WAYLAND_DISPLAY', None)
+            with patch.object(screen_share.subprocess, 'run', side_effect=answer) as run:
+                with redirect_stdout(io.StringIO()) as out:
+                    screen_share.configure()
+        self.assertEqual(seen, ['pending\n'])
+        self.assertIn(is_active, self._commands(run))
+        self.assertIn(restart, self._commands(run))
+        self.assertIn('Restarting screen sharing; an active remote session will drop.', out.getvalue())
+        self.assertFalse(marker.exists())
+
+    def test_inactive_service_drops_the_marker_without_restarting(self):
+        marker = self.runtime / 'groundwork-screen-share' / 'restart-needed'
+        is_active = ['systemctl', '--user', 'is-active', '--quiet', 'groundwork-screen-share.service']
+        recorded = []
+
+        def answer(command, **kwargs):
+            if command == ['systemctl', '--user', 'daemon-reload']:
+                recorded.append(marker.read_text())
+            if command == is_active:
+                return subprocess.CompletedProcess(command, 3)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch.dict(os.environ):
+            os.environ.pop('WAYLAND_DISPLAY', None)
+            with patch.object(screen_share.subprocess, 'run', side_effect=answer) as run:
+                with redirect_stdout(io.StringIO()) as out:
+                    screen_share.configure()
+        self.assertEqual(recorded, ['pending\n'])
+        self.assertNotIn(['systemctl', '--user', 'restart', 'groundwork-screen-share.service'],
+                         self._commands(run))
+        self.assertNotIn('will drop', out.getvalue())
+        self.assertFalse(marker.exists())
+
+    def test_systemctl_error_keeps_the_restart_marker(self):
+        self._seed_matching_files()
+        unit = self.home / '.config/systemd/user/groundwork-screen-share.service'
+        unit.write_text(screen_share.UNIT.replace('RestartSec=10', 'RestartSec=11'))
+        marker = self.runtime / 'groundwork-screen-share' / 'restart-needed'
+        restart = ['systemctl', '--user', 'restart', 'groundwork-screen-share.service']
+        is_active = ['systemctl', '--user', 'is-active', '--quiet', 'groundwork-screen-share.service']
+
+        def unknown(command, **kwargs):
+            if command == is_active:
+                return subprocess.CompletedProcess(command, 4)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch.dict(os.environ):
+            os.environ.pop('WAYLAND_DISPLAY', None)
+            with patch.object(screen_share.subprocess, 'run', side_effect=unknown) as first:
+                with redirect_stdout(io.StringIO()):
+                    screen_share.configure()
+            self.assertEqual(marker.read_text(), 'pending\n')
+            self.assertNotIn(restart, self._commands(first))
+            unit.write_text(screen_share.UNIT)
+            with patch.object(screen_share.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as second:
+                with redirect_stdout(io.StringIO()) as out:
+                    screen_share.configure()
+        self.assertIn(restart, self._commands(second))
+        self.assertIn('Restarting screen sharing; an active remote session will drop.', out.getvalue())
+        self.assertFalse(marker.exists())
+
+    def test_systemctl_oserror_keeps_the_restart_marker(self):
+        marker = self.runtime / 'groundwork-screen-share' / 'restart-needed'
+        is_active = ['systemctl', '--user', 'is-active', '--quiet', 'groundwork-screen-share.service']
+
+        def fail(command, **kwargs):
+            if command == is_active:
+                raise OSError('systemctl is unavailable')
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch.dict(os.environ):
+            os.environ.pop('WAYLAND_DISPLAY', None)
+            with patch.object(screen_share.subprocess, 'run', side_effect=fail) as run:
+                with redirect_stdout(io.StringIO()) as out:
+                    screen_share.configure()
+        self.assertEqual(marker.read_text(), 'pending\n')
+        self.assertNotIn(['systemctl', '--user', 'restart', 'groundwork-screen-share.service'],
+                         self._commands(run))
+        self.assertNotIn('will drop', out.getvalue())
+
+    def test_unwritable_runtime_dir_still_restarts_an_active_service(self):
+        self._seed_matching_files()
+        self.runtime.mkdir()
+        blocked = self.runtime / 'groundwork-screen-share'
+        blocked.write_text('not a directory')
+        unit = self.home / '.config/systemd/user/groundwork-screen-share.service'
+        unit.write_text(screen_share.UNIT.replace('RestartSec=10', 'RestartSec=11'))
+        restart = ['systemctl', '--user', 'restart', 'groundwork-screen-share.service']
+        with patch.dict(os.environ):
+            os.environ.pop('WAYLAND_DISPLAY', None)
+            with patch.object(screen_share.subprocess, 'run',
+                              return_value=subprocess.CompletedProcess([], 0)) as run:
+                with redirect_stdout(io.StringIO()) as out:
+                    screen_share.configure()
+        self.assertIn(['systemctl', '--user', 'is-active', '--quiet', 'groundwork-screen-share.service'],
+                      self._commands(run))
+        self.assertIn(restart, self._commands(run))
+        self.assertIn('Restarting screen sharing; an active remote session will drop.', out.getvalue())
+        self.assertEqual(blocked.read_text(), 'not a directory')
+
+    def test_user_runtime_stamp_is_a_config_change_without_xdg_runtime_dir(self):
+        config, _unit = self._seed_matching_files()
+        user_runtime = self.home / 'user-runtime'
+        stamp = user_runtime / 'groundwork-screen-share' / 'config.sha256'
+        stamp.parent.mkdir(parents=True)
+        stamp.write_text(hashlib.sha256(screen_share.config_text('ijklmnop').encode()).hexdigest() + '\n')
+        restart = ['systemctl', '--user', 'restart', 'groundwork-screen-share.service']
+        with patch.dict(os.environ, {'WAYLAND_DISPLAY': 'fixture-wayland'}):
+            os.environ.pop('XDG_RUNTIME_DIR', None)
+            with patch.object(screen_share, 'user_runtime_root', return_value=user_runtime):
+                with patch.object(screen_share.subprocess, 'run',
+                                  return_value=subprocess.CompletedProcess([], 0)) as run:
+                    with redirect_stdout(io.StringIO()) as out:
+                        screen_share.configure()
+        self.assertIn(restart, self._commands(run))
+        self.assertIn('Restarting screen sharing; an active remote session will drop.', out.getvalue())
+        self.assertEqual(config.read_text(), screen_share.config_text('abcdefgh'))
+        self.assertFalse((user_runtime / 'groundwork-screen-share' / 'restart-needed').exists())
+
+    def test_missing_user_runtime_stamp_is_not_a_config_change(self):
+        self._seed_matching_files()
+        user_runtime = self.home / 'user-runtime'
+        user_runtime.mkdir()
+        with patch.dict(os.environ, {'WAYLAND_DISPLAY': 'fixture-wayland'}):
+            os.environ.pop('XDG_RUNTIME_DIR', None)
+            with patch.object(screen_share, 'user_runtime_root', return_value=user_runtime):
+                stamp = screen_share.config_stamp_path()
+                self.assertEqual(stamp, user_runtime / 'groundwork-screen-share' / 'config.sha256')
+                self.assertFalse(stamp.exists())
+                self.assertFalse(screen_share.served_config_changed(screen_share.config_path()))
+                with patch.object(screen_share.subprocess, 'run',
+                                  return_value=subprocess.CompletedProcess([], 0)) as run:
+                    with redirect_stdout(io.StringIO()) as out:
+                        screen_share.configure()
+        self.assertNotIn(['systemctl', '--user', 'restart', 'groundwork-screen-share.service'],
+                         self._commands(run))
+        self.assertNotIn('will drop', out.getvalue())
+        self.assertFalse((user_runtime / 'groundwork-screen-share' / 'config.sha256').exists())
+
+    def test_state_file_marker_is_used_when_no_runtime_dir_is_writable(self):
+        blocked = self.home / 'norun'
+        blocked.mkdir()
+        blocked.chmod(0)
+        self.addCleanup(blocked.chmod, 0o700)
+        xdg = self.home / 'xdg-file'
+        xdg.write_text('not a directory')
+        marker = self.home / '.local/state/groundwork/screen-share-restart-needed'
+
+        def fail_reload(command, **kwargs):
+            if command == ['systemctl', '--user', 'daemon-reload']:
+                self.assertEqual(marker.read_text(), 'pending\n')
+                raise subprocess.CalledProcessError(1, command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch.dict(os.environ, {'XDG_RUNTIME_DIR': str(xdg)}):
+            os.environ.pop('WAYLAND_DISPLAY', None)
+            with patch.object(screen_share, 'user_runtime_root', return_value=blocked / '1000'):
+                self.assertIsNone(screen_share.config_stamp_path())
+                self.assertFalse(screen_share.served_config_changed(screen_share.config_path()))
+                with patch.object(screen_share.subprocess, 'run', side_effect=fail_reload):
+                    with redirect_stdout(io.StringIO()):
+                        with self.assertRaises(subprocess.CalledProcessError):
+                            screen_share.configure()
+        self.assertEqual(marker.read_text(), 'pending\n')
+        self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
 
     def test_stop_child_kills_when_the_wait_times_out(self):
         child = subprocess.Popen(

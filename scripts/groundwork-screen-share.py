@@ -100,11 +100,50 @@ def read_config(path):
     return match[1]
 
 
-def config_stamp_path():
+def user_runtime_root():
+    # The user manager sets XDG_RUNTIME_DIR to this path. SSH and cron often
+    # leave the variable unset while the desktop service still stores its stamp here.
+    return Path('/run/user') / str(os.getuid())
+
+
+def directory_writable(path):
+    # The directory may not exist yet. Setup can create it when an ancestor is
+    # a real, writable directory. A symlink is not that directory.
+    current = path
+    while True:
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            parent = current.parent
+            if parent == current:
+                return False
+            current = parent
+            continue
+        except OSError:
+            return False
+        return (not stat.S_ISLNK(info.st_mode) and stat.S_ISDIR(info.st_mode)
+                and os.access(current, os.W_OK | os.X_OK))
+
+
+def runtime_state_dir():
+    # Prefer the variable this process inherited, then the directory the user
+    # service uses, so a stamp written at login is visible to a later apply.
+    candidates = []
     root = os.environ.get('XDG_RUNTIME_DIR')
-    if not root:
+    if root:
+        candidates.append(Path(root))
+    candidates.append(user_runtime_root())
+    for candidate in candidates:
+        if directory_writable(candidate):
+            return candidate / 'groundwork-screen-share'
+    return None
+
+
+def config_stamp_path():
+    directory = runtime_state_dir()
+    if directory is None:
         return None
-    return Path(root) / 'groundwork-screen-share' / 'config.sha256'
+    return directory / 'config.sha256'
 
 
 def remember_served_config(data):
@@ -134,16 +173,14 @@ def served_config_changed(path):
 
 
 def restart_marker_path():
-    root = os.environ.get('XDG_RUNTIME_DIR')
-    if not root:
-        return None
-    return Path(root) / 'groundwork-screen-share' / 'restart-needed'
+    directory = runtime_state_dir()
+    if directory is not None:
+        return directory / 'restart-needed'
+    return Path.home() / '.local/state/groundwork/screen-share-restart-needed'
 
 
 def restart_is_pending():
     path = restart_marker_path()
-    if path is None:
-        return False
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
@@ -155,17 +192,31 @@ def restart_is_pending():
 
 def mark_restart_needed():
     path = restart_marker_path()
-    if path is None:
-        return
     private_directory(path.parent)
     replace_file(path, b'pending\n', 0o600)
 
 
 def clear_restart_marker():
     path = restart_marker_path()
-    if path is None or path.is_symlink() or not path.is_file():
+    if path.is_symlink() or not path.is_file():
         return
     path.unlink()
+
+
+def service_is_active():
+    # is-active exits 0 when the unit is running and 3 when it is not.
+    # Any other result leaves the restart record for a later apply.
+    try:
+        result = subprocess.run(
+            ['systemctl', '--user', 'is-active', '--quiet', 'groundwork-screen-share.service'],
+            check=False, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode == 0:
+        return True
+    if result.returncode == 3:
+        return False
+    return None
 
 
 def configure():
@@ -192,15 +243,31 @@ def configure():
     unit.parent.mkdir(parents=True, exist_ok=True)
     if replace_file(unit, UNIT.encode(), 0o644):
         changed = True
+    # Persist this before daemon-reload. An SSH apply has no WAYLAND_DISPLAY,
+    # and a reload or interrupt must not leave the new files without a record.
+    if changed:
+        try:
+            mark_restart_needed()
+        except (OSError, RuntimeError):
+            # Creating the runtime directory can fail. A service that is
+            # already running still needs the restart below.
+            pass
     subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True, timeout=20)
     subprocess.run(['systemctl', '--user', 'enable', 'groundwork-screen-share.service'], check=True, timeout=20)
     # The running service keeps the session when its unit, helper, and
     # WayVNC config are the same bytes. Restarting here is what drops it.
-    if changed and os.environ.get('WAYLAND_DISPLAY'):
-        print('Restarting screen sharing; an active remote session will drop.')
-        mark_restart_needed()
-        subprocess.run(['systemctl', '--user', 'restart', 'groundwork-screen-share.service'], check=True, timeout=20)
-        clear_restart_marker()
+    if changed:
+        if os.environ.get('WAYLAND_DISPLAY'):
+            active = True
+        else:
+            active = service_is_active()
+        if active is True:
+            print('Restarting screen sharing; an active remote session will drop.')
+            subprocess.run(['systemctl', '--user', 'restart', 'groundwork-screen-share.service'],
+                           check=True, timeout=20)
+            clear_restart_marker()
+        elif active is False:
+            clear_restart_marker()
     print('Screen sharing enabled for desktop login; it waits for Tailscale sign-in.')
     print('Show its password in a local terminal: groundwork-screen-share password')
 

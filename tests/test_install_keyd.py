@@ -152,6 +152,8 @@ elif name == 'curl':
             sys.exit(1)
         payload = io.BytesIO()
         with zipfile.ZipFile(payload, 'w') as archive:
+            # Zip timestamps move every two seconds. The archive and its
+            # checksum are separate downloads, so the entry date stays fixed.
             archive.writestr(zipfile.ZipInfo('bun-linux-aarch64/bun', date_time=(1980, 1, 1, 0, 0, 0)), b'\\x7fELFfixture-bun')
         data = payload.getvalue()
         if url.endswith('/bun-linux-aarch64.zip'):
@@ -271,10 +273,14 @@ class InstallKeydTests(unittest.TestCase):
                         HOME=str(self.root / 'home'),
                         XDG_CONFIG_HOME=str(self.root / 'home/.config'),
                         XDG_STATE_HOME=str(self.root / 'home/.local/state'),
+                        # Screen sharing writes its restart record here. A host
+                        # runtime directory must not receive that file.
+                        XDG_RUNTIME_DIR=str(self.root / 'runtime'),
                         GROUNDWORK_PLUGIN_LIST=str(plugin_list),
                         PATH=f'{self.root}/home/.local/bin:{self.bin}')
         self.env.pop('T3CODE_INSTALL_BIN_DIR', None)
         self.env.pop('GROUNDWORK_OBSIDIAN_VAULT', None)
+        self.env.pop('WAYLAND_DISPLAY', None)
 
     def run_install(self, *args, success=True):
         result = subprocess.run(['bash', str(REPO / 'install.sh'), *args],
