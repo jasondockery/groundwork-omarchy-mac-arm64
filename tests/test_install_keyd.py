@@ -90,6 +90,15 @@ elif name == 'mise':
     target = root / 'bin' / provider
     if not target.exists():
         target.symlink_to(root / 'bin' / 'stub')
+elif name == 'omarchy-install-cursor':
+    status = int(os.environ.get('FIXTURE_CURSOR_INSTALL_STATUS', '0'))
+    if status:
+        sys.exit(status)
+    if os.environ.get('FIXTURE_CURSOR_INSTALL_SKIP_BIN') == '1':
+        sys.exit(0)
+    cursor_bin = root / 'bin' / 'cursor'
+    if not cursor_bin.exists():
+        cursor_bin.symlink_to(root / 'bin' / 'stub')
 elif name == 'stow':
     source = pathlib.Path(args[args.index('--dir') + 1]) / 'hypr'
     target = pathlib.Path(args[args.index('--target') + 1])
@@ -501,11 +510,83 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertNotIn(['hyprctl', 'configerrors'], self.calls())
         self.assertNotIn(['sudo', 'keyd', 'reload'], self.calls())
 
-    def test_native_agents_are_preserved_and_cursor_is_installed(self):
+    def cursor_argv(self):
+        return self.root / 'home/.config/Cursor/argv.json'
+
+    def test_existing_cursor_keeps_its_command_and_gains_a_password_store(self):
+        (self.bin / 'omarchy-install-cursor').symlink_to(self.bin / 'stub')
+        argv = self.cursor_argv()
+        argv.parent.mkdir(parents=True)
+        argv.write_text('{\n  "disable-hardware-acceleration": true\n}\n')
         self.run_install()
         calls = self.calls()
-        self.assertIn(['omarchy', 'pkg', 'add', 'cursor-bin'], calls)
+        self.assertNotIn(['omarchy', 'pkg', 'add', 'cursor-bin'], calls)
+        self.assertNotIn(['omarchy-install-cursor'], calls)
         self.assertFalse(any(call[0] == 'mise' for call in calls))
+        saved = json.loads(argv.read_text())
+        self.assertEqual(saved['password-store'], 'gnome-libsecret')
+        self.assertTrue(saved['disable-hardware-acceleration'])
+
+    def test_missing_cursor_uses_omarchy_installer(self):
+        (self.bin / 'cursor').unlink()
+        (self.bin / 'omarchy-install-cursor').symlink_to(self.bin / 'stub')
+        self.run_install()
+        self.assertIn(['omarchy-install-cursor'], self.calls())
+        self.assertNotIn(['omarchy', 'pkg', 'add', 'cursor-bin'], self.calls())
+        self.assertEqual(json.loads(self.cursor_argv().read_text())['password-store'], 'gnome-libsecret')
+
+    def test_missing_cursor_without_omarchy_installer_stops(self):
+        (self.bin / 'cursor').unlink()
+        result = self.run_install(success=False)
+        self.assertIn('omarchy-install-cursor', result.stderr)
+        self.assertNotIn(['omarchy', 'pkg', 'add', 'cursor-bin'], self.calls())
+        self.assertFalse(self.cursor_argv().exists())
+        self.assertFalse(any(call[0] in ('stow', 'hyprctl') for call in self.calls()))
+
+    def test_cursor_installer_without_a_command_stops(self):
+        (self.bin / 'cursor').unlink()
+        (self.bin / 'omarchy-install-cursor').symlink_to(self.bin / 'stub')
+        self.env['FIXTURE_CURSOR_INSTALL_SKIP_BIN'] = '1'
+        result = self.run_install(success=False)
+        self.assertIn('did not provide a cursor command', result.stderr)
+        self.assertFalse(any(call[0] in ('stow', 'hyprctl') for call in self.calls()))
+
+    def test_existing_cursor_password_store_is_preserved(self):
+        argv = self.cursor_argv()
+        argv.parent.mkdir(parents=True)
+        original = '{"password-store": "basic", "enable-crash-reporter": false}\n'
+        argv.write_text(original)
+        self.run_install()
+        self.assertEqual(argv.read_text(), original)
+
+    def test_invalid_cursor_argv_stops_without_rewriting_it(self):
+        argv = self.cursor_argv()
+        argv.parent.mkdir(parents=True)
+        argv.write_text('{ not json\n')
+        result = self.run_install(success=False)
+        self.assertIn('left unchanged', result.stderr)
+        self.assertEqual(argv.read_text(), '{ not json\n')
+        self.assertFalse(any(call[0] in ('stow', 'hyprctl') for call in self.calls()))
+
+    def test_symlinked_cursor_argv_is_refused(self):
+        argv = self.cursor_argv()
+        argv.parent.mkdir(parents=True)
+        target = self.root / 'elsewhere.json'
+        target.write_text('{}\n')
+        argv.symlink_to(target)
+        result = self.run_install(success=False)
+        self.assertIn('not a regular file', result.stderr)
+        self.assertEqual(target.read_text(), '{}\n')
+
+    def test_update_does_not_reinstall_an_existing_cursor(self):
+        (self.bin / 'omarchy-install-cursor').symlink_to(self.bin / 'stub')
+        self.run_install('--without-keyd', '--without-screen-sharing')
+        (self.root / 'calls.jsonl').unlink()
+        result = subprocess.run(['python3', str(REPO / 'scripts/groundwork-update.py'), 'setup', str(REPO), '--update'],
+                                env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn(['omarchy-install-cursor'], self.calls())
+        self.assertNotIn(['omarchy', 'pkg', 'add', 'cursor-bin'], self.calls())
 
     def test_missing_agent_uses_omarchy_mise_without_user_configuration(self):
         (self.bin / 'grok').unlink()

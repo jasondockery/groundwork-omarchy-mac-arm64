@@ -158,6 +158,59 @@ install_package() {
     exit 1
   fi
 }
+# Omarchy Mac's installer owns Cursor on Apple Silicon, including the GNOME
+# keyring password store. An existing cursor command stays put. This only fills
+# a missing password-store key and never replaces a value already written.
+ensure_cursor_password_store() {
+  python3 - "$HOME/.config/Cursor/argv.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if path.is_symlink() or (path.exists() and not path.is_file()):
+    print(f"Refusing to edit Cursor argv.json because it is not a regular file: {path}", file=sys.stderr)
+    sys.exit(1)
+try:
+    text = path.read_text() if path.exists() else ""
+    data = json.loads(text) if text.strip() else {}
+except (OSError, json.JSONDecodeError) as error:
+    print(f"Cursor argv.json was left unchanged: {path} ({error})", file=sys.stderr)
+    sys.exit(1)
+if not isinstance(data, dict):
+    print(f"Cursor argv.json must be a JSON object: {path}", file=sys.stderr)
+    sys.exit(1)
+current = data.get("password-store")
+if current == "gnome-libsecret":
+    sys.exit(0)
+if current is not None:
+    print(f"Cursor password-store is already {current}; argv.json was left unchanged.")
+    sys.exit(0)
+data["password-store"] = "gnome-libsecret"
+try:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+except OSError as error:
+    print(f"Cursor argv.json was left unchanged: {path} ({error})", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+install_cursor() {
+  if ! command -v cursor >/dev/null; then
+    if ! command -v omarchy-install-cursor >/dev/null; then
+      echo "Omarchy's Cursor installer, omarchy-install-cursor, is unavailable and cursor is not installed." >&2
+      echo "Update Omarchy, then rerun ./install.sh." >&2
+      exit 1
+    fi
+    omarchy-install-cursor
+    hash -r
+    if ! command -v cursor >/dev/null; then
+      echo "omarchy-install-cursor did not provide a cursor command." >&2
+      exit 1
+    fi
+  fi
+  ensure_cursor_password_store
+}
 # Omarchy owns provider versions and configuration through its default mise
 # tools. Install those declarations without choosing a default agent or writing
 # a competing user config. Existing provider commands retain their owner.
@@ -192,7 +245,7 @@ for provider in claude codex opencode grok; do
     fi
   fi
 done
-install_package cursor-bin cursor
+install_cursor
 
 install_package herdr
 install_package tailscale
