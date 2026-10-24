@@ -129,11 +129,11 @@ The chosen track is the newest [Omarchy Mac Installer](https://github.com/omacom
 
 Back up this Linux home before you reboot. Copy what you cannot re-clone, including SSH keys and other account credentials, onto storage outside the internal SSD. Open the backup while this desktop is still up.
 
-macOS APFS and RecoveryOS stay on the SSD beside the LUKS-encrypted Omarchy btrfs root. This Aurora/Limine install is not an `asahi-root` volume. To boot macOS, shut the Mac down. Hold the power button until startup options appear, then choose the macOS disk. That hardware screen runs before either desktop. `asahi-bless` is present on current installer images, but the one-shot next-boot path was not checked on this machine, so do not treat it as the documented command here.
+macOS APFS and RecoveryOS stay on the SSD beside the LUKS-encrypted Omarchy btrfs root. This Aurora install boots m1n1-aurora → U-Boot → Limine and is not an `asahi-root` volume. To boot macOS, shut the Mac down. Hold the power button until startup options appear, then choose the macOS disk. That hardware screen runs before either desktop. `asahi-bless` is present on current installer images, but the one-shot next-boot path was not checked on this machine, so do not treat it as the documented command here.
 
 ## Run on: the powered-off Mac
 
-Use this when the Omarchy desktop cannot reboot into macOS for you. Shut the Mac down. Hold the power button until startup options appear, then choose the macOS disk. This is the hardware startup screen, before either desktop is running.
+This is the standard route to macOS. Shut the Mac down. Hold the power button until startup options appear, then choose the macOS disk. This is the hardware startup screen, before either desktop is running.
 
 ## Run on: macOS
 
@@ -156,13 +156,11 @@ Still in macOS, download the newest installer prerelease from the upstream [inst
 
 The signed catalog picks the image. A later install uses the catalog's current selection, not a dated pin.
 
-The reference M1 Mac mini is `apple,j274`. It migrated on 2026-10-17 with installer **2.2.0** and image `omarchy-mac-edge-2026.10.14-79f8e36b977f`. Those are what this machine installed, not a pin for later installs. As of 2026-10-23, [catalog-edge](https://github.com/omacom/omarchy-mac-installer/releases/tag/catalog-edge) still enables `apple,j274`, requires installer **2.3.8**, and selects image `omarchy-mac-edge-2026.10.23-bdc3a487ab14-a3b3c6f5e77c`. These are pre-release artifacts.
+The reference M1 Mac mini is `apple,j274`. It migrated on 2026-10-17 with installer **2.2.0** and image `omarchy-mac-edge-2026.10.14-79f8e36b977f`. Those are what this machine installed, not a pin for later installs. The catalog's latest observed requirements and selected image are recorded in [status](docs/status.md). These are pre-release artifacts.
 
 - Installer **2.2.0**, used on the mini: [installer release](https://github.com/omacom/omarchy-mac-installer/releases/tag/v2.2.0). DMG SHA-256: `749f94d729ae8f65629f7b0a51beab9c519af983d203a60134fd6562c979447b`.
-- Current installer **2.3.8** (pre-release): [installer release](https://github.com/omacom/omarchy-mac-installer/releases/tag/v2.3.8). DMG SHA-256: `61d15a55adb084824d007160fe7a4af07d5603432b32ce68e02c53b3637abc34`.
 - Signed rolling edge catalog: [catalog-edge](https://github.com/omacom/omarchy-mac-installer/releases/tag/catalog-edge).
 - Image the mini installed: [10.14 image](https://github.com/omacom/omarchy-mac-installer/releases/tag/omarchy-mac-edge-2026.10.14-79f8e36b977f). Image SHA-256: `2e7ef7e14e81ca62d6761c7a70db96d9d2e86ff07b6166530b5164c260406584`.
-- Image the catalog selects today: [10.23 image](https://github.com/omacom/omarchy-mac-installer/releases/tag/omarchy-mac-edge-2026.10.23-bdc3a487ab14-a3b3c6f5e77c).
 
 ## Run on: recoveryOS
 
@@ -198,7 +196,7 @@ Start T3 Code with `t3`. It opens the local web UI. Sign in to at least one prov
 
 The installer is a one-time OS install. Ongoing fixes come from `omarchy update` on the edge channel. Before a later reinstall, read the upstream installer releases again. The signed edge catalog may select a newer image, and an existing install still has to be removed first.
 
-This README records what the reference M1 Mac mini installed on 2026-10-17 and what the edge catalog selected on 2026-10-23. File desktop bugs on [omacom/omarchy](https://github.com/omacom/omarchy), installer or image bugs on [omacom/omarchy-mac-installer](https://github.com/omacom/omarchy-mac-installer), and hardware bugs on [omacom/omarchy-mac](https://github.com/omacom/omarchy-mac).
+This README records what the reference M1 Mac mini installed on 2026-10-17; the latest observed catalog selection is in [status](docs/status.md). File desktop bugs on [omacom/omarchy](https://github.com/omacom/omarchy), installer or image bugs on [omacom/omarchy-mac-installer](https://github.com/omacom/omarchy-mac-installer), and hardware bugs on [omacom/omarchy-mac](https://github.com/omacom/omarchy-mac).
 
 Notes for people and agents are in `AGENTS.md`, `docs/status.md`, and `docs/decisions/`.
 
