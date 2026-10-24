@@ -67,12 +67,35 @@ Bitwarden user Flatpak. T3's background service may restart. Other Flatpaks and
 application sign-in remain outside this command. Omarchy owns the OS, Arch
 packages, default tools, and desktop; no second system updater is installed.
 
+On a kernel with pages larger than 4 KiB (Apple Silicon uses 16 KiB),
+`update-all` first downloads the newest T3 Nightly, verifies its checksum, and
+checks the LOAD segments of every ELF file in it with `readelf -lW` (from
+`binutils`, which setup installs). If any segment is aligned below the page
+size, the build cannot start there ([pingdotgg/t3code#23433](https://github.com/pingdotgg/t3code/issues/23433)):
+the installed build is kept, the version is remembered in
+`~/.local/state/groundwork/t3-rejected.json` so it is not downloaded again, and
+the rest of the update continues. A build that passes is installed by exact
+version. If the installed T3 no longer starts, `update-all` reinstalls the
+checked build or the last known-good `0.1.2-nightly.20261021.3499`. If neither
+works, it prints a restore command, finishes the other stages, records
+`completed_with_warnings`, and exits non-zero. Setup on such a kernel keeps a Nightly that
+already starts and installs the known-good build only when T3 is missing,
+broken, or not a Nightly.
+
 For only repository configuration, run `groundwork-update`. It preserves saved
 keyd, screen-sharing, and Obsidian vault choices and does not request routine
 system or app upgrades. It can install a newly declared missing tool needed by
 the settings. Use `./install.sh` with explicit `--with-keyd`, `--without-keyd`,
 `--with-screen-sharing`, or `--without-screen-sharing` when changing those
 preferences. Skipping an existing feature does not disable its service.
+
+Routine updates ask for your password only when a system change is needed, for
+example a stopped `tailscaled` or keyd service, a changed keyd config, or a
+missing package. UFW cannot list its rules without root, so after setup adds the
+screen-sharing rule it records it in
+`~/.local/state/groundwork/ufw-screen-share-rule` and updates trust that record.
+An existing install asks for sudo once on its next update to create it. If you
+remove the UFW rule by hand, run `./install.sh` to add it again.
 
 To inspect incoming repository changes first:
 

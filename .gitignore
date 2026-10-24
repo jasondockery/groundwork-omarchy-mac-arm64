@@ -8,3 +8,7 @@
 **/*.pem
 packages/ssh/
 packages/gitconfig/
+
+# Python bytecode.
+__pycache__/
+*.pyc
