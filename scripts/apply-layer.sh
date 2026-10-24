@@ -108,7 +108,9 @@ trap cleanup EXIT
 
 # Each privileged step has a check that needs no sudo. A routine update uses
 # them to ask for administrator permission only when something must change.
-chromium_dir=/usr/share/chromium
+# GROUNDWORK_TEST_ROOT lets the isolated fixtures relocate these system paths.
+chromium_dir=${GROUNDWORK_TEST_ROOT:-}/usr/share/chromium
+keyd_config=${GROUNDWORK_TEST_ROOT:-}/etc/keyd/default.conf
 extension_dir=$chromium_dir/extensions
 screen_share_rule=(allow in on tailscale0 to any port 5900 proto tcp comment 'Groundwork screen sharing')
 screen_share_rule_marker="${XDG_STATE_HOME:-$HOME/.local/state}/groundwork/ufw-screen-share-rule"
@@ -122,10 +124,11 @@ chromium_extension_current() {
 }
 # ufw cannot list rules without root, so remember the rule this layer added.
 screen_share_rule_current() {
-  [[ -f $screen_share_rule_marker && $(<"$screen_share_rule_marker") == "${screen_share_rule[*]}" ]]
+  [[ ! -L $screen_share_rule_marker && -f $screen_share_rule_marker &&
+    $(<"$screen_share_rule_marker") == "${screen_share_rule[*]}" ]]
 }
 keyd_current() {
-  cmp -s "$root/keyd/default.conf" /etc/keyd/default.conf && service_ready keyd
+  cmp -s "$root/keyd/default.conf" "$keyd_config" && service_ready keyd
 }
 privileged_changes_needed() {
   local executable
@@ -440,9 +443,11 @@ if [[ $with_screen_sharing -eq 1 ]]; then
   python3 "$root/scripts/groundwork-screen-share.py" configure
   if command -v ufw >/dev/null && { [[ $updating -eq 0 ]] || ! screen_share_rule_current; }; then
     sudo ufw "${screen_share_rule[@]}"
-    mkdir -p "$(dirname "$screen_share_rule_marker")"
-    printf '%s\n' "${screen_share_rule[*]}" >"$screen_share_rule_marker"
+    python3 "$root/scripts/groundwork-update.py" marker write ufw-screen-share-rule "${screen_share_rule[*]}"
   fi
+else
+  # The rule is left in place; forget it so re-enabling sharing re-adds it.
+  python3 "$root/scripts/groundwork-update.py" marker remove ufw-screen-share-rule
 fi
 
 # Stow will not replace a real file. Move conflicting files aside so this
@@ -484,10 +489,10 @@ fi
 if [[ $with_keyd -eq 1 ]]; then
   install_package keyd
   if [[ $updating -eq 0 ]] || ! keyd_current; then
-    sudo mkdir -p /etc/keyd
-    if ! sudo cmp -s "$root/keyd/default.conf" /etc/keyd/default.conf; then
+    sudo mkdir -p "$(dirname "$keyd_config")"
+    if ! sudo cmp -s "$root/keyd/default.conf" "$keyd_config"; then
       # GNU cp keeps a numbered backup of an existing config, including on reruns.
-      sudo cp --backup=numbered --remove-destination "$root/keyd/default.conf" /etc/keyd/default.conf
+      sudo cp --backup=numbered --remove-destination "$root/keyd/default.conf" "$keyd_config"
     fi
     sudo systemctl enable --now keyd
     sudo keyd reload

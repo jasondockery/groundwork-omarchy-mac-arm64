@@ -74,6 +74,14 @@ the settings. Use `./install.sh` with explicit `--with-keyd`, `--without-keyd`,
 `--with-screen-sharing`, or `--without-screen-sharing` when changing those
 preferences. Skipping an existing feature does not disable its service.
 
+Routine updates ask for your password only when a system change is needed, for
+example a stopped `tailscaled` or keyd service, a changed keyd config, or a
+missing package. UFW cannot list its rules without root, so after setup adds the
+screen-sharing rule it records it in
+`~/.local/state/groundwork/ufw-screen-share-rule` and updates trust that record.
+An existing install asks for sudo once on its next update to create it. If you
+remove the UFW rule by hand, run `./install.sh` to add it again.
+
 To inspect incoming repository changes first:
 
 ```bash

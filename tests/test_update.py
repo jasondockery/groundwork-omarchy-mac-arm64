@@ -395,10 +395,46 @@ class ProcessTests(unittest.TestCase):
             raise KeyboardInterrupt
         previous = signal.signal(signal.SIGALRM, interrupt)
         self.addCleanup(signal.signal, signal.SIGALRM, previous)
-        signal.setitimer(signal.ITIMER_REAL, 1)
-        with self.assertRaises(KeyboardInterrupt):
-            updater.run(self.child(), deadline=8)
+        self.addCleanup(signal.setitimer, signal.ITIMER_REAL, 0)
+        real_communicate = subprocess.Popen.communicate
+        def communicate(process, *args, **kwargs):
+            # Interrupt only once the child has installed its SIGINT handler.
+            if not signal.getitimer(signal.ITIMER_REAL)[0]:
+                self.wait_for_child()
+                signal.setitimer(signal.ITIMER_REAL, 0.2)
+            return real_communicate(process, *args, **kwargs)
+        with patch.object(subprocess.Popen, 'communicate', communicate):
+            with self.assertRaises(KeyboardInterrupt):
+                updater.run(self.child(), deadline=8)
         self.assertEqual(self.report.read_text(), 'SIGINT')
+
+    def test_second_interrupt_during_the_grace_period_still_stops_the_child(self):
+        previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+        self.addCleanup(signal.signal, signal.SIGINT, previous)
+        # A separate process interrupts this one during the 30-second grace.
+        interrupter = subprocess.Popen(['sh', '-c', f'sleep 1.5; kill -INT {os.getpid()}'])
+        self.addCleanup(interrupter.wait)
+        started = time.monotonic()
+        with patch.object(updater, 'INTERRUPT_GRACE_SECONDS', 30):
+            with self.assertRaises(KeyboardInterrupt):
+                updater.run(self.child('ignore-sigint'), deadline=1)
+        self.assertLess(time.monotonic() - started, 10)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int(Path(str(self.report) + '.pid').read_text()), 0)
+
+    def test_permission_errors_while_stopping_are_reported_not_raised(self):
+        process = subprocess.Popen([sys.executable, '-c', 'pass'], start_new_session=True)
+        process.wait()
+        with patch.object(updater.os, 'killpg', side_effect=PermissionError), \
+                patch('sys.stderr', new_callable=io.StringIO) as errors:
+            updater.stop(process, grace=0.2)
+        self.assertIn('Could not send SIGINT', errors.getvalue())
+
+    def test_terminal_less_interactive_stage_keeps_its_heartbeat(self):
+        with patch.object(updater, 'HEARTBEAT_SECONDS', 0.1), patch('sys.stdout', new_callable=io.StringIO) as output, \
+                patch.object(updater.os, 'isatty', return_value=False):
+            updater.run([sys.executable, '-c', 'import time; time.sleep(0.5)'], capture=False, deadline=8)
+        self.assertIn('Still running', output.getvalue())
 
     def test_stage_ignoring_sigint_is_terminated_after_the_grace_period(self):
         started = time.monotonic()
