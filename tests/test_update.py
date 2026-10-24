@@ -485,6 +485,42 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
         self.assertEqual(len(smokes), 1)
         self.assert_smoke_is_confined(*smokes[0])
 
+    def test_smoke_command_uses_the_resolved_path_when_tmpdir_is_a_symlink(self):
+        self.large_pages()
+        real = self.root / 'real-tmp'
+        real.mkdir()
+        link = self.root / 'linked-tmp'
+        link.symlink_to(real, target_is_directory=True)
+        previous = tempfile.tempdir
+        tempfile.tempdir = str(link)
+        self.addCleanup(setattr, tempfile, 'tempdir', previous)
+        with patch.dict(os.environ, TMPDIR=str(link)):
+            self.update_all()
+        smokes = self.candidate_smokes()
+        self.assertEqual(len(smokes), 1)
+        call, kwargs = smokes[0]
+        self.assert_smoke_is_confined(call, kwargs)
+        binary = call[call.index('--') + 1]
+        chdir = call[call.index('--chdir') + 1]
+        bind = call[call.index('--bind') + 1]
+        resolved = os.path.realpath(link)
+        self.assertEqual(call[call.index('--bind') + 2], bind)
+        self.assertEqual(bind, os.path.realpath(bind))
+        self.assertTrue(bind.startswith(resolved + os.sep))
+        self.assertEqual(chdir, os.path.realpath(chdir))
+        self.assertTrue(chdir.startswith(bind + os.sep))
+        self.assertEqual(binary, os.path.realpath(binary))
+        self.assertEqual(str(Path(binary).parent), chdir)
+        self.assertEqual(kwargs['cwd'], chdir)
+        for argument in call:
+            self.assertNotIn(str(link), argument)
+        for key, value in kwargs['env'].items():
+            if key == 'PATH':
+                continue
+            self.assertEqual(value, os.path.realpath(value))
+            self.assertTrue(value.startswith(bind + os.sep), key)
+            self.assertNotIn(str(link), value)
+
     def test_aligned_candidate_that_crashes_is_rejected(self):
         self.large_pages()
         self.candidate_crashes = True

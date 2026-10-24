@@ -603,9 +603,23 @@ def t3_smoke_environment(directory):
     }
 
 
+def t3_resolved_smoke_paths(binary, directory):
+    """Return one real download directory and the candidate inside it.
+
+    Bubblewrap binds that directory, then chdirs to the executable's parent.
+    TMPDIR or /tmp is often a symlink. Binding the real path and then naming
+    the symlink in --chdir, the executable, cwd, or HOME/TMPDIR/XDG_* makes
+    bwrap exit 1 with "Can't chdir", so every newer nightly is skipped.
+    """
+    directory = os.path.realpath(directory)
+    binary = Path(os.path.realpath(binary))
+    return binary, directory
+
+
 def t3_sandbox_command(binary, directory):
     """Confined `t3 --version`, or None when bubblewrap is not installed.
 
+    `binary` and `directory` are the real paths from `t3_resolved_smoke_paths`.
     System directories are read-only. The download directory is the only
     writable path. The home directory is not mounted. `--unshare-pid` plus
     `--die-with-parent` reaps a double-fork when bwrap exits.
@@ -614,7 +628,7 @@ def t3_sandbox_command(binary, directory):
     if not bwrap:
         return None
     binary = Path(binary)
-    directory = str(Path(directory).resolve())
+    directory = str(directory)
     argv = [bwrap, '--die-with-parent', '--unshare-pid', '--unshare-net']
     for path in ('/usr', '/etc'):
         if Path(path).is_dir() and not Path(path).is_symlink():
@@ -665,6 +679,7 @@ def t3_candidate_check(installed, page, warnings=None):
             reject_t3(page, candidate)
             return page_size_reason(page), candidate
         binary = next(path for path in root.glob('*/t3') if path.is_file())
+        binary, directory = t3_resolved_smoke_paths(binary, directory)
         try:
             reported = run(t3_sandbox_command(binary, directory), cwd=str(binary.parent),
                            deadline=T3_CANDIDATE_SMOKE_SECONDS, stdin=subprocess.DEVNULL,
