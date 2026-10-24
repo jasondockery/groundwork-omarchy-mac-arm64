@@ -1,6 +1,6 @@
 # Desktop apps and personal notes
 
-`./install.sh` ensures Obsidian, the Bitwarden CLI (`bw`), and the Bitwarden desktop app are available alongside T3 Code Nightly, Herdr, and Tailscale. It registers the official Bitwarden extension for installed Chromium. Omarchy continues to own desktop bindings and application updates. Account sign-in, extension approval, and sync enrollment stay local to each user.
+`./install.sh` ensures Obsidian, the Bitwarden CLI (`bw`), and the Bitwarden desktop app are available alongside T3 Code Nightly, Herdr, and Tailscale. It registers the official Bitwarden extension for installed Chromium. Omarchy (`omacom/omarchy` `quattro`) continues to own desktop bindings and application updates, including the Qt 6.12 palette fix [omarchy#14553](https://github.com/omacom/omarchy/pull/14553) on this path. Account sign-in, extension approval, and sync enrollment stay local to each user.
 
 ## Bitwarden
 
@@ -30,7 +30,7 @@ To remove the layer-installed Flatpak, use `flatpak --user uninstall com.bitward
 
 ## Obsidian and the Markdown folder
 
-Obsidian is already in [Omarchy Mac's base packages](https://github.com/omacom/omarchy-mac/blob/quattro/install/omarchy-base.packages). This layer ensures its executable is available. Use stock **Super+Shift+O** to open it, then **Open folder as vault** and select:
+Obsidian is already in [Omarchy's base packages](https://github.com/omacom/omarchy/blob/quattro/install/omarchy-base.packages). This layer ensures its executable is available. Use stock **Super+Shift+O** to open it, then **Open folder as vault** and select:
 
 ```text
 ~/Documents/Obsidian/my_obsidian_vault

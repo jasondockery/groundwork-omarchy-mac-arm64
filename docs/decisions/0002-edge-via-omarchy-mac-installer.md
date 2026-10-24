@@ -1,0 +1,9 @@
+# 0002. Edge via the Omarchy Mac Installer
+
+The reference Apple Mac mini (M1, 2020) migrated on 2026-10-17. When this decision was made, that machine ran Omarchy `4.0.2-2` stable with a blank Super+Space menu. Apple Silicon still has only an edge channel: `omarchy-channel-set` refuses `stable` on `aarch64-apple` because that platform has edge pacman templates only, and the installer's `catalog-stable` and `catalog-rc` tags have no Mac release. Revisit when a stable aarch64-apple channel exists.
+
+The chosen path is the newest upstream [Omarchy Mac Installer](https://github.com/omacom/omarchy-mac-installer) prerelease and its signed `edge` catalog. The mini installed with installer `2.2.0` and image `omarchy-mac-edge-2026.10.14-79f8e36b977f` on 2026-10-17. That is a record of what this machine used, not a pin for later installs. Use the current signed catalog. The catalog's latest observed requirements and selected image, and the observed package state, are in [status](../status.md).
+
+This is an OS install, not a package-channel switch or a `groundwork-mac` setup. The installer app refuses an existing Omarchy; Remove Omarchy first, which wipes the Linux install. [PR #46](https://github.com/omacom/omarchy-mac-installer/pull/46) (reinstall over an existing install) is still open. Start from the running Omarchy system, boot macOS once, and run the installer there. The `com.omarchy.mx` cleanup uses macOS `launchctl` and `defaults`. Those commands do not run inside Omarchy. Back up required data first.
+
+After first boot, check the channel with `omarchy-channel-current` (`edge`) and run `omarchy update`. Super+Space and Super+K work on this path because [omarchy#14553](https://github.com/omacom/omarchy/pull/14553) is in `quattro`. [omarchy-mac#707](https://github.com/omacom/omarchy-mac/issues/707) and [PR #710](https://github.com/omacom/omarchy-mac/pull/710) cover only the omarchy-mac `quattro` path.

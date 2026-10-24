@@ -1,10 +1,10 @@
 # groundwork-omarchy-mac-arm64
 
-Personal settings for Omarchy on Apple Silicon. [omacom/omarchy-mac](https://github.com/omacom/omarchy-mac) owns Omarchy's desktop defaults and Apple Silicon support. The upstream [omarchy-mac-installer](https://github.com/omacom/omarchy-mac-installer) installs the Omarchy operating system. This repo only keeps personal settings that Omarchy does not provide.
+Personal settings for Omarchy on Apple Silicon. The desktop comes from [omacom/omarchy](https://github.com/omacom/omarchy) (`quattro`), packaged as `omarchy-dev` from `pkgs.omarchy.org/edge`. Apple Silicon support is the `omarchy-mac` and `omarchy-mac-boot` packages from [omacom/omarchy-mac-pkgs](https://github.com/omacom/omarchy-mac-pkgs). [omacom/omarchy-mac](https://github.com/omacom/omarchy-mac) tracks hardware; its own `quattro` branch is not what the installer uses. The upstream [omarchy-mac-installer](https://github.com/omacom/omarchy-mac-installer) installs the OS. This repo only keeps personal settings that Omarchy does not provide.
 
 The learning curriculum stays in [Groundwork](https://jasondockery.github.io/groundwork/) for now. Use [this repo's shortcut guide](docs/keybindings.md) for the Omarchy keys when an older lesson uses Groundwork-specific bindings. The `core/` submodule remains a read-only reference from the initial family split; it is not needed to install this layer. Do not copy the curriculum into this repo. [groundwork-mac](https://github.com/jasondockery/groundwork-mac) provisions a personal Mac development environment (and Linux/WSL/headless environments); it is not the Omarchy OS installer and must not be applied here.
 
-It is for any Apple Silicon Mac running Omarchy Mac: Mac mini, MacBook Air, and MacBook Pro, M1 and later, aarch64. Machine notes live in `docs/machines/`. Nothing in `packages/` or `install.sh` is specific to one model.
+It is for any Apple Silicon Mac running Omarchy: Mac mini, MacBook Air, and MacBook Pro, M1 and later, aarch64. Machine notes live in `docs/machines/`. Nothing in `packages/` or `install.sh` is specific to one model.
 
 `groundwork-mac` stays the setup for Mac, WSL, and containers. Do not `chezmoi apply` it here. This repo does not stow `core/`.
 
@@ -140,28 +140,23 @@ The install crosses the places in this table. Each step below names the one plac
 
 | Place | You are there when | Steps that run there |
 |---|---|---|
-| Omarchy, current install | The Omarchy desktop is up. The shell is Linux. `launchctl` is not a command. | Backup, then the one-shot reboot into macOS |
+| Omarchy, current install | The Omarchy desktop is up. The shell is Linux. `launchctl` is not a command. | Backup, then shut down and pick macOS from startup options |
 | macOS | The macOS desktop is up. Commands go in Terminal.app. The installer is the app you open from the DMG. | Old MX helper cleanup, download, checksum, installer app |
 | recoveryOS | The installer app has rebooted the Mac into Apple's recovery screen | The boot-policy prompt the app asks for. Use the macOS password if Apple asks. |
-| Omarchy, new install | The installer has booted the replacement Omarchy desktop | Edge channel, `omarchy update`, then `./install.sh` |
+| Omarchy, new install | The installer has booted the new Omarchy desktop | `omarchy-channel-current`, `omarchy update`, then `./install.sh` |
 | Another computer | A Mac, Linux, or WSL machine that is not this Omarchy Mac | `groundwork-mac` bootstrap only |
 
-The chosen track is the newest [Omarchy Mac Installer](https://github.com/omacom/omarchy-mac-installer) prerelease plus its signed **edge** catalog. The installer app runs in macOS and replaces this Omarchy installation. `./install.sh` in this repo runs later, on the new Omarchy desktop. `groundwork-mac` runs on another computer. `omarchy-channel-set edge` runs on the new Omarchy desktop after the installer finishes.
+The chosen track is the newest [Omarchy Mac Installer](https://github.com/omacom/omarchy-mac-installer) prerelease plus its signed **edge** catalog. Apple Silicon has only an edge channel: `omarchy-channel-set` refuses `stable` on `aarch64-apple`, and the installer's stable and rc catalogs have no Mac release. The installer app runs in macOS and refuses an existing Omarchy; Remove Omarchy first, which wipes the Linux install. [PR #46](https://github.com/omacom/omarchy-mac-installer/pull/46) (reinstall over an existing install) is still open. `./install.sh` in this repo runs later, on the new Omarchy desktop. `groundwork-mac` runs on another computer. After first boot, check the channel with `omarchy-channel-current`; do not run `omarchy-channel-set edge`.
 
 ## Run on: Omarchy, current install
 
 Back up this Linux home before you reboot. Copy what you cannot re-clone, including SSH keys and other account credentials, onto storage outside the internal SSD. Open the backup while this desktop is still up.
 
-macOS volumes are still on the SSD beside the Omarchy `asahi-root` volume. This command selects macOS for the next boot only, then reboots:
-
-```bash
-sudo asahi-bless --next --set-boot-macos
-sudo reboot
-```
+macOS APFS and RecoveryOS stay on the SSD beside the LUKS-encrypted Omarchy btrfs root. This Aurora install boots m1n1-aurora → U-Boot → Limine and is not an `asahi-root` volume. To boot macOS, shut the Mac down. Hold the power button until startup options appear, then choose the macOS disk. That hardware screen runs before either desktop. `asahi-bless` is present on current installer images, but the one-shot next-boot path was not checked on this machine, so do not treat it as the documented command here.
 
 ## Run on: the powered-off Mac
 
-Use this only when `asahi-bless` reports that macOS is ambiguous. Shut the Mac down. Hold the power button until startup options appear, then choose the macOS disk. This is the hardware startup screen, before either desktop is running.
+This is the standard route to macOS. Shut the Mac down. Hold the power button until startup options appear, then choose the macOS disk. This is the hardware startup screen, before either desktop is running.
 
 ## Run on: macOS
 
@@ -180,15 +175,15 @@ defaults delete com.omarchy.mx.installer 2>/dev/null
 
 The Application Support directory can contain the image that preview downloaded. Copy it elsewhere before removing it if you still need it. Skip the whole block when that preview app is not installed.
 
-Still in macOS, download the newest installer prerelease from the upstream [installer releases](https://github.com/omacom/omarchy-mac-installer/releases). In Terminal.app, run `shasum -a 256` on the downloaded DMG and match it to the checksum published on that release. Open the DMG and launch the app. In the app, choose the signed **edge** catalog and confirm it enables this Mac (`apple,j274` for the reference M1 Mac mini). Read the partition plan in the app before you confirm it. The app then replaces the current Omarchy installation.
+Still in macOS, download the newest installer prerelease from the upstream [installer releases](https://github.com/omacom/omarchy-mac-installer/releases). In Terminal.app, run `shasum -a 256` on the downloaded DMG and match it to the checksum published on that release. Open the DMG and launch the app. In the app, choose the signed **edge** catalog and confirm it enables this Mac (`apple,j274` for the reference M1 Mac mini). If Omarchy is already installed, the app refuses to continue until you Remove Omarchy, which wipes that Linux install. Read the partition plan in the app before you confirm it. New images ship `linux-aurora` (Limine), not `linux-asahi` or GRUB.
 
-The signed catalog picks the image. The dated image below is the catalog selection recorded with this README, for checking what you were offered. A later install uses the catalog's newer selection when the catalog has moved.
+The signed catalog picks the image. A later install uses the catalog's current selection, not a dated pin.
 
-The reference M1 Mac mini is `apple,j274`. As of 2026-10-17, the upstream edge catalog enables that machine, requires installer **2.2.0**, and selects image `omarchy-mac-edge-2026.10.14-79f8e36b977f`. These are pre-release artifacts.
+The reference M1 Mac mini is `apple,j274`. It migrated on 2026-10-17 with installer **2.2.0** and image `omarchy-mac-edge-2026.10.14-79f8e36b977f`. Those are what this machine installed, not a pin for later installs. The catalog's latest observed requirements and selected image are recorded in [status](docs/status.md). These are pre-release artifacts.
 
-- Installer **2.2.0** (pre-release): [installer release](https://github.com/omacom/omarchy-mac-installer/releases/tag/v2.2.0). DMG SHA-256: `749f94d729ae8f65629f7b0a51beab9c519af983d203a60134fd6562c979447b`.
+- Installer **2.2.0**, used on the mini: [installer release](https://github.com/omacom/omarchy-mac-installer/releases/tag/v2.2.0). DMG SHA-256: `749f94d729ae8f65629f7b0a51beab9c519af983d203a60134fd6562c979447b`.
 - Signed rolling edge catalog: [catalog-edge](https://github.com/omacom/omarchy-mac-installer/releases/tag/catalog-edge).
-- Image the catalog selects today: [image release](https://github.com/omacom/omarchy-mac-installer/releases/tag/omarchy-mac-edge-2026.10.14-79f8e36b977f). Image SHA-256: `2e7ef7e14e81ca62d6761c7a70db96d9d2e86ff07b6166530b5164c260406584`.
+- Image the mini installed: [10.14 image](https://github.com/omacom/omarchy-mac-installer/releases/tag/omarchy-mac-edge-2026.10.14-79f8e36b977f). Image SHA-256: `2e7ef7e14e81ca62d6761c7a70db96d9d2e86ff07b6166530b5164c260406584`.
 
 ## Run on: recoveryOS
 
@@ -196,22 +191,22 @@ Stay here only when the installer app reboots the Mac into Apple's recovery scre
 
 ## Run on: Omarchy, new install
 
-You are here when the replacement desktop is up. Check Wi-Fi, the keyboard, and the trackpad. Check that **Super+Space** opens the Omarchy menu and that **Super+K** works. The blank-menu report is [omarchy-mac#707](https://github.com/omacom/omarchy-mac/issues/707). Keep the backup until those shortcuts and your files are usable.
+You are here when the new desktop is up. Check Wi-Fi, the keyboard, and the trackpad. Check that **Super+Space** opens the Omarchy menu and that **Super+K** works. On this installer path the Qt 6.12 palette fix is [omarchy#14553](https://github.com/omacom/omarchy/pull/14553) in `quattro`. [omarchy-mac#707](https://github.com/omacom/omarchy-mac/issues/707) and [PR #710](https://github.com/omacom/omarchy-mac/pull/710) cover only the omarchy-mac `quattro` path. Keep the backup until those shortcuts and your files are usable.
 
-Confirm the update channel is `edge`. In an Omarchy terminal:
+Confirm the update channel is `edge`. Apple Silicon has no other channel. In an Omarchy terminal:
 
 ```bash
-omarchy-channel-set edge
+omarchy-channel-current
 omarchy update
 ```
 
-Reboot if `omarchy update` asks. Later system updates stay on this desktop and use `omarchy update`, which follows Omarchy Mac's ARM package policy. A bare `pacman -Syu` skips that policy.
+`omarchy-channel-current` should print `edge`. Do not run `omarchy-channel-set`. Reboot if `omarchy update` asks. Later system updates stay on this desktop and use `omarchy update`, which applies the `aarch64-apple` edge pacman config (`[omarchy]` at `https://pkgs.omarchy.org/edge/$arch`, then `[asahi-alarm]`, then Arch Linux ARM). A bare `pacman -Syu` skips that policy.
 
-Personal settings come from this repo, in an Omarchy terminal, after the base system is up:
+Personal settings come from this repo, in an Omarchy terminal, after the base system is up. A recursive submodule clone is unnecessary for setup:
 
 ```bash
-git clone --recurse-submodules https://github.com/jasondockery/groundwork-omarchy-mac-arm64.git
-cd groundwork-omarchy-mac-arm64
+git clone https://github.com/jasondockery/groundwork-omarchy-mac-arm64.git ~/code/groundwork-omarchy-mac-arm64
+cd ~/code/groundwork-omarchy-mac-arm64
 omarchy pkg add stow
 ./install.sh
 ```
@@ -222,9 +217,9 @@ Still in an Omarchy terminal, complete the [private remote-access setup](docs/re
 
 Start T3 Code with `t3`. It opens the local web UI. Sign in to at least one provider, such as Codex or Claude, in T3 Code before starting an agent. Herdr opens with Omarchy's `Super+Ctrl+Return` shortcut and from a terminal.
 
-The installer is a one-time OS install. Ongoing fixes come from `omarchy update` on the edge channel. Before a later reinstall, read the upstream installer releases again. The signed edge catalog may select a newer image.
+The installer is a one-time OS install. Ongoing fixes come from `omarchy update` on the edge channel. Before a later reinstall, read the upstream installer releases again. The signed edge catalog may select a newer image, and an existing install still has to be removed first.
 
-This README records the chosen installer and image. The reference machine stays on its current Omarchy install until that migration has actually happened.
+This README records what the reference M1 Mac mini installed on 2026-10-17; the latest observed catalog selection is in [status](docs/status.md). File desktop bugs on [omacom/omarchy](https://github.com/omacom/omarchy), installer or image bugs on [omacom/omarchy-mac-installer](https://github.com/omacom/omarchy-mac-installer), and hardware bugs on [omacom/omarchy-mac](https://github.com/omacom/omarchy-mac).
 
 Notes for people and agents are in `AGENTS.md`, `docs/status.md`, and `docs/decisions/`.
 
@@ -240,29 +235,29 @@ Omarchy keeps its own desktop, tmux file, shell, and Super keybindings. Practice
 
 ## Included
 
-| Path | Why it is not already in Omarchy Mac |
+| Path | Why it is not already in Omarchy |
 |---|---|
 | `packages/hypr/.config/hypr/input.lua` | Trackpad choices that differ from Omarchy's defaults: traditional scrolling, tap-to-click, three-finger drag, faster pointer, slower page scrolling |
 | `keyd/default.conf` | Default Caps Lock behavior: tap = Escape, hold = Control, via keyd |
-| `packages.txt` | Optional aarch64 packages that are not part of the Omarchy Mac install |
+| `packages.txt` | Optional aarch64 packages that are not part of the Omarchy install |
 | `git/config.local.example` | Placeholder for a name and email. Not applied |
 
 ## Learn Omarchy's defaults
 
 This repo deliberately leaves Omarchy's desktop navigation, tmux, terminal, editor, and shell defaults under Omarchy's control. It does not install the Groundwork Mac tmux config; on Omarchy, learn the built-in `Ctrl+Space` prefix (`Ctrl+B` also works). The intentional differences are the trackpad preferences and Caps Lock tap-Escape/hold-Control mapping. T3 Code, Herdr, and Tailscale are installed as tools.
 
-Useful starting points from the [Omarchy Mac hotkey guide](https://github.com/omacom/omarchy-mac/blob/quattro/manual/07-hotkeys.md) and [terminal guide](https://github.com/omacom/omarchy-mac/blob/quattro/manual/15-terminal.md):
+Useful starting points from the [Omarchy hotkey guide](https://github.com/omacom/omarchy/blob/quattro/manual/07-hotkeys.md) and [terminal guide](https://github.com/omacom/omarchy/blob/quattro/manual/15-terminal.md):
 
 - `Super+Space` opens the Omarchy menu; `Super+K` shows desktop shortcuts; `Super+Alt+K` shows tmux shortcuts; `Super+Ctrl+K` shows Herdr shortcuts.
 - `Super+Alt+Return` opens tmux. Use `Ctrl+Space` then `s` to list sessions. `Alt+Enter` and `Alt+Shift+Enter` split panes without a prefix; `Ctrl+Alt+Arrow` moves between panes.
 - `tdl cx` opens an editor, Claude Code, and a terminal; `tdl c cx` adds OpenCode too. `tds` starts an editor/diff/terminal/agent layout, while `tdlm` and `tsl` cover multi-project and multi-agent layouts.
-- Omarchy Mac's current edge image includes tmux, Neovim, Herdr, and the Omarchy edge desktop packages. Herdr is the agent-aware multiplexer: `Super+Ctrl+Return` opens it. Try it alongside tmux before deciding which fits your work.
+- The Apple Silicon edge image includes tmux, Neovim, Herdr, and the Omarchy edge desktop packages. Herdr is the agent-aware multiplexer: `Super+Ctrl+Return` opens it. Try it alongside tmux before deciding which fits your work.
 
 These are Omarchy's documented defaults and intended workflow, not a claim that every AI developer uses the same setup. Omarchy's first-party manuals are the clearest current reference for the conventions the project ships.
 
 ## Left out on purpose
 
-Omarchy Mac already ships these, or owning them would freeze a file that `omarchy update` is supposed to change. Account material stays on the machine.
+Omarchy already ships these, or owning them would freeze a file that `omarchy update` is supposed to change. Account material stays on the machine.
 
 - Stock Hyprland files: `bindings.lua`, `autostart.lua`, `monitors.lua`, `looknfeel.lua`, `hyprland.lua`
 - `~/.config/git/config` aliases, pull rebase, and diff defaults
