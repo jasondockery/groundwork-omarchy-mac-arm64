@@ -145,16 +145,20 @@ def stop_child(child):
 # symbols and changes the modifier each key sets. Hyprland then matches its
 # existing Super and Alt bindings. The keymap travels with the virtual
 # keyboard only. Right Alt is untouched so layouts that use it as AltGr
-# keep level 3.
+# keep level 3. replace on Left Alt also replaces lv3:lalt_switch, so
+# left Alt is no longer level 3.
 APPLE_VNC_OPTION = 'groundwork:apple_vnc'
-XKB_RULES = """! include %S/evdev
-
-! option = symbols
+# libxkbcommon 1.13 appends rules/evdev.post from every include path after
+# the main rules file. A user rules/evdev wins that main-file lookup, so the
+# option has to live in the post fragment too. The full rules file remains
+# for libraries that do not compose .post files.
+XKB_OPTION_RULES = """! option = symbols
   groundwork:apple_vnc = +groundwork(apple_vnc)
 
 ! option = compat
   groundwork:apple_vnc = +groundwork(apple_vnc)
 """
+XKB_RULES = "! include %S/evdev\n\n" + XKB_OPTION_RULES
 XKB_SYMBOLS = """partial modifier_keys
 xkb_symbols "apple_vnc" {
     replace key <LALT> {
@@ -200,6 +204,7 @@ def install_vnc_keymap():
     private_directory(root.parent)
     files = {
         'rules/evdev': XKB_RULES,
+        'rules/evdev.post': XKB_OPTION_RULES,
         'symbols/groundwork': XKB_SYMBOLS,
         'compat/groundwork': XKB_COMPAT,
     }
@@ -210,21 +215,21 @@ def install_vnc_keymap():
 
 
 def wayvnc_environment():
-    # WayVNC leaves xkb_options empty and libxkbcommon then reads
-    # XKB_DEFAULT_OPTIONS. An extra XKB path supplies the option without
-    # changing the password file, XDG_CONFIG_HOME, or any other process.
+    # WayVNC leaves xkb_options empty. libxkbcommon then reads
+    # XKB_DEFAULT_OPTIONS for every client and for QEMU extended key events,
+    # so the swap belongs to this process rather than to one viewer.
+    # XKB_CONFIG_EXTRA_PATH is one directory; a colon-joined value is dropped.
+    # GROUNDWORK_SCREEN_SHARE_APPLE_MODIFIERS=0 skips appending the option.
+    # The password file, XDG_CONFIG_HOME, and other processes stay unchanged.
     install_vnc_keymap()
     environment = os.environ.copy()
     environment.setdefault('XKB_DEFAULT_RULES', 'evdev')
-    extra = [part for part in environment.get('XKB_CONFIG_EXTRA_PATH', '').split(':') if part]
-    root = str(xkb_root())
-    if root not in extra:
-        extra.append(root)
-    environment['XKB_CONFIG_EXTRA_PATH'] = ':'.join(extra)
-    parts = [part.strip() for part in environment.get('XKB_DEFAULT_OPTIONS', '').split(',') if part.strip()]
-    if APPLE_VNC_OPTION not in parts:
-        parts.append(APPLE_VNC_OPTION)
-    environment['XKB_DEFAULT_OPTIONS'] = ','.join(parts)
+    environment['XKB_CONFIG_EXTRA_PATH'] = str(xkb_root())
+    if environment.get('GROUNDWORK_SCREEN_SHARE_APPLE_MODIFIERS') != '0':
+        parts = [part.strip() for part in environment.get('XKB_DEFAULT_OPTIONS', '').split(',') if part.strip()]
+        if APPLE_VNC_OPTION not in parts:
+            parts.append(APPLE_VNC_OPTION)
+        environment['XKB_DEFAULT_OPTIONS'] = ','.join(parts)
     return environment
 
 

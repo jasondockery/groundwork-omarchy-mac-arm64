@@ -97,6 +97,59 @@ def _mods(library, keymap, keysym_names):
     return mask
 
 
+def _evdev_post_is_honored(library):
+    # rules/<ruleset>.post is composed from every include path starting with
+    # libxkbcommon 1.13. Older libraries ignore the fragment.
+    if _evdev_post_is_honored.cached is not None:
+        return _evdev_post_is_honored.cached
+    honored = False
+    with tempfile.TemporaryDirectory(prefix='groundwork-xkb-post-') as temporary:
+        root = Path(temporary)
+        extra = root / 'xkb'
+        (extra / 'rules').mkdir(parents=True)
+        (extra / 'symbols').mkdir()
+        (extra / 'rules' / 'evdev.post').write_text(
+            '! option = symbols\n'
+            '  groundwork:post_probe = +groundwork(post_probe)\n')
+        (extra / 'symbols' / 'groundwork').write_text(
+            'partial modifier_keys\n'
+            'xkb_symbols "post_probe" {\n'
+            '    replace key <LALT> {\n'
+            '        type[Group1] = "ONE_LEVEL",\n'
+            '        symbols[Group1] = [ Alt_L ],\n'
+            '        actions[Group1] = [ SetMods(modifiers=Mod4,clearLocks) ]\n'
+            '    };\n'
+            '};\n')
+        home = root / 'home'
+        home.mkdir()
+        saved_stderr = os.dup(2)
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 2)
+        try:
+            with patch.dict(os.environ, {
+                'HOME': str(home),
+                'XDG_CONFIG_HOME': str(home / '.config'),
+                'XKB_CONFIG_EXTRA_PATH': str(extra),
+                'XKB_DEFAULT_RULES': 'evdev',
+            }):
+                try:
+                    keymap = _compile_keymap(library, layout=None, options=b'groundwork:post_probe')
+                except AssertionError:
+                    keymap = None
+        finally:
+            os.dup2(saved_stderr, 2)
+            os.close(saved_stderr)
+            os.close(devnull)
+        if keymap:
+            honored = _mods(library, keymap, ['Alt_L']) == 0x40
+            library.xkb_keymap_unref(keymap)
+    _evdev_post_is_honored.cached = honored
+    return honored
+
+
+_evdev_post_is_honored.cached = None
+
+
 def _named_key_mods(library, keymap, key_name):
     state = library.xkb_state_new(keymap)
     code = None
@@ -242,7 +295,7 @@ class ScreenShareTests(unittest.TestCase):
         self.assertEqual(spawn.call_args.kwargs['pass_fds'], (42,))
         self.assertFalse(any('password=' in arg for arg in spawn.call_args.args[0]))
         environment = spawn.call_args.kwargs['env']
-        self.assertEqual(environment['XKB_CONFIG_EXTRA_PATH'].split(':')[-1], str(screen_share.xkb_root()))
+        self.assertEqual(environment['XKB_CONFIG_EXTRA_PATH'], str(screen_share.xkb_root()))
         self.assertIn('groundwork:apple_vnc', environment['XKB_DEFAULT_OPTIONS'].split(','))
         self.assertNotIn('password=', ''.join(environment.values()))
         self.assertNotEqual(environment.get('XDG_CONFIG_HOME'), str(screen_share.xkb_root().parent))
@@ -257,16 +310,18 @@ class ScreenShareTests(unittest.TestCase):
             environment = screen_share.wayvnc_environment()
         self.assertEqual(environment['XKB_DEFAULT_OPTIONS'], 'compose:caps,groundwork:apple_vnc')
         self.assertEqual(environment['XDG_CONFIG_HOME'], str(self.home / 'real-config'))
-        self.assertEqual(
-            environment['XKB_CONFIG_EXTRA_PATH'],
-            '/usr/share/X11/xkb:' + str(screen_share.xkb_root()))
+        self.assertEqual(environment['XKB_CONFIG_EXTRA_PATH'], str(screen_share.xkb_root()))
         root = screen_share.xkb_root()
         self.assertEqual(root.parent.stat().st_mode & 0o777, 0o700)
         rules = (root / 'rules/evdev').read_text()
+        post = (root / 'rules/evdev.post').read_text()
         symbols = (root / 'symbols/groundwork').read_text()
         compat = (root / 'compat/groundwork').read_text()
         self.assertIn('! include %S/evdev', rules)
         self.assertEqual(rules.count('groundwork:apple_vnc = +groundwork(apple_vnc)'), 2)
+        self.assertEqual(post, screen_share.XKB_OPTION_RULES)
+        self.assertNotIn('! include', post)
+        self.assertEqual(post.count('groundwork:apple_vnc = +groundwork(apple_vnc)'), 2)
         self.assertIn('key <LALT>', symbols)
         self.assertIn('key <LWIN>', symbols)
         self.assertIn('key <RWIN>', symbols)
@@ -280,6 +335,38 @@ class ScreenShareTests(unittest.TestCase):
         with patch.dict(os.environ, {'XKB_DEFAULT_OPTIONS': environment['XKB_DEFAULT_OPTIONS']}):
             self.assertEqual(screen_share.wayvnc_environment()['XKB_DEFAULT_OPTIONS'],
                              'compose:caps,groundwork:apple_vnc')
+
+    def test_apple_modifier_swap_stays_on_for_every_value_except_zero(self):
+        for value in (None, '', '1', 'false', '00'):
+            with self.subTest(value=value):
+                with patch.dict(os.environ, {'XKB_DEFAULT_OPTIONS': 'compose:caps'}):
+                    os.environ.pop('GROUNDWORK_SCREEN_SHARE_APPLE_MODIFIERS', None)
+                    if value is not None:
+                        os.environ['GROUNDWORK_SCREEN_SHARE_APPLE_MODIFIERS'] = value
+                    environment = screen_share.wayvnc_environment()
+                self.assertEqual(environment['XKB_DEFAULT_OPTIONS'],
+                                 'compose:caps,groundwork:apple_vnc')
+                self.assertEqual(environment['XKB_CONFIG_EXTRA_PATH'], str(screen_share.xkb_root()))
+
+    def test_apple_modifier_opt_out_skips_appending_the_option(self):
+        with patch.dict(os.environ, {
+            'GROUNDWORK_SCREEN_SHARE_APPLE_MODIFIERS': '0',
+            'XKB_DEFAULT_OPTIONS': 'compose:caps',
+            'XKB_CONFIG_EXTRA_PATH': '/usr/share/X11/xkb:/tmp/other',
+        }):
+            environment = screen_share.wayvnc_environment()
+        self.assertEqual(environment['XKB_DEFAULT_OPTIONS'], 'compose:caps')
+        self.assertNotIn('groundwork:apple_vnc', environment['XKB_DEFAULT_OPTIONS'].split(','))
+        self.assertEqual(environment['XKB_CONFIG_EXTRA_PATH'], str(screen_share.xkb_root()))
+        self.assertEqual(environment['GROUNDWORK_SCREEN_SHARE_APPLE_MODIFIERS'], '0')
+        with patch.dict(os.environ, {'GROUNDWORK_SCREEN_SHARE_APPLE_MODIFIERS': '0',
+                                      'XKB_DEFAULT_OPTIONS': 'compose:caps,groundwork:apple_vnc'}):
+            kept = screen_share.wayvnc_environment()
+        self.assertEqual(kept['XKB_DEFAULT_OPTIONS'], 'compose:caps,groundwork:apple_vnc')
+        with patch.dict(os.environ, {'GROUNDWORK_SCREEN_SHARE_APPLE_MODIFIERS': '0'}):
+            os.environ.pop('XKB_DEFAULT_OPTIONS', None)
+            absent = screen_share.wayvnc_environment()
+        self.assertNotIn('XKB_DEFAULT_OPTIONS', absent)
 
     @unittest.skipUnless(_load_xkbcommon(), 'libxkbcommon is required to compile the WayVNC keymap')
     def test_compiled_wayvnc_keymap_swaps_command_and_option_modifiers(self):
@@ -309,6 +396,87 @@ class ScreenShareTests(unittest.TestCase):
         if german:
             self.assertEqual(_mods(library, german, ['Alt_L']), 0x40)
             self.assertEqual(_named_key_mods(library, german, b'RALT'), 0x80)
+
+    @unittest.skipUnless(_load_xkbcommon(), 'libxkbcommon is required to compile the WayVNC keymap')
+    def test_compiled_keymap_uses_wayvnc_environment_when_extra_path_is_preset(self):
+        library = _load_xkbcommon()
+        with patch.dict(os.environ, {
+            'HOME': str(self.home),
+            'XKB_CONFIG_EXTRA_PATH': '/usr/share/X11/xkb:' + str(self.home / 'other-xkb'),
+            'XKB_DEFAULT_RULES': 'evdev',
+        }):
+            os.environ.pop('XDG_CONFIG_HOME', None)
+            os.environ.pop('XKB_DEFAULT_OPTIONS', None)
+            environment = screen_share.wayvnc_environment()
+        self.assertEqual(environment['XKB_CONFIG_EXTRA_PATH'], str(screen_share.xkb_root()))
+        self.assertIn('groundwork:apple_vnc', environment['XKB_DEFAULT_OPTIONS'].split(','))
+        with patch.dict(os.environ, environment, clear=True):
+            keymap = _compile_keymap(library, layout=None, options=None)
+        self.assertTrue(keymap)
+        self.assertEqual(_mods(library, keymap, ['Alt_L']), 0x40)
+        library.xkb_keymap_unref(keymap)
+
+    @unittest.skipUnless(_load_xkbcommon(), 'libxkbcommon is required to compile the WayVNC keymap')
+    def test_compiled_keymap_keeps_alt_swap_when_user_evdev_rules_are_present(self):
+        library = _load_xkbcommon()
+        if not _evdev_post_is_honored(library):
+            self.skipTest('rules/evdev.post composition requires libxkbcommon 1.13 or newer')
+        # The stub extends the system rules and does not map groundwork:apple_vnc,
+        # so it would drop the swap if it won the main-file lookup and evdev.post
+        # were ignored. groundwork:user_stub changes Control so a keymap that
+        # never read this file cannot satisfy the assertion.
+        xkb = self.home / '.config' / 'xkb'
+        (xkb / 'rules').mkdir(parents=True)
+        (xkb / 'symbols').mkdir()
+        (xkb / 'rules' / 'evdev').write_text(
+            '! include %S/evdev\n'
+            '\n'
+            '! option = symbols\n'
+            '  groundwork:user_stub = +userstub(marker)\n')
+        (xkb / 'symbols' / 'userstub').write_text(
+            'partial modifier_keys\n'
+            'xkb_symbols "marker" {\n'
+            '    replace key <LCTL> {\n'
+            '        type[Group1] = "ONE_LEVEL",\n'
+            '        symbols[Group1] = [ Control_L ],\n'
+            '        actions[Group1] = [ SetMods(modifiers=Mod4,clearLocks) ]\n'
+            '    };\n'
+            '};\n')
+        with patch.dict(os.environ, {
+            'HOME': str(self.home),
+            'XKB_DEFAULT_OPTIONS': 'groundwork:user_stub',
+            'XKB_CONFIG_EXTRA_PATH': '/usr/share/X11/xkb:/tmp/other',
+            'XKB_DEFAULT_RULES': 'evdev',
+        }):
+            os.environ.pop('XDG_CONFIG_HOME', None)
+            environment = screen_share.wayvnc_environment()
+        self.assertEqual(environment['XKB_DEFAULT_OPTIONS'],
+                         'groundwork:user_stub,groundwork:apple_vnc')
+        with patch.dict(os.environ, environment, clear=True):
+            keymap = _compile_keymap(library, layout=None, options=None)
+        self.assertTrue(keymap)
+        self.assertEqual(_mods(library, keymap, ['Control_L']), 0x40)
+        self.assertEqual(_mods(library, keymap, ['Alt_L']), 0x40)
+        library.xkb_keymap_unref(keymap)
+
+    @unittest.skipUnless(_load_xkbcommon(), 'libxkbcommon is required to compile the WayVNC keymap')
+    def test_compiled_keymap_leaves_alt_unswapped_when_apple_modifiers_are_off(self):
+        library = _load_xkbcommon()
+        with patch.dict(os.environ, {
+            'HOME': str(self.home),
+            'GROUNDWORK_SCREEN_SHARE_APPLE_MODIFIERS': '0',
+            'XKB_DEFAULT_OPTIONS': 'compose:caps',
+            'XKB_CONFIG_EXTRA_PATH': '/usr/share/X11/xkb',
+            'XKB_DEFAULT_RULES': 'evdev',
+        }):
+            os.environ.pop('XDG_CONFIG_HOME', None)
+            environment = screen_share.wayvnc_environment()
+        self.assertEqual(environment['XKB_DEFAULT_OPTIONS'], 'compose:caps')
+        with patch.dict(os.environ, environment, clear=True):
+            keymap = _compile_keymap(library, layout=None, options=None)
+        self.assertTrue(keymap)
+        self.assertEqual(_mods(library, keymap, ['Alt_L']), 0x08)
+        library.xkb_keymap_unref(keymap)
 
     def test_unavailable_interface_binding_never_starts_a_fallback_listener(self):
         listener = Mock()
