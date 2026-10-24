@@ -48,6 +48,17 @@ for arg in "$@"; do
   esac
 done
 
+# GROUNDWORK_TEST_ROOT lets the isolated fixtures relocate system paths. It is
+# honoured only together with the harness's GROUNDWORK_TESTING=1.
+test_root=""
+if [[ -n ${GROUNDWORK_TEST_ROOT:-} ]]; then
+  if [[ ${GROUNDWORK_TESTING:-} != 1 ]]; then
+    echo "GROUNDWORK_TEST_ROOT is a test-only variable. Unset it and rerun; nothing was changed." >&2
+    exit 64
+  fi
+  test_root=$GROUNDWORK_TEST_ROOT
+fi
+
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 python3 "$root/scripts/groundwork-update.py" verify-lock
@@ -108,9 +119,8 @@ trap cleanup EXIT
 
 # Each privileged step has a check that needs no sudo. A routine update uses
 # them to ask for administrator permission only when something must change.
-# GROUNDWORK_TEST_ROOT lets the isolated fixtures relocate these system paths.
-chromium_dir=${GROUNDWORK_TEST_ROOT:-}/usr/share/chromium
-keyd_config=${GROUNDWORK_TEST_ROOT:-}/etc/keyd/default.conf
+chromium_dir=$test_root/usr/share/chromium
+keyd_config=$test_root/etc/keyd/default.conf
 extension_dir=$chromium_dir/extensions
 screen_share_rule=(allow in on tailscale0 to any port 5900 proto tcp comment 'Groundwork screen sharing')
 screen_share_rule_marker="${XDG_STATE_HOME:-$HOME/.local/state}/groundwork/ufw-screen-share-rule"
@@ -133,7 +143,8 @@ keyd_current() {
 privileged_changes_needed() {
   local executable
   # Missing tools are installed through omarchy pkg add or Omarchy's installers.
-  for executable in cursor herdr tailscale obsidian bw; do
+  # readelf (binutils) is what update-all uses to check T3 Code builds.
+  for executable in cursor herdr tailscale obsidian bw readelf; do
     command -v "$executable" >/dev/null || return 0
   done
   if ! command -v bitwarden >/dev/null && ! command -v flatpak >/dev/null; then

@@ -386,8 +386,14 @@ class ProcessTests(unittest.TestCase):
         self.assertIn('Still running', output.getvalue())
 
     def test_deadline_forwards_sigint_before_terminating(self):
-        with self.assertRaisesRegex(updater.UpdateError, 'deadline'):
-            updater.run(self.child(), deadline=1)
+        real_communicate = subprocess.Popen.communicate
+        def communicate(process, *args, **kwargs):
+            # Let the deadline fire only once the child has its SIGINT handler.
+            self.wait_for_child()
+            return real_communicate(process, *args, **kwargs)
+        with patch.object(subprocess.Popen, 'communicate', communicate):
+            with self.assertRaisesRegex(updater.UpdateError, 'deadline'):
+                updater.run(self.child(), deadline=1)
         self.assertEqual(self.report.read_text(), 'SIGINT')
 
     def test_interrupt_forwards_sigint_to_the_stage(self):

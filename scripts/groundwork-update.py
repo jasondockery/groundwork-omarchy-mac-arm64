@@ -274,19 +274,25 @@ def run(args, cwd=None, deadline=20, capture=True, lock_fd=None):
             raise UpdateError(f'{args[0]} failed (exit {process.returncode}).\n{stderr or "See the stage output above."}')
         return (stdout or '').strip()
     finally:
+        # Hold interrupts from the first cleanup instruction, so none can land
+        # between the stage ending and stop() taking over.
+        held = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
         try:
-            if process:
-                stop(process, INTERRUPT_GRACE_SECONDS if interrupted else 0)
+            try:
+                if process:
+                    stop(process, INTERRUPT_GRACE_SECONDS if interrupted else 0)
+            finally:
+                if terminal is not None:
+                    try:
+                        foreground(terminal, original_group)
+                    finally:
+                        os.close(terminal)
+                if process:
+                    for stream in (process.stdout, process.stderr):
+                        if stream:
+                            stream.close()
         finally:
-            if terminal is not None:
-                try:
-                    foreground(terminal, original_group)
-                finally:
-                    os.close(terminal)
-            if process:
-                for stream in (process.stdout, process.stderr):
-                    if stream:
-                        stream.close()
+            signal.pthread_sigmask(signal.SIG_SETMASK, held)
 
 
 def git(source, *args, **kwargs):
