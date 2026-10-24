@@ -760,15 +760,28 @@ def update(scope, check=False):
             if scope == 'all':
                 update_t3(completed, warnings)
                 if shutil.which('flatpak'):
-                    # Only Groundwork's installed Bitwarden Flatpak is in scope.
-                    installed = run(['flatpak', '--user', 'list', '--app', '--columns=application'])
-                    if 'com.bitwarden.desktop' in installed.splitlines():
-                        print('Updating the installed Bitwarden user Flatpak…', flush=True)
-                        run(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'],
-                            deadline=600, capture=False)
-                        completed.append('Bitwarden user Flatpak update command completed')
-                    else:
-                        completed.append('Bitwarden user Flatpak not installed; skipped')
+                    # Groundwork's user Flatpaks only. Other installed apps stay untouched.
+                    installed = set(run(['flatpak', '--user', 'list', '--app', '--columns=application']).splitlines())
+                    for app, label in (
+                        ('com.bitwarden.desktop', 'Bitwarden'),
+                        ('io.freetubeapp.FreeTube', 'FreeTube'),
+                    ):
+                        if app not in installed:
+                            completed.append(f'{label} user Flatpak not installed; skipped')
+                            continue
+                        print(f'Updating the installed {label} user Flatpak…', flush=True)
+                        try:
+                            run(['flatpak', '--user', 'update', '--noninteractive', app],
+                                deadline=600, capture=False)
+                        except (UpdateError, OSError) as error:
+                            if app != 'io.freetubeapp.FreeTube':
+                                raise
+                            message = f'FreeTube user Flatpak update failed: {error}'
+                            print(message, file=sys.stderr, flush=True)
+                            warnings.append(message)
+                            completed.append('FreeTube user Flatpak update failed')
+                            continue
+                        completed.append(f'{label} user Flatpak update command completed')
                 else:
                     completed.append('User Flatpak tooling not installed; skipped')
                 update_blip(completed)
@@ -883,7 +896,7 @@ def main(args):
         print(f'Usage: {"update-all" if scope == "all" else "groundwork-update"} [--check]')
         print('Synchronize and apply this Groundwork layer using saved setup choices.')
         if scope == 'all':
-            print('Also run omarchy update, update listed Omarchy shell plugins, update T3 Nightly (including its background service), and update the installed Bitwarden user Flatpak.')
+            print('Also run omarchy update, update listed Omarchy shell plugins, update T3 Nightly (including its background service), and update the installed Bitwarden and FreeTube user Flatpaks.')
             print(f'When Blip is opted in, update {BLIP_ID} only in an interactive terminal, without --yes, so its diff can be reviewed.')
         else:
             print('Listed shell plugins are installed or retired. Existing plugin checkouts stay at their current revisions.')

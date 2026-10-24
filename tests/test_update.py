@@ -111,6 +111,7 @@ class UpdateTests(unittest.TestCase):
         self.blip_rewrite = None
         self.blip_plugin = None
         self.install_failures = set()
+        self.freetube_update_failure = False
         self.real_run = updater.run
         self.run_patch = patch.object(updater, 'run', side_effect=self.run_command)
         self.run_patch.start()
@@ -153,8 +154,10 @@ class UpdateTests(unittest.TestCase):
             self.t3_installed, self.t3_broken = version, False
         if args[:2] == ['readelf', '-lW']:
             return self.readelf.get(Path(args[2]).name, READELF_GOOD)
+        if args == ['flatpak', '--user', 'update', '--noninteractive', 'io.freetubeapp.FreeTube'] and self.freetube_update_failure:
+            raise updater.UpdateError('FreeTube user Flatpak update failed')
         if args[:3] == ['flatpak', '--user', 'list']:
-            return 'com.bitwarden.desktop\norg.example.Unowned'
+            return 'com.bitwarden.desktop\nio.freetubeapp.FreeTube\norg.example.Unowned'
         if args == ['omarchy', 'plugin', 'list', '--json']:
             if self.blip_listed:
                 return '[{"id": "nixfred.blip", "enabled": true}]'
@@ -209,6 +212,7 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(self.machine_calls[0], ['omarchy', 'update'])
         self.assertIn(['t3', 'update', '--channel', 'nightly', '--yes'], self.machine_calls)
         self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], self.machine_calls)
+        self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'io.freetubeapp.FreeTube'], self.machine_calls)
         self.assertNotIn('org.example.Unowned', str(self.machine_calls))
         self.assertFalse(any(call[:2] == ['omarchy', 'plugin'] for call in self.machine_calls))
 
@@ -326,6 +330,24 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
                 updater.update('all')
             self.assertFalse((self.state / 'update-all-last-success.json').exists())
 
+    def test_freetube_flatpak_update_failure_warns_and_finishes(self):
+        self.freetube_update_failure = True
+        with patch('sys.stdout', new_callable=io.StringIO), patch('sys.stderr', new_callable=io.StringIO) as errors:
+            self.assertEqual(updater.main(['all']), 1)
+        receipt = json.loads((self.state / 'update-all-last-success.json').read_text())
+        self.assertEqual(receipt['result'], 'completed_with_warnings')
+        self.assertIn('Omarchy update command completed', receipt['completed'])
+        self.assertIn('Groundwork configuration applied', receipt['completed'])
+        self.assertIn('T3 Code Nightly update command completed', receipt['completed'])
+        self.assertIn('Bitwarden user Flatpak update command completed', receipt['completed'])
+        self.assertIn('FreeTube user Flatpak update failed', receipt['completed'])
+        self.assertNotIn('FreeTube user Flatpak update command completed', receipt['completed'])
+        self.assertEqual(len(receipt['warnings']), 1)
+        self.assertIn('FreeTube user Flatpak update failed', receipt['warnings'][0])
+        self.assertIn('Warning: FreeTube user Flatpak update failed', errors.getvalue())
+        self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], self.machine_calls)
+        self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'io.freetubeapp.FreeTube'], self.machine_calls)
+
     def large_pages(self, page=16384, candidate=CANDIDATE, archive=None, sums=None, error=None):
         archive = t3_archive(candidate) if archive is None else archive
         sums = sums or f'{hashlib.sha256(archive).hexdigest()}  t3-{candidate}-linux-arm64.tar.gz\n'
@@ -349,6 +371,7 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
         receipt = json.loads((self.state / 'update-all-last-success.json').read_text())
         self.assertEqual(receipt['result'], result)
         self.assertIn('Bitwarden user Flatpak update command completed', receipt['completed'])
+        self.assertIn('FreeTube user Flatpak update command completed', receipt['completed'])
         return output.getvalue() + errors.getvalue(), receipt
 
     def installer_versions(self):
@@ -461,6 +484,7 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
         receipt = json.loads((self.state / 'update-all-last-success.json').read_text())
         self.assertEqual(receipt['result'], 'completed_with_warnings')
         self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], self.machine_calls)
+        self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'io.freetubeapp.FreeTube'], self.machine_calls)
 
     def test_successful_update_all_exits_zero(self):
         with patch('sys.stdout', new_callable=io.StringIO):
