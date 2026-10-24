@@ -1,4 +1,5 @@
 """Apply the shared Omarchy plugin list against fixture commands."""
+import http.client
 import importlib.util
 import json
 import os
@@ -114,6 +115,9 @@ if action == 'add' and args[3:] == ['--yes']:
         git(directory, 'init', '-b', 'main')
         git(directory, 'add', 'manifest.json')
         git(directory, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'add')
+    if expected in settings.get('add_then_fail', []):
+        sys.stderr.write('fixture add failed\n')
+        sys.exit(1)
     print(f'Added {manifest} into {directory}')
     sys.exit(0)
 if action == 'enable':
@@ -129,6 +133,9 @@ if action == 'remove' and args[3:] == ['--yes']:
         sys.stderr.write('fixture remove failed\n')
         sys.exit(1)
     shutil.rmtree(plugins_root() / plugin_id, ignore_errors=True)
+    if plugin_id in settings.get('remove_then_fail', []):
+        sys.stderr.write('fixture remove failed\n')
+        sys.exit(1)
     sys.exit(0)
 if action == 'update' and args[3:] == ['--yes']:
     plugin_id = args[2]
@@ -136,10 +143,15 @@ if action == 'update' and args[3:] == ['--yes']:
         sys.stderr.write('fixture update failed\n')
         sys.exit(1)
     directory = plugins_root() / plugin_id
-    if os.environ.get('FIXTURE_ADVANCE_HEAD') == '1':
-        (directory / 'advanced.txt').write_text('advanced\n')
+    if os.environ.get('FIXTURE_ADVANCE_HEAD') == '1' or plugin_id in settings.get('update_then_fail', []):
+        marker = directory / 'advanced.txt'
+        previous = marker.read_text() if marker.is_file() else ''
+        marker.write_text(previous + 'advanced\n')
         git(directory, 'add', 'advanced.txt')
         git(directory, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'advance')
+    if plugin_id in settings.get('update_then_fail', []):
+        sys.stderr.write('fixture update failed\n')
+        sys.exit(1)
     print(f'Updated {plugin_id}')
     sys.exit(0)
 sys.stderr.write('unexpected plugin command\n')
@@ -463,6 +475,27 @@ class PluginApplyTests(unittest.TestCase):
         self.assertFalse(self.omarchy_calls())
         self.assertTrue(self.plugin_dir('example.widget').is_dir())
 
+    def test_retired_notice_prints_once_and_only_when_the_directory_exists(self):
+        self.seed_directory('example.widget')
+        self.write_list([], retired=[
+            {'id': 'example.widget', 'reason': 'Retired fixture'},
+            {'id': 'example.absent', 'reason': 'Not installed here'},
+        ])
+        first = self.invoke()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        notice = [line for line in first.stdout.splitlines() if 'left in place' in line]
+        self.assertEqual(notice, [
+            'Omarchy plugins retired in the shared list were not installed by this layer and were left in place: example.widget.',
+        ])
+        self.assertNotIn('example.absent', notice[0])
+        self.assertIn('example.widget', self.record()['noticedRetired'])
+        self.assertFalse(self.omarchy_calls())
+        self.clear_calls()
+        second = self.invoke()
+        self.assertNotIn('left in place', second.stdout)
+        self.assertFalse(self.omarchy_calls())
+        self.assertTrue(self.plugin_dir('example.widget').is_dir())
+
     def test_retired_removal_ignores_an_exclusion(self):
         path = self.home / '.config/groundwork/omarchy-plugins.exclude.json'
         path.parent.mkdir(parents=True)
@@ -499,6 +532,7 @@ class PluginApplyTests(unittest.TestCase):
             json.dumps({'schemaVersion': 1, 'plugins': [plugin('example..widget')], 'retired': []}),
             json.dumps({'schemaVersion': 1, 'plugins': [plugin(repo='https://gitlab.com/example/widget.git')], 'retired': []}),
             json.dumps({'schemaVersion': 1, 'plugins': [plugin(setup={'command': '../escape', 'needsSudo': False})], 'retired': []}),
+            '{"schemaVersion": 1, "plugins": []}',
         ]
         for sample in samples:
             self.list_path.write_text(sample)
@@ -551,18 +585,28 @@ class PluginApplyTests(unittest.TestCase):
             plugin('example.left', section='left'),
             plugin('example.center', section='center'),
             plugin('example.right', section='right'),
+            plugin('example.tray', section='tray'),
+            plugin('example.begin', section='centerBegin'),
+            plugin('example.end', section='centerEnd'),
+            plugin('example.plain'),
         ])
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('plugin list is invalid', result.stdout)
         self.assertIn(['plugin', 'enable', 'example.left', '--section', 'left'], self.omarchy_calls())
         self.assertIn(['plugin', 'enable', 'example.center', '--section', 'center'], self.omarchy_calls())
         self.assertIn(['plugin', 'enable', 'example.right', '--section', 'right'], self.omarchy_calls())
-        for section in ('tray', 'centerBegin', 'centerEnd'):
-            self.clear_calls()
-            self.write_list([plugin(section=section)])
-            rejected = self.invoke()
-            self.assertIn('invalid', rejected.stdout, section)
-            self.assertFalse(self.omarchy_calls(), section)
+        self.assertIn(['plugin', 'enable', 'example.plain'], self.omarchy_calls())
+        cached = json.loads(self.cache_path().read_text())
+        self.assertEqual(
+            [item['id'] for item in cached['plugins']],
+            ['example.left', 'example.center', 'example.right', 'example.plain'],
+        )
+        self.assertNotIn('skippedSections', cached)
+        for plugin_id in ('example.tray', 'example.begin', 'example.end'):
+            self.assertIn(f'Omarchy plugin {plugin_id} was skipped; section must be left, center, or right.', result.stdout)
+            self.assertFalse(self.plugin_dir(plugin_id).exists())
+            self.assertNotIn(plugin_id, [item['id'] for item in cached['plugins']])
 
     def test_update_flag_updates_an_installed_plugin_without_reenabling_it(self):
         self.seed_directory('example.widget')
@@ -619,24 +663,93 @@ class PluginApplyTests(unittest.TestCase):
         ])
         self.assertNotIn('enablePending', self.record()['plugins']['example.widget'])
 
-    def test_manifest_id_mismatch_stops_before_enable(self):
+    def test_add_that_creates_a_directory_and_fails_retries_enable(self):
+        self.set_control(add_then_fail=['example.widget'])
+        self.write_list([plugin(section='right'), plugin('example.gadget')])
+        first = self.invoke()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertIn('Omarchy plugin example.widget add failed: fixture add failed.', first.stdout)
+        self.assertIn(['plugin', 'enable', 'example.widget', '--section', 'right'], self.omarchy_calls())
+        self.assertIn(['plugin', 'add', 'https://github.com/example/gadget.git', '--yes'], self.omarchy_calls())
+        self.assertTrue(self.plugin_dir('example.widget').is_dir())
+        self.assertNotIn('enablePending', self.record()['plugins']['example.widget'])
+        self.assertIn('example.gadget', self.record()['plugins'])
+        self.set_control()
+        self.clear_calls()
+        second = self.invoke()
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertFalse(self.omarchy_calls(), second.stdout)
+        self.assertNotIn('removed locally', second.stdout)
+
+    def test_partial_add_with_a_manifest_mismatch_is_removed_and_the_next_plugin_continues(self):
+        self.set_control(add_then_fail=['example.widget'], manifest_body_ids={'example.widget': 'example.other'})
+        self.write_list([plugin(), plugin('example.gadget')])
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('add failed', result.stdout)
+        self.assertIn('manifest id is example.other; removed.', result.stdout)
+        self.assertNotIn('stopped', result.stdout)
+        self.assertIn(['plugin', 'remove', 'example.widget', '--yes'], self.omarchy_calls())
+        self.assertFalse(any(call[:3] == ['plugin', 'enable', 'example.widget'] for call in self.omarchy_calls()))
+        self.assertFalse(self.plugin_dir('example.widget').exists())
+        self.assertTrue(self.plugin_dir('example.gadget').is_dir())
+        self.assertNotIn('example.widget', self.record()['plugins'])
+
+    def test_remove_that_deletes_the_directory_and_fails_is_added_again(self):
+        self.set_control(fail_enable=['example.widget'], remove_then_fail=['example.widget'])
+        self.write_list([plugin(), plugin('example.gadget')])
+        first = self.invoke()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertIn('remove failed', first.stdout)
+        self.assertNotIn('example.widget', self.record()['plugins'])
+        self.assertNotIn('enablePending', self.record_path().read_text())
+        self.assertFalse(self.plugin_dir('example.widget').exists())
+        self.assertTrue(self.plugin_dir('example.gadget').is_dir())
+        self.set_control()
+        self.clear_calls()
+        second = self.invoke()
+        self.assertIn(['plugin', 'add', 'https://github.com/example/widget.git', '--yes'], self.omarchy_calls())
+        self.assertNotIn('removed locally', second.stdout)
+        self.assertTrue(self.plugin_dir('example.widget').is_dir())
+
+    def test_enable_pending_without_a_directory_is_added_again(self):
+        self.write_record({'example.widget': {
+            'repo': 'https://github.com/example/widget.git',
+            'enablePending': True,
+        }})
+        self.write_list([plugin(section='right')])
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('removed locally', result.stdout)
+        self.assertIn(['plugin', 'add', 'https://github.com/example/widget.git', '--yes'], self.omarchy_calls())
+        self.assertIn(['plugin', 'enable', 'example.widget', '--section', 'right'], self.omarchy_calls())
+        self.assertNotIn('enablePending', self.record()['plugins']['example.widget'])
+
+    def test_manifest_id_mismatch_removes_the_checkout_and_continues(self):
         self.set_control(manifest_ids={'example.widget': 'example.other'})
         self.write_list([plugin(), plugin('example.gadget')])
         result = self.invoke()
-        self.assertIn('Omarchy plugin example.widget manifest id is example.other; stopped.', result.stdout)
-        self.assertEqual(self.omarchy_calls(), [
-            ['plugin', 'add', 'https://github.com/example/widget.git', '--yes'],
-        ])
-        self.assertFalse(self.record_path().exists())
-        self.assertFalse(self.plugin_dir('example.gadget').exists())
+        self.assertIn('Omarchy plugin example.widget manifest id is example.other; removed.', result.stdout)
+        self.assertNotIn('stopped', result.stdout)
+        self.assertIn(['plugin', 'remove', 'example.other', '--yes'], self.omarchy_calls())
+        self.assertFalse(any(call[:3] == ['plugin', 'enable', 'example.widget'] for call in self.omarchy_calls()))
+        self.assertFalse(self.plugin_dir('example.other').exists())
+        self.assertFalse(self.plugin_dir('example.widget').exists())
+        self.assertTrue(self.plugin_dir('example.gadget').is_dir())
+        self.assertNotIn('example.widget', self.record()['plugins'])
+        self.assertIn('example.gadget', self.record()['plugins'])
 
-    def test_manifest_body_mismatch_stops_before_enable(self):
+    def test_manifest_body_mismatch_removes_the_checkout_and_continues(self):
         self.set_control(manifest_body_ids={'example.widget': 'example.other'})
         self.write_list([plugin(), plugin('example.gadget')])
         result = self.invoke()
-        self.assertIn('manifest id is example.other; stopped.', result.stdout)
-        self.assertFalse(any(call[1] == 'enable' for call in self.omarchy_calls()))
-        self.assertFalse(self.plugin_dir('example.gadget').exists())
+        self.assertIn('manifest id is example.other; removed.', result.stdout)
+        self.assertNotIn('stopped', result.stdout)
+        self.assertIn(['plugin', 'remove', 'example.widget', '--yes'], self.omarchy_calls())
+        self.assertFalse(any(call[:3] == ['plugin', 'enable', 'example.widget'] for call in self.omarchy_calls()))
+        self.assertFalse(self.plugin_dir('example.widget').exists())
+        self.assertTrue(self.plugin_dir('example.gadget').is_dir())
+        self.assertNotIn('example.widget', self.record()['plugins'])
 
     def test_symbolic_link_plugin_path_is_not_changed(self):
         directory = self.plugin_dir('example.widget')
@@ -657,7 +770,8 @@ class PluginApplyTests(unittest.TestCase):
         self.assertIn(f'Omarchy plugin example.widget setup was deferred; run it in a terminal: {script}', result.stdout)
         self.assertNotIn('sudo --', result.stdout)
         self.assertFalse((self.fixture / 'setup-ran').exists())
-        self.assertNotIn('setup', self.record()['plugins']['example.widget'])
+        self.assertTrue(self.record()['plugins']['example.widget']['setup']['pending'])
+        self.assertEqual(self.record()['plugins']['example.widget']['setup']['command'], 'setup')
         self.clear_calls()
         again = self.invoke()
         self.assertIn(str(script), again.stdout)
@@ -667,9 +781,12 @@ class PluginApplyTests(unittest.TestCase):
         self.write_list([plugin(setup={'command': 'bin/setup', 'needsSudo': True})])
         result = self.invoke()
         script = self.plugin_dir('example.widget') / 'bin' / 'setup'
-        self.assertIn(f'sudo -- {script}', result.stdout)
+        self.assertIn(f'Omarchy plugin example.widget setup was deferred; run it in a terminal: {script}', result.stdout)
+        self.assertNotIn('sudo --', result.stdout)
         self.assertFalse(any(call[0] == 'sudo' for call in self.calls()))
         self.assertFalse((self.fixture / 'setup-ran').exists())
+        self.assertTrue(self.record()['plugins']['example.widget']['setup']['pending'])
+        self.assertIs(self.record()['plugins']['example.widget']['setup']['needsSudo'], True)
 
     def test_setup_runs_on_a_tty_and_again_only_after_update_moves_head(self):
         self.write_list([plugin(setup={'command': 'setup', 'needsSudo': False})])
@@ -698,6 +815,49 @@ class PluginApplyTests(unittest.TestCase):
         self.assertIn(['plugin', 'update', 'example.widget', '--yes'], self.omarchy_calls())
         self.assertEqual(marker.read_text(), 'xx')
         self.assertNotEqual(self.record()['plugins']['example.widget']['setup']['head'], head)
+        self.assertNotIn('pending', self.record()['plugins']['example.widget']['setup'])
+        script = self.plugin_dir('example.widget') / 'setup'
+        script.write_text('#!/bin/sh\nexit 1\n')
+        script.chmod(0o755)
+        self.clear_calls()
+        failed = self.run_tty('--update', extra={'FIXTURE_GIT': '1', 'FIXTURE_ADVANCE_HEAD': '1'})
+        self.assertEqual(failed.returncode, 0, failed.stdout)
+        self.assertIn('setup failed', failed.stdout)
+        self.assertEqual(marker.read_text(), 'xx')
+        self.assertTrue(self.record()['plugins']['example.widget']['setup']['pending'])
+        script.write_text('#!/bin/sh\nprintf x >> "$PLUGIN_FIXTURE/setup-ran"\n')
+        script.chmod(0o755)
+        self.clear_calls()
+        retried = self.run_tty(extra={'FIXTURE_GIT': '1'})
+        self.assertEqual(retried.returncode, 0, retried.stdout)
+        self.assertEqual(marker.read_text(), 'xxx', retried.stdout)
+        self.assertNotIn('pending', self.record()['plugins']['example.widget']['setup'])
+        self.assertFalse(any(call[1] == 'update' for call in self.omarchy_calls()))
+        self.clear_calls()
+        deferred = self.invoke('--update', extra={'FIXTURE_GIT': '1', 'FIXTURE_ADVANCE_HEAD': '1'})
+        self.assertEqual(deferred.returncode, 0, deferred.stdout + deferred.stderr)
+        self.assertIn('setup was deferred', deferred.stdout)
+        self.assertIn(['plugin', 'update', 'example.widget', '--yes'], self.omarchy_calls())
+        self.assertEqual(marker.read_text(), 'xxx')
+        self.assertTrue(self.record()['plugins']['example.widget']['setup']['pending'])
+        self.clear_calls()
+        finished = self.run_tty(extra={'FIXTURE_GIT': '1'})
+        self.assertEqual(finished.returncode, 0, finished.stdout)
+        self.assertEqual(marker.read_text(), 'xxxx', finished.stdout)
+        self.assertNotIn('pending', self.record()['plugins']['example.widget']['setup'])
+        self.assertFalse(any(call[1] == 'update' for call in self.omarchy_calls()))
+
+    def test_failed_update_reruns_setup_when_head_moves(self):
+        self.write_list([plugin(setup={'command': 'setup', 'needsSudo': False})])
+        first = self.run_tty(extra={'FIXTURE_GIT': '1'})
+        self.assertEqual(first.returncode, 0, first.stdout)
+        self.assertEqual((self.fixture / 'setup-ran').read_text(), 'x')
+        self.set_control(update_then_fail=['example.widget'])
+        second = self.run_tty('--update', extra={'FIXTURE_GIT': '1'})
+        self.assertEqual(second.returncode, 0, second.stdout)
+        self.assertIn('update failed', second.stdout)
+        self.assertEqual((self.fixture / 'setup-ran').read_text(), 'xx', second.stdout)
+        self.assertNotIn('pending', self.record()['plugins']['example.widget']['setup'])
 
     def test_sudo_setup_uses_one_cached_credential(self):
         self.write_list([plugin(setup={'command': 'setup', 'needsSudo': True})])
@@ -705,16 +865,16 @@ class PluginApplyTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertEqual((self.fixture / 'setup-ran').read_text(), 'x')
         sudo_calls = [call[1:] for call in self.calls() if call[0] == 'sudo']
-        self.assertEqual(sudo_calls, [['-n', 'true'], ['--', str(self.plugin_dir('example.widget') / 'setup')]])
+        self.assertEqual(sudo_calls, [['-n', 'true']])
+        self.assertNotIn('pending', self.record()['plugins']['example.widget']['setup'])
 
     def test_sudo_setup_prompts_once_when_the_credential_is_cold(self):
         self.write_list([plugin(setup={'command': 'setup', 'needsSudo': True})])
         result = self.run_tty()
         self.assertEqual(result.returncode, 0, result.stdout)
         sudo_calls = [call[1:] for call in self.calls() if call[0] == 'sudo']
-        self.assertEqual(sudo_calls[0], ['-n', 'true'])
-        self.assertEqual(sudo_calls[1], ['-v'])
-        self.assertEqual(sudo_calls[2][0], '--')
+        self.assertEqual(sudo_calls, [['-n', 'true'], ['-v']])
+        self.assertEqual((self.fixture / 'setup-ran').read_text(), 'x')
 
     def test_trackpad_warning_names_the_later_file(self):
         hypr = self.home / '.config/hypr'
@@ -732,14 +892,22 @@ class PluginApplyTests(unittest.TestCase):
         (hypr / 'mouse.lua').write_text('touchpad = { natural_scroll = true }\n')
         result = self.invoke()
         self.assertIn(str(hypr / 'mouse.lua'), result.stderr)
+        self.assertIn('is not loaded by hyprland.lua', result.stderr)
+        self.assertIn('the stowed input.lua still applies', result.stderr)
+        self.assertNotIn('wins.', result.stderr)
 
     def test_trackpad_warning_uses_omacontrol_when_no_require_is_present(self):
         hypr = self.home / '.config/hypr'
         hypr.mkdir(parents=True)
         (hypr / 'mouse.lua').write_text('touchpad = { natural_scroll = true }\n')
         (hypr / 'omacontrol.lua').write_text('touchpad = { natural_scroll = true }\n')
+        (hypr / 'hyprland.lua').write_text('require("hypr.input")\n')
         result = self.invoke()
+        self.assertIn(str(hypr / 'mouse.lua'), result.stderr)
         self.assertIn(str(hypr / 'omacontrol.lua'), result.stderr)
+        self.assertIn('are not loaded by hyprland.lua', result.stderr)
+        self.assertIn('the stowed input.lua still applies', result.stderr)
+        self.assertNotIn('wins.', result.stderr)
 
     def test_matching_touchpad_value_is_quiet(self):
         hypr = self.home / '.config/hypr'
@@ -981,6 +1149,81 @@ class FetchTests(unittest.TestCase):
             plugins.fetch_https('https://user:pass@127.0.0.1/plugins.json', time.monotonic() + 5)
         self.assertLess(time.monotonic() - started, 2)
         self.assertIn('https', str(caught.exception))
+
+    def test_redirect_may_move_only_to_the_starting_host_or_github(self):
+        started = 'downloads.example.test'
+        for host in (started, 'RAW.GITHUBUSERCONTENT.COM', 'objects.githubusercontent.com', 'github.com'):
+            plugins.allowed_redirect(started, f'https://{host}/plugins.json')
+        for target in (
+            'https://example.com/plugins.json',
+            'http://github.com/plugins.json',
+            'https://github.com.evil/plugins.json',
+        ):
+            with self.assertRaises(plugins.ListError):
+                plugins.allowed_redirect(started, target)
+
+    def test_redirect_to_another_host_is_rejected_and_keeps_the_cache(self):
+        def respond(tls, _data, _stop):
+            tls.sendall(b'HTTP/1.1 302 Found\r\nLocation: https://example.com/plugins.json\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
+
+        port = self.serve_https(respond)
+        state = self.directory / 'state'
+        cache = state / 'groundwork' / 'omarchy-plugins.json'
+        cache.parent.mkdir(parents=True)
+        cache.write_text(json.dumps({'schemaVersion': 1, 'plugins': [], 'retired': []}) + '\n')
+        before = cache.read_bytes()
+        home = self.directory / 'home'
+        home.mkdir()
+        env = {
+            'SSL_CERT_FILE': str(self.cert),
+            'XDG_STATE_HOME': str(state),
+            'XDG_CONFIG_HOME': str(home / '.config'),
+            'HOME': str(home),
+            'GROUNDWORK_PLUGIN_LIST': f'https://127.0.0.1:{port}/plugins.json',
+        }
+        started = time.monotonic()
+        with patch.dict(os.environ, env):
+            document, fresh, notice = plugins.resolve_document()
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertFalse(fresh)
+        self.assertIn('different host', notice)
+        self.assertIn('using the saved copy', notice)
+        self.assertEqual(cache.read_bytes(), before)
+        self.assertEqual(document['plugins'], [])
+
+    def test_incomplete_chunked_body_uses_the_saved_copy(self):
+        def respond(tls, _data, _stop):
+            tls.sendall(b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n64\r\nshort\r\n')
+
+        port = self.serve_https(respond)
+        with self.assertRaises(plugins.FetchError) as caught:
+            self.fetch(f'https://127.0.0.1:{port}/plugins.json', 5)
+        self.assertIn('download failed', str(caught.exception))
+        self.assertIsInstance(caught.exception.__cause__, http.client.HTTPException)
+        state = self.directory / 'state'
+        cache = state / 'groundwork' / 'omarchy-plugins.json'
+        cache.parent.mkdir(parents=True)
+        cache.write_text(json.dumps({
+            'schemaVersion': 1,
+            'plugins': [plugin()],
+            'retired': [],
+        }) + '\n')
+        before = cache.read_bytes()
+        home = self.directory / 'home'
+        home.mkdir()
+        env = {
+            'SSL_CERT_FILE': str(self.cert),
+            'XDG_STATE_HOME': str(state),
+            'XDG_CONFIG_HOME': str(home / '.config'),
+            'HOME': str(home),
+            'GROUNDWORK_PLUGIN_LIST': f'https://127.0.0.1:{port}/plugins.json',
+        }
+        with patch.dict(os.environ, env):
+            document, fresh, notice = plugins.resolve_document()
+        self.assertFalse(fresh)
+        self.assertIn('using the saved copy', notice)
+        self.assertEqual(cache.read_bytes(), before)
+        self.assertEqual(document['plugins'][0]['id'], 'example.widget')
 
 
 if __name__ == '__main__':

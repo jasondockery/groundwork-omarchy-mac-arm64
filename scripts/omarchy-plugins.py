@@ -37,6 +37,17 @@ class FetchError(Exception):
     """The plugin document could not be downloaded."""
 
 
+class UnsupportedSection(Exception):
+    """This entry's bar section is not one Omarchy Mac can enable."""
+
+    def __init__(self, plugin_id):
+        super().__init__(plugin_id)
+        self.plugin_id = plugin_id
+
+
+REDIRECT_HOSTS = ('raw.githubusercontent.com', 'objects.githubusercontent.com', 'github.com')
+
+
 def flat(message):
     return ' '.join(str(message).split())[:240]
 
@@ -182,9 +193,9 @@ def validate_plugin(value):
         if type(arch) is not list or not arch or any(type(item) is not str or not ARCH_RE.fullmatch(item) for item in arch):
             raise ListError('plugin arch is invalid')
         plugin['arch'] = list(arch)
+    if 'section' in value and value['section'] not in SECTIONS:
+        raise UnsupportedSection(value['id'])
     if 'section' in value:
-        if value['section'] not in SECTIONS:
-            raise ListError('plugin section must be left, center, or right')
         plugin['section'] = value['section']
     if 'setup' in value:
         plugin['setup'] = validate_setup(value['setup'])
@@ -208,15 +219,28 @@ def validate_list(data):
         raise ListError('plugins must be a list')
     if type(retired) is not list:
         raise ListError('retired must be a list')
-    normalized_plugins = [validate_plugin(item) for item in plugins]
+    normalized_plugins = []
+    skipped_sections = []
+    seen = []
+    for item in plugins:
+        try:
+            plugin = validate_plugin(item)
+        except UnsupportedSection as error:
+            skipped_sections.append(error.plugin_id)
+            seen.append(error.plugin_id)
+            continue
+        normalized_plugins.append(plugin)
+        seen.append(plugin['id'])
     normalized_retired = [validate_retired(item) for item in retired]
-    ids = [item['id'] for item in normalized_plugins]
     retired_ids = [item['id'] for item in normalized_retired]
-    if len(ids) != len(set(ids)) or len(retired_ids) != len(set(retired_ids)):
+    if len(seen) != len(set(seen)) or len(retired_ids) != len(set(retired_ids)):
         raise ListError('plugin id is duplicated')
-    if set(ids) & set(retired_ids):
+    if set(seen) & set(retired_ids):
         raise ListError('plugin id is in both plugins and retired')
-    return {'schemaVersion': 1, 'plugins': normalized_plugins, 'retired': normalized_retired}
+    document = {'schemaVersion': 1, 'plugins': normalized_plugins, 'retired': normalized_retired}
+    if skipped_sections:
+        document['skippedSections'] = skipped_sections
+    return document
 
 
 def parse_list(raw):
@@ -269,8 +293,18 @@ def discard_bounded(response, sock, deadline):
         remaining -= len(chunk)
 
 
+def allowed_redirect(started_host, target):
+    parts = urllib.parse.urlsplit(target)
+    if parts.scheme != 'https':
+        raise ListError('rejected a non-https redirect')
+    host = (parts.hostname or '').lower()
+    if host not in {started_host.lower(), *REDIRECT_HOSTS}:
+        raise ListError('rejected a redirect to a different host')
+
+
 def fetch_https(url, deadline):
     current = url
+    started = https_url(url).hostname.lower()
     for _redirect in range(MAX_REDIRECTS + 1):
         parts = https_url(current)
         path = parts.path or '/'
@@ -298,8 +332,7 @@ def fetch_https(url, deadline):
                 if not location:
                     raise FetchError('plugin list redirect is missing a location')
                 target = urllib.parse.urljoin(current, location)
-                if urllib.parse.urlsplit(target).scheme != 'https':
-                    raise ListError('rejected a non-https redirect')
+                allowed_redirect(started, target)
                 discard_bounded(response, sock, deadline)
                 current = target
                 continue
@@ -311,6 +344,8 @@ def fetch_https(url, deadline):
             raise
         except (TimeoutError, socket.timeout) as error:
             raise FetchError('plugin list download exceeded its deadline') from error
+        except http.client.HTTPException as error:
+            raise FetchError('plugin list download failed') from error
         except OSError as error:
             raise FetchError('plugin list download failed') from error
         finally:
@@ -451,9 +486,12 @@ def load_record():
     except (OSError, ListError, json.JSONDecodeError, UnicodeError) as error:
         raise ListError(f'Omarchy plugin install record is invalid; plugin changes were skipped ({flat(error)}).') from error
     if data is None:
-        return {'schemaVersion': 1, 'plugins': {}}
+        return {'schemaVersion': 1, 'plugins': {}, 'noticedRetired': []}
     plugins = data.get('plugins')
     if type(data) is not dict or type(data.get('schemaVersion')) is not int or data['schemaVersion'] != 1 or type(plugins) is not dict:
+        raise ListError('Omarchy plugin install record is invalid; plugin changes were skipped.')
+    noticed = data.get('noticedRetired', [])
+    if type(noticed) is not list or any(not valid_id(item) for item in noticed):
         raise ListError('Omarchy plugin install record is invalid; plugin changes were skipped.')
     clean = {}
     for plugin_id, entry in plugins.items():
@@ -473,9 +511,14 @@ def load_record():
             head = setup.get('head')
             if head is not None and (type(head) is not str or not re.fullmatch(r'[0-9a-fA-F]{4,64}', head)):
                 raise ListError('Omarchy plugin install record is invalid; plugin changes were skipped.')
+            setup_pending = setup.get('pending', False)
+            if type(setup_pending) is not bool:
+                raise ListError('Omarchy plugin install record is invalid; plugin changes were skipped.')
             item['setup'] = {'command': setup['command'], 'needsSudo': setup['needsSudo'], 'head': head}
+            if setup_pending:
+                item['setup']['pending'] = True
         clean[plugin_id] = item
-    return {'schemaVersion': 1, 'plugins': clean}
+    return {'schemaVersion': 1, 'plugins': clean, 'noticedRetired': list(noticed)}
 
 
 def save_json(path, value):
@@ -566,11 +609,9 @@ def have_tty():
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
-def command_line(executable, needs_sudo):
-    quoted = shlex.quote(str(executable))
-    if needs_sudo:
-        return f'sudo -- {quoted}'
-    return quoted
+def command_line(executable):
+    """The setup command a person runs in their own session."""
+    return shlex.quote(str(executable))
 
 
 def setup_executable(directory, command):
@@ -631,11 +672,22 @@ def setup_due(entry, recorded, head_moved, current_head):
     if not setup or recorded is None:
         return False
     done = recorded.get('setup')
-    if type(done) is not dict:
+    if type(done) is not dict or done.get('pending') is True:
         return True
     if done.get('command') != setup['command'] or done.get('needsSudo') is not setup['needsSudo']:
         return True
     return bool(head_moved and done.get('head') != current_head)
+
+
+def store_setup(recorded, setup, directory, pending):
+    stored = {
+        'command': setup['command'],
+        'needsSudo': setup['needsSudo'],
+        'head': git_head(directory),
+    }
+    if pending:
+        stored['pending'] = True
+    recorded['setup'] = stored
 
 
 def perform_setup(entry, directory, recorded, sudo_state):
@@ -644,29 +696,36 @@ def perform_setup(entry, directory, recorded, sudo_state):
         executable = setup_executable(directory, setup['command'])
     except OSError as error:
         say(f"Omarchy plugin {entry['id']} setup failed: {flat(error)}.")
+        store_setup(recorded, setup, directory, pending=True)
         return
-    line = command_line(executable, setup['needsSudo'])
-    if not have_tty():
+    line = command_line(executable)
+    if not have_tty() or (setup['needsSudo'] and not sudo_ready(sudo_state)):
         say(f"Omarchy plugin {entry['id']} setup was deferred; run it in a terminal: {line}")
+        store_setup(recorded, setup, directory, pending=True)
         return
-    if setup['needsSudo'] and not sudo_ready(sudo_state):
-        say(f"Omarchy plugin {entry['id']} setup was deferred; run it in a terminal: {line}")
-        return
-    args = ['sudo', '--', str(executable)] if setup['needsSudo'] else [str(executable)]
+    # Prime sudo above, then run as the current user. The script's own sudo
+    # calls reuse the warm timestamp instead of owning the checkout as root.
     try:
-        result = subprocess.run(args, timeout=300)
+        result = subprocess.run([str(executable)], timeout=300)
     except (OSError, subprocess.TimeoutExpired) as error:
         say(f"Omarchy plugin {entry['id']} setup failed: {flat(error)}.")
+        store_setup(recorded, setup, directory, pending=True)
         return
     if result.returncode != 0:
         say(f"Omarchy plugin {entry['id']} setup failed: exit {result.returncode}.")
+        store_setup(recorded, setup, directory, pending=True)
         return
-    recorded['setup'] = {'command': setup['command'], 'needsSudo': setup['needsSudo'], 'head': git_head(directory)}
+    store_setup(recorded, setup, directory, pending=False)
 
 
 def save_record(record):
     record['plugins'] = dict(sorted(record['plugins'].items()))
-    save_json(record_path(), record)
+    noticed = sorted(set(record.get('noticedRetired') or []))
+    record['noticedRetired'] = noticed
+    payload = {'schemaVersion': 1, 'plugins': record['plugins']}
+    if noticed:
+        payload['noticedRetired'] = noticed
+    save_json(record_path(), payload)
 
 
 def enable_command(item):
@@ -676,22 +735,84 @@ def enable_command(item):
     return command
 
 
-def hold_for_enable_retry(record, plugin_id, repo):
-    """Drop a plugin this run just added so a failed enable can be retried.
-
-    `omarchy plugin add` fails while the directory remains. Removing it keeps
-    the next run retryable. If removal cannot clear that directory, remember
-    enablePending and retry enable only. A directory that was already there is
-    never removed or enabled again.
-    """
-    rollback = run_omarchy(['plugin', 'remove', plugin_id, '--yes'], 60)
-    if not command_failed(rollback) and not path_exists(plugin_path(plugin_id)):
+def drop_record(record, plugin_id):
+    if plugin_id not in record['plugins']:
         return
-    if command_failed(rollback):
-        say(f'Omarchy plugin {plugin_id} remove failed: {failure_text(rollback)}.')
+    record['plugins'].pop(plugin_id, None)
+    save_record(record)
+
+
+def remove_checkout(plugin_id):
+    """Remove a checkout this run just added. True when the directory is gone."""
+    if not valid_id(plugin_id):
+        say(f'Omarchy plugin {plugin_id} remove failed: invalid id.')
+        return False
+    outcome = run_omarchy(['plugin', 'remove', plugin_id, '--yes'], 60)
+    if not path_exists(plugin_path(plugin_id)):
+        if command_failed(outcome):
+            say(f'Omarchy plugin {plugin_id} remove failed: {failure_text(outcome)}.')
+        return True
+    if command_failed(outcome):
+        say(f'Omarchy plugin {plugin_id} remove failed: {failure_text(outcome)}.')
     else:
         say(f'Omarchy plugin {plugin_id} remove failed: the plugin directory is still present.')
+    return False
+
+
+def hold_for_enable_retry(record, plugin_id, repo):
+    """Clear a checkout this run just added so enable can be retried.
+
+    If the directory is gone after remove, drop the record even when remove
+    exits non-zero. Rescan can do that. If the directory remains, remember
+    enablePending and retry enable only. A directory that was already present
+    before this run is never removed.
+    """
+    if remove_checkout(plugin_id):
+        drop_record(record, plugin_id)
+        return
     remember(record, plugin_id, repo, enable_pending=True)
+
+
+def added_name(outcome):
+    if isinstance(outcome, Exception):
+        return ''
+    match = re.search(r'^Added (\S+) into ', outcome.stdout or '', re.MULTILINE)
+    return match.group(1) if match else ''
+
+
+def reject_mismatch(plugin_id, outcome, directory, created):
+    """Remove a checkout whose manifest id is not the list id. True when rejected."""
+    added = added_name(outcome)
+    if added and added != plugin_id:
+        say(f'Omarchy plugin {plugin_id} manifest id is {added}; removed.')
+        if valid_id(added):
+            remove_checkout(added)
+        if created and added != plugin_id:
+            remove_checkout(plugin_id)
+        return True
+    if not directory.is_dir() or directory.is_symlink():
+        return False
+    actual = manifest_id(directory)
+    if actual == plugin_id:
+        return False
+    say(f'Omarchy plugin {plugin_id} manifest id is {actual or "unreadable"}; removed.')
+    remove_checkout(plugin_id)
+    return True
+
+
+def install_checked_out(record, item, directory, sudo_state, pending_first):
+    """Enable a checkout this run created, then run setup when it is due."""
+    if pending_first:
+        remember(record, item['id'], item['repo'], enable_pending=True)
+    outcome = run_omarchy(enable_command(item), 60)
+    if command_failed(outcome):
+        say(f"Omarchy plugin {item['id']} enable failed: {failure_text(outcome)}.")
+        hold_for_enable_retry(record, item['id'], item['repo'])
+        return
+    recorded = remember(record, item['id'], item['repo'])
+    if item.get('setup') and setup_due(item, recorded, False, git_head(directory)):
+        perform_setup(item, directory, recorded, sudo_state)
+        save_record(record)
 
 
 def remember(record, plugin_id, repo, enable_pending=False):
@@ -722,12 +843,19 @@ def apply_plugins(updating):
         say(notice)
     if document is None:
         return
+    for plugin_id in document.get('skippedSections', []):
+        say(f'Omarchy plugin {plugin_id} was skipped; section must be left, center, or right.')
     if fresh:
         changes = describe_changes(load_cache(), document)
         if changes:
             say(f'Omarchy plugin list changes: {changes}.')
+        cached = {
+            'schemaVersion': 1,
+            'plugins': document['plugins'],
+            'retired': document['retired'],
+        }
         try:
-            save_json(cache_path(), document)
+            save_json(cache_path(), cached)
         except OSError as error:
             say(f'Omarchy plugin list cache was not written: {flat(error)}.')
     arch_skipped = []
@@ -783,14 +911,23 @@ def apply_plugins(updating):
             continue
         record['plugins'].pop(plugin_id, None)
         save_record(record)
-    unnoticed = [item['id'] for item in document['retired'] if item['id'] not in installed_by_groundwork]
-    if unnoticed:
-        say('Omarchy plugins retired in the shared list were not installed by this layer and were left in place: ' + ', '.join(unnoticed) + '.')
+    already_noticed = set(record.get('noticedRetired', []))
+    pending_notice = []
+    for item in document['retired']:
+        plugin_id = item['id']
+        if plugin_id in installed_by_groundwork or plugin_id in already_noticed:
+            continue
+        if not path_exists(plugin_path(plugin_id)):
+            continue
+        pending_notice.append(plugin_id)
+    if pending_notice:
+        say('Omarchy plugins retired in the shared list were not installed by this layer and were left in place: ' + ', '.join(pending_notice) + '.')
+        record['noticedRetired'] = [*already_noticed, *pending_notice]
+        save_record(record)
 
     sudo_state = {'ready': None}
-    stopped = False
     for item in selected:
-        if stopped or item['id'] in retired_ids:
+        if item['id'] in retired_ids:
             continue
         plugin_id = item['id']
         directory = plugin_path(plugin_id)
@@ -808,11 +945,10 @@ def apply_plugins(updating):
                     if updating:
                         before = git_head(directory)
                         outcome = run_omarchy(['plugin', 'update', plugin_id, '--yes'], 180)
+                        after = git_head(directory)
+                        head_moved = before is not None and after is not None and before != after
                         if command_failed(outcome):
                             say(f'Omarchy plugin {plugin_id} update failed: {failure_text(outcome)}.')
-                        else:
-                            after = git_head(directory)
-                            head_moved = before is not None and after is not None and before != after
                     if pending:
                         outcome = run_omarchy(enable_command(item), 60)
                         if command_failed(outcome):
@@ -826,42 +962,30 @@ def apply_plugins(updating):
                     perform_setup(item, directory, recorded, sudo_state)
                     save_record(record)
             continue
-        if recorded is not None:
+        if recorded is not None and recorded.get('enablePending'):
+            drop_record(record, plugin_id)
+            recorded = None
+        elif recorded is not None:
             say(f'Omarchy plugin {plugin_id} was removed locally; leaving it uninstalled.')
             continue
         if not shell_up():
             deferred.append(plugin_id)
             continue
+        existed = path_exists(directory)
         outcome = run_omarchy(['plugin', 'add', item['repo'], '--yes'], 180)
+        created = (not existed) and directory.is_dir() and not directory.is_symlink()
         if command_failed(outcome):
             say(f'Omarchy plugin {plugin_id} add failed: {failure_text(outcome)}.')
+            if reject_mismatch(plugin_id, outcome, directory, created) or not created:
+                continue
+            install_checked_out(record, item, directory, sudo_state, pending_first=True)
             continue
-        added = ''
-        if not isinstance(outcome, Exception):
-            match = re.search(r'^Added (\S+) into ', outcome.stdout or '', re.MULTILINE)
-            if match:
-                added = match.group(1)
-        if added and added != plugin_id:
-            say(f'Omarchy plugin {plugin_id} manifest id is {added}; stopped.')
-            stopped = True
+        if reject_mismatch(plugin_id, outcome, directory, created):
             continue
         if directory.is_symlink() or not directory.is_dir():
             say(f'Omarchy plugin {plugin_id} add failed: the plugin directory is missing.')
             continue
-        actual = manifest_id(directory)
-        if actual != plugin_id:
-            say(f'Omarchy plugin {plugin_id} manifest id is {actual or "unreadable"}; stopped.')
-            stopped = True
-            continue
-        outcome = run_omarchy(enable_command(item), 60)
-        if command_failed(outcome):
-            say(f'Omarchy plugin {plugin_id} enable failed: {failure_text(outcome)}.')
-            hold_for_enable_retry(record, plugin_id, item['repo'])
-            continue
-        recorded = remember(record, plugin_id, item['repo'])
-        if item.get('setup') and setup_due(item, recorded, False, git_head(directory)):
-            perform_setup(item, directory, recorded, sudo_state)
-            save_record(record)
+        install_checked_out(record, item, directory, sudo_state, pending_first=False)
     if deferred:
         say('Omarchy shell is not running; deferred plugin changes: ' + ', '.join(deferred) + '.')
 
@@ -958,7 +1082,12 @@ def warn_trackpad():
         return
     order = require_order(hypr / 'hyprland.lua')
     ranked = [(order.index(module_name), path) for module_name, path in differing if module_name in order]
-    winner = sorted(ranked)[-1][1] if ranked else differing[-1][1]
+    if not ranked:
+        listed = ', '.join(str(path) for _module_name, path in differing)
+        verb = 'is' if len(differing) == 1 else 'are'
+        warn(f'Warning: {listed} {verb} not loaded by hyprland.lua; the stowed input.lua still applies.')
+        return
+    winner = sorted(ranked)[-1][1]
     warn(f'Warning: {winner} sets touchpad.natural_scroll differently from the stowed input.lua and wins.')
 
 
