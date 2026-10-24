@@ -377,7 +377,7 @@ def install_t3_version(version):
         raise UpdateError(f'T3 Code did not report {version} after installing it.')
 
 
-def repair_t3(completed, versions, problem):
+def repair_t3(completed, warnings, versions, problem):
     print(f'{problem} Reinstalling a build that starts on this kernel…', flush=True)
     for version in dict.fromkeys(version for version in versions if version):
         try:
@@ -391,12 +391,13 @@ def repair_t3(completed, versions, problem):
     print(f'T3 Code is still not starting. Restore it with: curl -fsSL {T3_INSTALLER} | '
           f'T3CODE_CHANNEL=nightly T3CODE_VERSION={T3_KNOWN_GOOD_LARGE_PAGE} sh', file=sys.stderr, flush=True)
     completed.append('T3 Code repair failed; restore command printed')
+    warnings.append('T3 Code does not start and could not be repaired; run the printed restore command.')
 
 
 T3_CHECK_ERRORS = (UpdateError, OSError, ValueError, tarfile.TarError, http.client.HTTPException)
 
 
-def update_t3(completed):
+def update_t3(completed, warnings):
     page = page_size()
     if page <= 4096:
         print('Updating T3 Code Nightly (its background service may restart)…', flush=True)
@@ -414,7 +415,7 @@ def update_t3(completed):
     except T3_CHECK_ERRORS as error:
         reason, candidate = f'the newest linux-arm64 build could not be checked for {page // 1024} KiB pages ({error})', None
     if installed is None:
-        repair_t3(completed, [None if reason else candidate, T3_KNOWN_GOOD_LARGE_PAGE],
+        repair_t3(completed, warnings, [None if reason else candidate, T3_KNOWN_GOOD_LARGE_PAGE],
                   f'The installed T3 Code does not start ({broken}).')
         return
     if reason:
@@ -431,7 +432,7 @@ def update_t3(completed):
     try:
         updated = t3_version()
     except (UpdateError, OSError):
-        repair_t3(completed, [installed, T3_KNOWN_GOOD_LARGE_PAGE],
+        repair_t3(completed, warnings, [installed, T3_KNOWN_GOOD_LARGE_PAGE],
                   f'T3 Code {candidate} does not start after updating ({T3_PAGE_SIZE_ISSUE}).')
         return
     if updated != candidate:
@@ -489,6 +490,8 @@ def update(scope, check=False):
         candidate = None
         candidate_cleaned = False
         completed = []
+        # Problems that let the remaining stages run but must not read as success.
+        warnings = []
         try:
             print('Checking Groundwork repository updates…', flush=True)
             git(source, 'fetch', '--no-tags', '--no-recurse-submodules', remote,
@@ -525,7 +528,7 @@ def update(scope, check=False):
                 atomic_write(CONFIG, json.dumps(value, indent=2) + '\n')
             completed.append('Groundwork configuration applied')
             if scope == 'all':
-                update_t3(completed)
+                update_t3(completed, warnings)
                 if shutil.which('flatpak'):
                     # Only Groundwork's installed Bitwarden Flatpak is in scope.
                     installed = run(['flatpak', '--user', 'list', '--app', '--columns=application'])
@@ -540,12 +543,18 @@ def update(scope, check=False):
                     completed.append('User Flatpak tooling not installed; skipped')
             git(source, 'update-ref', '-d', candidate_ref, candidate)
             candidate_cleaned = True
+            result = 'completed_with_warnings' if warnings else 'completed'
             receipt = dict(schema=1, scope=scope, source_before=before, source_after=candidate,
-                           completed=completed, result='completed', ended_at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+                           completed=completed, result=result, ended_at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+            if warnings:
+                receipt['warnings'] = warnings
             atomic_write(STATE / f'{"update-all" if scope == "all" else "groundwork-update"}-last-success.json', json.dumps(receipt, indent=2) + '\n')
             print('\n' + '\n'.join(completed))
             if scope == 'layer':
                 print('Routine app and system upgrades were not requested. Use update-all for those.')
+            for warning in warnings:
+                print(f'Warning: {warning}', file=sys.stderr)
+            return result
         except BaseException:
             try:
                 observed = git(source, 'rev-parse', 'HEAD')
@@ -616,8 +625,8 @@ def main(args):
     if options not in ([], ['--check']):
         print('Unknown or combined arguments. Use --help; nothing changed.', file=sys.stderr)
         return 64
-    update(scope, check=options == ['--check'])
-    return 0
+    # Remaining stages finished, but a warning still needs attention.
+    return 1 if update(scope, check=options == ['--check']) == 'completed_with_warnings' else 0
 
 
 if __name__ == '__main__':

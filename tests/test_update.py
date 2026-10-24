@@ -315,11 +315,11 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
             item.start()
             self.addCleanup(item.stop)
 
-    def update_all(self):
+    def update_all(self, result='completed'):
         with patch('sys.stdout', new_callable=io.StringIO) as output, patch('sys.stderr', new_callable=io.StringIO) as errors:
-            updater.update('all')
+            self.assertEqual(updater.update('all'), result)
         receipt = json.loads((self.state / 'update-all-last-success.json').read_text())
-        self.assertEqual(receipt['result'], 'completed')
+        self.assertEqual(receipt['result'], result)
         self.assertIn('Bitwarden user Flatpak update command completed', receipt['completed'])
         return output.getvalue() + errors.getvalue(), receipt
 
@@ -418,9 +418,25 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
         self.large_pages()
         self.t3_broken = True
         self.install_failures = {CANDIDATE, updater.T3_KNOWN_GOOD_LARGE_PAGE}
-        output, receipt = self.update_all()
+        output, receipt = self.update_all(result='completed_with_warnings')
         self.assertIn(f'T3CODE_VERSION={updater.T3_KNOWN_GOOD_LARGE_PAGE} sh', output)
         self.assertIn('T3 Code repair failed; restore command printed', receipt['completed'])
+        self.assertIn('Warning: T3 Code does not start and could not be repaired', output)
+        self.assertEqual(len(receipt['warnings']), 1)
+
+    def test_unrepairable_t3_makes_update_all_exit_non_zero(self):
+        self.large_pages()
+        self.t3_broken = True
+        self.install_failures = {CANDIDATE, updater.T3_KNOWN_GOOD_LARGE_PAGE}
+        with patch('sys.stdout', new_callable=io.StringIO), patch('sys.stderr', new_callable=io.StringIO):
+            self.assertEqual(updater.main(['all']), 1)
+        receipt = json.loads((self.state / 'update-all-last-success.json').read_text())
+        self.assertEqual(receipt['result'], 'completed_with_warnings')
+        self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], self.machine_calls)
+
+    def test_successful_update_all_exits_zero(self):
+        with patch('sys.stdout', new_callable=io.StringIO):
+            self.assertEqual(updater.main(['all']), 0)
 
     def test_candidate_that_fails_after_updating_is_rolled_back(self):
         self.large_pages()

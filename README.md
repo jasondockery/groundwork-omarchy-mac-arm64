@@ -76,8 +76,9 @@ the installed build is kept, the version is remembered in
 `~/.local/state/groundwork/t3-rejected.json` so it is not downloaded again, and
 the rest of the update continues. A build that passes is installed by exact
 version. If the installed T3 no longer starts, `update-all` reinstalls the
-checked build or the last known-good `0.1.2-nightly.20261021.3499`, and prints a
-restore command if neither works. Setup on such a kernel keeps a Nightly that
+checked build or the last known-good `0.1.2-nightly.20261021.3499`. If neither
+works, it prints a restore command, finishes the other stages, records
+`completed_with_warnings`, and exits non-zero. Setup on such a kernel keeps a Nightly that
 already starts and installs the known-good build only when T3 is missing,
 broken, or not a Nightly.
 
