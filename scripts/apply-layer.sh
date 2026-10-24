@@ -167,13 +167,60 @@ import json
 import sys
 from pathlib import Path
 
+def strip_jsonc(text):
+    out = []
+    i = 0
+    n = len(text)
+    in_string = False
+    escape = False
+    while i < n:
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if in_string:
+            out.append(ch)
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+        elif ch == "/" and nxt == "/":
+            i += 2
+            while i < n and text[i] not in "\r\n":
+                i += 1
+            continue
+        elif ch == "/" and nxt == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i += 2
+            continue
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
 path = Path(sys.argv[1])
 if path.is_symlink() or (path.exists() and not path.is_file()):
     print(f"Refusing to edit Cursor argv.json because it is not a regular file: {path}", file=sys.stderr)
     sys.exit(1)
 try:
     text = path.read_text() if path.exists() else ""
-    data = json.loads(text) if text.strip() else {}
+    if not text.strip():
+        data = {}
+    else:
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            stripped = strip_jsonc(text)
+            if not stripped.strip():
+                raise
+            data = json.loads(stripped)
 except (OSError, json.JSONDecodeError) as error:
     print(f"Cursor argv.json was left unchanged: {path} ({error})", file=sys.stderr)
     sys.exit(1)
