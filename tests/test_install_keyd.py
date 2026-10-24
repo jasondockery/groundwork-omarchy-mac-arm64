@@ -263,6 +263,7 @@ class InstallKeydTests(unittest.TestCase):
         for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'omarchy-install-dev-env', 'omarchy-remove-dev-env', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw', 'getconf', 'readelf'):
             (self.bin / name).symlink_to(stub)
         (self.root / 'home').mkdir()
+        (self.root / 'runtime').mkdir()
         (self.root / 'nightly-t3').write_text('#!/bin/sh\nprintf "t3 0.0.0-nightly.20261018.1\\n"\n')
         plugin_list = self.root / 'plugins.json'
         plugin_list.write_text('{"schemaVersion": 1, "plugins": [], "retired": []}\n')
@@ -273,8 +274,8 @@ class InstallKeydTests(unittest.TestCase):
                         HOME=str(self.root / 'home'),
                         XDG_CONFIG_HOME=str(self.root / 'home/.config'),
                         XDG_STATE_HOME=str(self.root / 'home/.local/state'),
-                        # Screen sharing writes its restart record here. A host
-                        # runtime directory must not receive that file.
+                        # The served-config stamp is read here. The directory
+                        # must exist so a host runtime directory is not used.
                         XDG_RUNTIME_DIR=str(self.root / 'runtime'),
                         GROUNDWORK_PLUGIN_LIST=str(plugin_list),
                         PATH=f'{self.root}/home/.local/bin:{self.bin}')

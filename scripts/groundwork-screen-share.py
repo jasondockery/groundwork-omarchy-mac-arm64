@@ -20,14 +20,20 @@ import time
 
 UNIT = '''[Unit]
 Description=Groundwork screen sharing over Tailscale
+# Start after the graphical session so WayVNC has a Wayland display.
 After=graphical-session.target
+# Stop the listener when the graphical session ends.
 PartOf=graphical-session.target
 
 [Service]
 ExecStart="%h/.local/bin/groundwork-screen-share" serve
+# Bring the listener back after a crash.
 Restart=on-failure
+# Avoid a hot loop while bind_listener waits out TIME_WAIT.
 RestartSec=10
+# Match stop_child's two 5s waits so a stuck WayVNC cannot hold restart past configure's 20s timeout.
 TimeoutStopSec=10
+# Keep the control socket private.
 UMask=0077
 
 [Install]
@@ -107,22 +113,14 @@ def user_runtime_root():
 
 
 def directory_writable(path):
-    # The directory may not exist yet. Setup can create it when an ancestor is
-    # a real, writable directory. A symlink is not that directory.
-    current = path
-    while True:
-        try:
-            info = current.lstat()
-        except FileNotFoundError:
-            parent = current.parent
-            if parent == current:
-                return False
-            current = parent
-            continue
-        except OSError:
-            return False
-        return (not stat.S_ISLNK(info.st_mode) and stat.S_ISDIR(info.st_mode)
-                and os.access(current, os.W_OK | os.X_OK))
+    # A missing directory is not this path. Walking to a writable ancestor
+    # would hide the runtime directory the desktop service actually uses.
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return (not stat.S_ISLNK(info.st_mode) and stat.S_ISDIR(info.st_mode)
+            and os.access(path, os.W_OK | os.X_OK))
 
 
 def runtime_state_dir():
@@ -172,15 +170,10 @@ def served_config_changed(path):
     return recorded != hashlib.sha256(read_config_bytes(path)).hexdigest()
 
 
-def home_restart_marker():
-    return Path.home() / '.local/state/groundwork/screen-share-restart-needed'
-
-
 def restart_marker_path():
-    directory = runtime_state_dir()
-    if directory is not None:
-        return directory / 'restart-needed'
-    return home_restart_marker()
+    # This file outlives the runtime directory. A record written before the
+    # user bus is up must still be visible after login.
+    return Path.home() / '.local/state/groundwork/screen-share-restart-needed'
 
 
 def restart_is_pending():
@@ -200,34 +193,36 @@ def mark_restart_needed():
     replace_file(path, b'pending\n', 0o600)
 
 
-def unlink_regular_file(path):
+def clear_restart_marker():
+    path = restart_marker_path()
     if path.is_symlink() or not path.is_file():
         return
     path.unlink()
 
 
-def clear_restart_marker():
-    unlink_regular_file(restart_marker_path())
-    # A marker written before the runtime directory existed must not remain
-    # pending after this apply can see that directory.
-    if runtime_state_dir() is not None:
-        unlink_regular_file(home_restart_marker())
+def finish_restart_record(path):
+    # Stamp before clearing so a process that has not bound yet does not look
+    # like a new edit. serve() replaces the stamp with the bytes it passes to WayVNC.
+    try:
+        remember_served_config(read_config_bytes(path))
+    except (OSError, RuntimeError):
+        pass
+    clear_restart_marker()
 
 
-def service_is_active():
-    # is-active exits 0 when the unit is running and 3 when it is not.
-    # Any other result leaves the restart record for a later apply.
+def service_active_state():
+    # is-active exits 3 for inactive, failed, activating, and deactivating.
+    # ActiveState is the distinction. Any other result leaves the record.
     try:
         result = subprocess.run(
-            ['systemctl', '--user', 'is-active', '--quiet', 'groundwork-screen-share.service'],
-            check=False, timeout=20)
+            ['systemctl', 'show', '--user', '-p', 'ActiveState', '--value',
+             'groundwork-screen-share.service'],
+            check=False, capture_output=True, text=True, timeout=20)
     except (OSError, subprocess.SubprocessError):
         return None
-    if result.returncode == 0:
-        return True
-    if result.returncode == 3:
-        return False
-    return None
+    if result.returncode != 0:
+        return None
+    return (result.stdout or '').strip()
 
 
 def configure():
@@ -260,7 +255,7 @@ def configure():
         try:
             mark_restart_needed()
         except (OSError, RuntimeError):
-            # Creating the runtime directory can fail. A service that is
+            # The state directory can fail to be created. A service that is
             # already running still needs the restart below.
             pass
     subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True, timeout=20)
@@ -269,28 +264,23 @@ def configure():
     # WayVNC config are the same bytes. Restarting here is what drops it.
     if changed:
         if os.environ.get('WAYLAND_DISPLAY'):
-            active = True
+            action = 'restart'
         else:
-            active = service_is_active()
-        if active is True:
+            state = service_active_state()
+            if state in ('active', 'reloading', 'failed'):
+                action = 'restart'
+            elif state == 'inactive':
+                action = 'clear'
+            else:
+                # activating, deactivating, or a systemctl error.
+                action = 'keep'
+        if action == 'restart':
             print('Restarting screen sharing; an active remote session will drop.')
             subprocess.run(['systemctl', '--user', 'restart', 'groundwork-screen-share.service'],
                            check=True, timeout=20)
-            # The restarted process may still be waiting to bind. Record the
-            # bytes it will load so the next apply does not treat the old stamp
-            # as a new edit and kill that waiter. serve() replaces this stamp
-            # with the bytes it actually passes to WayVNC.
-            try:
-                remember_served_config(read_config_bytes(path))
-            except (OSError, RuntimeError):
-                pass
-            clear_restart_marker()
-        elif active is False:
-            try:
-                remember_served_config(read_config_bytes(path))
-            except (OSError, RuntimeError):
-                pass
-            clear_restart_marker()
+            finish_restart_record(path)
+        elif action == 'clear':
+            finish_restart_record(path)
     print('Screen sharing enabled for desktop login; it waits for Tailscale sign-in.')
     print('Show its password in a local terminal: groundwork-screen-share password')
 
