@@ -669,13 +669,26 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertFalse(any(call[0] in ('stow', 'hyprctl') for call in self.calls()))
         self.assertFalse(self.config.exists())
 
-    def test_failed_freetube_install_stops_before_configuration(self):
+    def test_failed_freetube_install_continues_through_stow(self):
         (self.root / 'bitwarden-flatpak').touch()
         self.env['FIXTURE_FREETUBE_FLATPAK_STATUS'] = '1'
+        result = self.run_install()
+        calls = self.calls()
+        self.assertIn(['flatpak', '--user', 'install', '--noninteractive', 'flathub', 'io.freetubeapp.FreeTube'], calls)
+        self.assertIn('FreeTube could not be installed', result.stderr)
+        self.assertIn('FreeTube was not installed.', result.stdout)
+        self.assertTrue(any(call[0] == 'curl' for call in calls))
+        self.assertTrue(any(call[0] == 'stow' for call in calls))
+        self.assertIn(['sudo', 'keyd', 'reload'], calls)
+        self.assertIn(['systemctl', '--user', 'enable', 'groundwork-screen-share.service'], calls)
+        self.assertTrue(self.config.exists())
+
+    def test_missing_flatpak_package_still_stops_freetube_setup(self):
+        (self.bin / 'bitwarden').symlink_to(self.bin / 'stub')
+        (self.bin / 'flatpak').unlink()
         result = self.run_install(success=False)
-        self.assertIn(['flatpak', '--user', 'install', '--noninteractive', 'flathub', 'io.freetubeapp.FreeTube'], self.calls())
-        self.assertNotIn('are installed.', result.stdout)
-        self.assertFalse(any(call[0] in ('stow', 'hyprctl') for call in self.calls()))
+        self.assertIn('flatpak is still unavailable', result.stderr)
+        self.assertFalse(any(call[0] == 'stow' for call in self.calls()))
         self.assertFalse(self.config.exists())
 
     def test_update_installs_missing_freetube_once(self):

@@ -766,13 +766,22 @@ def update(scope, check=False):
                         ('com.bitwarden.desktop', 'Bitwarden'),
                         ('io.freetubeapp.FreeTube', 'FreeTube'),
                     ):
-                        if app in installed:
-                            print(f'Updating the installed {label} user Flatpak…', flush=True)
+                        if app not in installed:
+                            completed.append(f'{label} user Flatpak not installed; skipped')
+                            continue
+                        print(f'Updating the installed {label} user Flatpak…', flush=True)
+                        try:
                             run(['flatpak', '--user', 'update', '--noninteractive', app],
                                 deadline=600, capture=False)
-                            completed.append(f'{label} user Flatpak update command completed')
-                        else:
-                            completed.append(f'{label} user Flatpak not installed; skipped')
+                        except (UpdateError, OSError) as error:
+                            if app != 'io.freetubeapp.FreeTube':
+                                raise
+                            message = f'FreeTube user Flatpak update failed: {error}'
+                            print(message, file=sys.stderr, flush=True)
+                            warnings.append(message)
+                            completed.append('FreeTube user Flatpak update failed')
+                            continue
+                        completed.append(f'{label} user Flatpak update command completed')
                 else:
                     completed.append('User Flatpak tooling not installed; skipped')
                 update_blip(completed)
