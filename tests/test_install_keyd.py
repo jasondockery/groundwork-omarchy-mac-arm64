@@ -165,7 +165,7 @@ class InstallKeydTests(unittest.TestCase):
         stub = self.bin / 'stub'
         stub.write_text(STUB)
         stub.chmod(0o755)
-        for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw', 'getconf'):
+        for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw', 'getconf', 'readelf'):
             (self.bin / name).symlink_to(stub)
         (self.root / 'home').mkdir()
         (self.root / 'nightly-t3').write_text('#!/bin/sh\nprintf "t3 0.0.0-nightly.20261018.1\\n"\n')
@@ -696,6 +696,23 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertEqual((self.root / 't3-version').read_text(), '0.1.2-nightly.20261021.3499')
         self.assertEqual((self.root / 't3-channel').read_text(), 'nightly')
         self.assertIn('pingdotgg/t3code#23433', result.stdout)
+
+    def test_large_pages_keep_a_working_nightly_on_rerun(self):
+        self.env.update(FIXTURE_PAGESIZE='16384', FIXTURE_PINNED_T3='0.1.2-nightly.20261021.3499')
+        self.run_install()
+        (self.root / 'calls.jsonl').unlink()
+        (self.root / 't3-version').unlink()
+        (self.bin / 't3').unlink()
+        result = self.run_install()
+        self.assertFalse(any(call[0] == 'curl' for call in self.calls()))
+        self.assertFalse((self.root / 't3-version').exists())
+        self.assertIn('Keeping the installed T3 Code Nightly on this 16 KiB-page kernel', result.stdout)
+
+    def test_readelf_comes_from_binutils(self):
+        (self.bin / 'readelf').unlink()
+        result = self.run_install(success=False)
+        self.assertIn(['omarchy', 'pkg', 'add', 'binutils'], self.calls())
+        self.assertIn('binutils is still unavailable', result.stderr)
 
     def test_nightly_installer_failure_stops_before_home_changes(self):
         self.env['FIXTURE_INSTALL_STATUS'] = '1'
