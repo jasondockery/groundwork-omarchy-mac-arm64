@@ -172,11 +172,15 @@ def served_config_changed(path):
     return recorded != hashlib.sha256(read_config_bytes(path)).hexdigest()
 
 
+def home_restart_marker():
+    return Path.home() / '.local/state/groundwork/screen-share-restart-needed'
+
+
 def restart_marker_path():
     directory = runtime_state_dir()
     if directory is not None:
         return directory / 'restart-needed'
-    return Path.home() / '.local/state/groundwork/screen-share-restart-needed'
+    return home_restart_marker()
 
 
 def restart_is_pending():
@@ -196,11 +200,18 @@ def mark_restart_needed():
     replace_file(path, b'pending\n', 0o600)
 
 
-def clear_restart_marker():
-    path = restart_marker_path()
+def unlink_regular_file(path):
     if path.is_symlink() or not path.is_file():
         return
     path.unlink()
+
+
+def clear_restart_marker():
+    unlink_regular_file(restart_marker_path())
+    # A marker written before the runtime directory existed must not remain
+    # pending after this apply can see that directory.
+    if runtime_state_dir() is not None:
+        unlink_regular_file(home_restart_marker())
 
 
 def service_is_active():
@@ -265,8 +276,20 @@ def configure():
             print('Restarting screen sharing; an active remote session will drop.')
             subprocess.run(['systemctl', '--user', 'restart', 'groundwork-screen-share.service'],
                            check=True, timeout=20)
+            # The restarted process may still be waiting to bind. Record the
+            # bytes it will load so the next apply does not treat the old stamp
+            # as a new edit and kill that waiter. serve() replaces this stamp
+            # with the bytes it actually passes to WayVNC.
+            try:
+                remember_served_config(read_config_bytes(path))
+            except (OSError, RuntimeError):
+                pass
             clear_restart_marker()
         elif active is False:
+            try:
+                remember_served_config(read_config_bytes(path))
+            except (OSError, RuntimeError):
+                pass
             clear_restart_marker()
     print('Screen sharing enabled for desktop login; it waits for Tailscale sign-in.')
     print('Show its password in a local terminal: groundwork-screen-share password')
