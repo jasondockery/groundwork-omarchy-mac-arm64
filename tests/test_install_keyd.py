@@ -256,6 +256,8 @@ class InstallKeydTests(unittest.TestCase):
             (self.bin / name).symlink_to(stub)
         (self.root / 'home').mkdir()
         (self.root / 'nightly-t3').write_text('#!/bin/sh\nprintf "t3 0.0.0-nightly.20261018.1\\n"\n')
+        plugin_list = self.root / 'plugins.json'
+        plugin_list.write_text('{"schemaVersion": 1, "plugins": [], "retired": []}\n')
         self.config = self.root / 'etc/keyd/default.conf'
         self.env = dict(os.environ, INSTALL_FIXTURE=str(self.root), GROUNDWORK_TEST_ROOT=str(self.root),
                         GROUNDWORK_TESTING='1',
@@ -263,6 +265,7 @@ class InstallKeydTests(unittest.TestCase):
                         HOME=str(self.root / 'home'),
                         XDG_CONFIG_HOME=str(self.root / 'home/.config'),
                         XDG_STATE_HOME=str(self.root / 'home/.local/state'),
+                        GROUNDWORK_PLUGIN_LIST=str(plugin_list),
                         PATH=f'{self.root}/home/.local/bin:{self.bin}')
         self.env.pop('T3CODE_INSTALL_BIN_DIR', None)
         self.env.pop('GROUNDWORK_OBSIDIAN_VAULT', None)
@@ -276,6 +279,12 @@ class InstallKeydTests(unittest.TestCase):
     def calls(self):
         log = self.root / 'calls.jsonl'
         return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+    def test_install_writes_plugin_cache_without_calling_plugin_add(self):
+        self.run_install()
+        cache = self.root / 'home/.local/state/groundwork/omarchy-plugins.json'
+        self.assertEqual(json.loads(cache.read_text())['plugins'], [])
+        self.assertFalse(any(call[:2] == ['omarchy', 'plugin'] for call in self.calls()))
 
     def test_saved_exclusions_and_vault_survive_a_bare_rerun(self):
         vault = self.root / 'home/Notes'

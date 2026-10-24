@@ -196,6 +196,14 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(saved['obsidian_vault'], str(self.home / 'Notes'))
         self.assertFalse((self.state / 'update-all-last-success.json').exists())
 
+    def test_update_all_requests_plugin_updates_and_layer_apply_does_not(self):
+        updater.update('all')
+        self.assertIn(['bash', str(self.source / 'scripts/apply-layer.sh'), '--update', '--update-plugins'],
+                      self.machine_calls)
+        self.machine_calls.clear()
+        updater.update('layer')
+        self.assertEqual(self.machine_calls, [['bash', str(self.source / 'scripts/apply-layer.sh'), '--update']])
+
     def test_all_delegates_system_and_selected_app_updates_to_their_owners(self):
         updater.update('all')
         self.assertEqual(self.machine_calls[0], ['omarchy', 'update'])

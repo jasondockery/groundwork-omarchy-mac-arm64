@@ -21,6 +21,7 @@ keyd_choice=""
 sharing_choice=""
 blip_choice=""
 updating=0
+update_plugins=0
 for arg in "$@"; do
   case "$arg" in
     --with-keyd | --without-keyd)
@@ -52,6 +53,7 @@ for arg in "$@"; do
       [[ $arg == --with-blip ]] && with_blip=1 || with_blip=0
       ;;
     --update) updating=1 ;;
+    --update-plugins) update_plugins=1 ;;
     *)
       echo "Unknown argument: $arg" >&2
       usage >&2
@@ -114,8 +116,8 @@ fi
 # Fail before installing packages or moving files when the checkout is incomplete.
 bitwarden_extension=nngceckbapebfimnlniiiahkandclblb.json
 extension_source="$root/chromium/extensions/$bitwarden_extension"
-[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$extension_source" ]] || {
-  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, or Bitwarden extension manifest is missing." >&2
+[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$extension_source" ]] || {
+  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, plugin helper, or Bitwarden extension manifest is missing." >&2
   exit 1
 }
 
@@ -550,6 +552,18 @@ if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
 else
   echo "No Hyprland session detected; validate the input override on the desktop with:"
   echo "  hyprctl reload && hyprctl configerrors"
+fi
+
+# Shared shell plugins. A failure here stays retryable and does not stop the rest of apply.
+# update-all passes --update-plugins. Configuration-only apply leaves plugin checkouts alone.
+plugin_status=0
+if [[ $update_plugins -eq 1 ]]; then
+  python3 "$root/scripts/omarchy-plugins.py" --update || plugin_status=$?
+else
+  python3 "$root/scripts/omarchy-plugins.py" || plugin_status=$?
+fi
+if [[ $plugin_status -ne 0 ]]; then
+  echo "Omarchy plugins could not be applied; rerun to retry them." >&2
 fi
 
 if [[ $with_keyd -eq 1 ]]; then
