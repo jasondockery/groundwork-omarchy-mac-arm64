@@ -36,6 +36,9 @@ BUN_LINUX_ARCHIVE = 'bun-linux-aarch64.zip'
 BLIP_ID = 'nixfred.blip'
 # Last nightly whose ELF files all load on 16 KiB pages (pingdotgg/t3code#23433).
 T3_KNOWN_GOOD_LARGE_PAGE = '0.1.2-nightly.20261021.3499'
+# A downloaded candidate must finish --version inside its temp directory.
+# A crash, non-zero exit, or hang is rejected like a misaligned ELF.
+T3_CANDIDATE_SMOKE_SECONDS = 30
 # Captured stages print progress at this interval. Interactive stages own the
 # terminal and stay quiet so a prompt (for example sudo) is never interrupted.
 HEARTBEAT_SECONDS = 30
@@ -249,7 +252,7 @@ def foreground(fd, group):
         signal.signal(signal.SIGTTOU, previous)
 
 
-def run(args, cwd=None, deadline=20, capture=True, lock_fd=None, extra_env=None):
+def run(args, cwd=None, deadline=20, capture=True, lock_fd=None, extra_env=None, stdin=None):
     terminal = None
     original_group = None
     process = None
@@ -270,7 +273,7 @@ def run(args, cwd=None, deadline=20, capture=True, lock_fd=None, extra_env=None)
         environment.update(extra_env or {})
         if lock_fd is not None:
             environment['GROUNDWORK_OMARCHY_LOCK_FD'] = str(lock_fd)
-        process = subprocess.Popen(args, cwd=cwd, text=True, **group_options,
+        process = subprocess.Popen(args, cwd=cwd, text=True, stdin=stdin, **group_options,
                                    pass_fds=() if lock_fd is None else (lock_fd,),
                                    stdout=subprocess.PIPE if capture else None,
                                    stderr=subprocess.PIPE if capture else None,
@@ -508,11 +511,28 @@ def page_size_reason(page):
     return f'newer linux-arm64 builds crash on {page // 1024} KiB pages ({T3_PAGE_SIZE_ISSUE})'
 
 
+def t3_start_failure(error):
+    """Short reason a candidate `t3 --version` did not succeed."""
+    line = str(error).splitlines()[0] if str(error) else ''
+    if 'exceeded its' in line and 'deadline' in line:
+        return 'timed out'
+    marker = ' failed ('
+    start = line.rfind(marker)
+    if start != -1:
+        detail = line[start + len(marker):].rstrip(').')
+        if detail:
+            return detail
+    return 'exited unsuccessfully'
+
+
 def t3_candidate_check(installed, page):
     """Return (reason the newest nightly must not be installed or None, candidate).
 
     An executable or shared object whose LOAD segment is aligned below the
-    kernel page size cannot be mapped there (pingdotgg/t3code#23433).
+    kernel page size cannot be mapped there (pingdotgg/t3code#23433). A build
+    that is aligned but does not finish `--version` is rejected the same way.
+    The candidate runs only inside its download directory, with stdin closed
+    and a deadline, so a crash or hang cannot take the installed copy with it.
     """
     candidate = t3_latest_nightly()
     if candidate == installed:
@@ -522,9 +542,20 @@ def t3_candidate_check(installed, page):
     if not shutil.which('readelf'):
         return 'readelf is missing, so the newest build cannot be checked (install binutils)', candidate
     with tempfile.TemporaryDirectory(prefix='groundwork-t3-') as directory:
-        if misaligned_elf_files(t3_download(candidate, directory), page):
+        root = t3_download(candidate, directory)
+        if misaligned_elf_files(root, page):
             reject_t3(page, candidate)
             return page_size_reason(page), candidate
+        binary = next(path for path in root.glob('*/t3') if path.is_file())
+        try:
+            # Captured, off the terminal, and bounded. A signal exit (SIGSEGV
+            # is -11) is a non-zero status and is rejected like bad alignment.
+            run([str(binary), '--version'], cwd=directory, deadline=T3_CANDIDATE_SMOKE_SECONDS,
+                stdin=subprocess.DEVNULL)
+        except (UpdateError, OSError, ValueError) as error:
+            reject_t3(page, candidate)
+            return (f'the newest linux-arm64 build does not start on {page // 1024} KiB pages '
+                    f'({t3_start_failure(error)}; {T3_PAGE_SIZE_ISSUE})'), candidate
     return None, candidate
 
 
@@ -589,7 +620,25 @@ def update_t3(completed, warnings):
         return
     # Install exactly the build that was checked, never a newer unchecked one.
     print(f'Updating T3 Code Nightly to {candidate} (its background service may restart)…', flush=True)
-    run(['t3', 'update', '--channel', 'nightly', '--yes', candidate], deadline=300, capture=False)
+    try:
+        run(['t3', 'update', '--channel', 'nightly', '--yes', candidate], deadline=300, capture=False)
+    except (UpdateError, OSError) as error:
+        try:
+            kept = t3_version()
+        except (UpdateError, OSError):
+            repair_t3(completed, warnings, [installed, T3_KNOWN_GOOD_LARGE_PAGE],
+                      f'T3 Code {candidate} does not start after updating ({T3_PAGE_SIZE_ISSUE}).')
+            return
+        # T3's own updater can refuse a candidate and leave the working install
+        # in place (PinnedRuntimeInstallError). Remember it and continue.
+        if kept != installed:
+            raise
+        reject_t3(page, candidate)
+        detail = str(error).splitlines()[0].rstrip('.')
+        print(f'T3 Code {candidate} was not installed ({detail}). Keeping {installed}.', flush=True)
+        warnings.append(f'T3 Code {candidate} was not installed; kept {installed}.')
+        completed.append(f'T3 Code update skipped on {page // 1024} KiB pages; kept {installed}')
+        return
     try:
         updated = t3_version()
     except (UpdateError, OSError):

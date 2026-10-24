@@ -112,6 +112,8 @@ class UpdateTests(unittest.TestCase):
         self.blip_plugin = None
         self.install_failures = set()
         self.freetube_update_failure = False
+        self.candidate_crashes = False
+        self.t3_update_fails = False
         self.real_run = updater.run
         self.run_patch = patch.object(updater, 'run', side_effect=self.run_command)
         self.run_patch.start()
@@ -144,9 +146,15 @@ class UpdateTests(unittest.TestCase):
             if self.t3_broken:
                 raise updater.UpdateError('t3 failed (exit -11).')
             return f't3 v{self.t3_installed}'
+        if args[:2] == ['t3', 'update'] and self.t3_update_fails:
+            raise updater.UpdateError('t3 failed (exit 1).')
         if args[:2] == ['t3', 'update'] and len(args) == 6:
             self.t3_installed = args[-1]
             self.t3_broken = self.break_after_update
+        if len(args) == 2 and args[1] == '--version' and args[0] != 't3' and Path(args[0]).name == 't3':
+            if self.candidate_crashes:
+                raise updater.UpdateError(f'{args[0]} failed (exit -11).')
+            return 't3 vcandidate'
         if args[0] == 'sh':
             version = kwargs['extra_env']['T3CODE_VERSION']
             if version in self.install_failures:
@@ -374,6 +382,10 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
         self.assertIn('FreeTube user Flatpak update command completed', receipt['completed'])
         return output.getvalue() + errors.getvalue(), receipt
 
+    def candidate_smokes(self):
+        return [(call, kwargs) for call, kwargs in zip(self.machine_calls, self.machine_kwargs)
+                if len(call) == 2 and call[1] == '--version' and call[0] != 't3' and Path(call[0]).name == 't3']
+
     def installer_versions(self):
         return [kwargs['extra_env']['T3CODE_VERSION'] for call, kwargs in zip(self.machine_calls, self.machine_kwargs)
                 if call[0] == 'sh']
@@ -391,6 +403,7 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
         self.assert_t3_kept(output, 'newer linux-arm64 builds crash on 16 KiB pages (pingdotgg/t3code#23433)')
         rejected = json.loads((self.state / 't3-rejected.json').read_text())
         self.assertEqual(rejected, {'16384': [CANDIDATE]})
+        self.assertFalse(self.candidate_smokes())
 
     def test_rejected_candidate_is_not_downloaded_again(self):
         self.large_pages()
@@ -420,6 +433,47 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
         output, receipt = self.update_all()
         self.assertIn(['t3', 'update', '--channel', 'nightly', '--yes', CANDIDATE], self.machine_calls)
         self.assertIn(f'T3 Code Nightly updated to {CANDIDATE}', receipt['completed'])
+        self.assertEqual(len(self.candidate_smokes()), 1)
+
+    def test_aligned_candidate_that_crashes_is_rejected(self):
+        self.large_pages()
+        self.candidate_crashes = True
+        output, _ = self.update_all()
+        self.assert_t3_kept(output, 'the newest linux-arm64 build does not start on 16 KiB pages '
+                            '(exit -11; pingdotgg/t3code#23433)')
+        rejected = json.loads((self.state / 't3-rejected.json').read_text())
+        self.assertEqual(rejected, {'16384': [CANDIDATE]})
+        smokes = self.candidate_smokes()
+        self.assertEqual(len(smokes), 1)
+        (binary, _version), kwargs = smokes[0]
+        self.assertIn('groundwork-t3-', kwargs['cwd'])
+        self.assertTrue(str(binary).startswith(kwargs['cwd']))
+        self.assertEqual(kwargs['deadline'], updater.T3_CANDIDATE_SMOKE_SECONDS)
+        self.assertIs(kwargs.get('stdin'), subprocess.DEVNULL)
+        self.assertNotIn('capture', kwargs)
+        readelfs = [call[2] for call in self.machine_calls if call[:2] == ['readelf', '-lW']]
+        self.assertTrue(readelfs)
+        self.assertTrue(all(path.startswith(kwargs['cwd']) for path in readelfs))
+
+    def test_failed_t3_update_keeps_a_working_install(self):
+        self.large_pages()
+        self.t3_update_fails = True
+        with patch('sys.stdout', new_callable=io.StringIO) as output, patch('sys.stderr', new_callable=io.StringIO) as errors:
+            self.assertEqual(updater.main(['all']), 1)
+        text = output.getvalue() + errors.getvalue()
+        self.assertNotIn('Update incomplete', text)
+        self.assertIn(f'T3 Code {CANDIDATE} was not installed (t3 failed (exit 1)). Keeping 0.0.1-nightly.fixture.', text)
+        self.assertIn(f'Warning: T3 Code {CANDIDATE} was not installed; kept 0.0.1-nightly.fixture.', text)
+        self.assertEqual(self.t3_installed, '0.0.1-nightly.fixture')
+        self.assertIn(['t3', 'update', '--channel', 'nightly', '--yes', CANDIDATE], self.machine_calls)
+        self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], self.machine_calls)
+        receipt = json.loads((self.state / 'update-all-last-success.json').read_text())
+        self.assertEqual(receipt['result'], 'completed_with_warnings')
+        self.assertEqual(receipt['warnings'], [f'T3 Code {CANDIDATE} was not installed; kept 0.0.1-nightly.fixture.'])
+        self.assertIn('T3 Code update skipped on 16 KiB pages; kept 0.0.1-nightly.fixture', receipt['completed'])
+        self.assertIn('Bitwarden user Flatpak update command completed', receipt['completed'])
+        rejected = json.loads((self.state / 't3-rejected.json').read_text())
+        self.assertEqual(rejected, {'16384': [CANDIDATE]})
 
     def test_large_pages_skip_t3_when_installed_build_is_newest(self):
         self.large_pages(candidate='0.0.1-nightly.fixture')
@@ -673,6 +727,40 @@ class T3CandidateTests(unittest.TestCase):
                     {'tag_name': 'v0.1.3-nightly.20261024.3604'}, {'tag_name': 'v0.1.3-nightly.20261023.3592'}]
         with patch.object(updater, 'fetch', return_value=json.dumps(releases).encode()):
             self.assertEqual(updater.t3_latest_nightly(), '0.1.3-nightly.20261024.3604')
+
+    def test_candidate_check_rejects_a_binary_that_crashes_or_hangs(self):
+        def archive(script):
+            payload = script.encode()
+            buffer = io.BytesIO()
+            info = tarfile.TarInfo(f't3-{CANDIDATE}-linux-arm64/t3')
+            info.size = len(payload)
+            info.mode = 0o755
+            with tarfile.open(fileobj=buffer, mode='w:gz') as bundle:
+                bundle.addfile(info, io.BytesIO(payload))
+            return buffer.getvalue()
+
+        def check(script, deadline, grace, expected):
+            packed = archive(script)
+            digest = hashlib.sha256(packed).hexdigest()
+            responses = {updater.T3_RELEASES: json.dumps([{'tag_name': f'v{CANDIDATE}'}]).encode(),
+                         f'{updater.T3_DOWNLOADS}/v{CANDIDATE}/SHA256SUMS': f'{digest}  t3-{CANDIDATE}-linux-arm64.tar.gz\n'.encode(),
+                         f'{updater.T3_DOWNLOADS}/v{CANDIDATE}/t3-{CANDIDATE}-linux-arm64.tar.gz': packed}
+            with tempfile.TemporaryDirectory() as state, \
+                    patch.object(updater, 'STATE', Path(state)), \
+                    patch.object(updater, 'fetch', side_effect=lambda url, deadline=60: responses[url]), \
+                    patch.object(updater.shutil, 'which', return_value='readelf'), \
+                    patch.object(updater, 'T3_CANDIDATE_SMOKE_SECONDS', deadline), \
+                    patch.object(updater, 'INTERRUPT_GRACE_SECONDS', grace):
+                reason, version = updater.t3_candidate_check('0.0.1-nightly.fixture', 16384)
+                rejected = json.loads((Path(state) / 't3-rejected.json').read_text())
+            self.assertEqual(version, CANDIDATE)
+            self.assertIn(expected, reason)
+            self.assertEqual(rejected, {'16384': [CANDIDATE]})
+
+        check('#!/bin/sh\nkill -SEGV $$\n', updater.T3_CANDIDATE_SMOKE_SECONDS, 0.2,
+              'does not start on 16 KiB pages (exit -11; pingdotgg/t3code#23433)')
+        check('#!/bin/sh\nsleep 30\n', 0.2, 0.2,
+              'does not start on 16 KiB pages (timed out; pingdotgg/t3code#23433)')
 
 
 # A child that records which signal stopped it.
