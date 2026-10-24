@@ -2,6 +2,7 @@
 """Own the local WayVNC service; never listen outside the active Tailscale IP."""
 import argparse
 import errno
+import hashlib
 import ipaddress
 import json
 import os
@@ -76,18 +77,60 @@ def config_text(password):
             'password=' + password + '\n')
 
 
-def read_config(path):
+def read_config_bytes(path):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(fd) as source:
+    with os.fdopen(fd, 'rb') as source:
         info = os.fstat(source.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
             raise RuntimeError('Refusing unsafe screen-sharing credentials.')
         os.fchmod(source.fileno(), 0o600)
-        text = source.read(4096)
+        data = source.read(4096)
+    try:
+        text = data.decode()
+    except UnicodeDecodeError:
+        text = ''
     match = re.search(r'^password=([A-Za-z0-9_-]{8})$', text, re.MULTILINE)
     if not match or text != config_text(match[1]):
         raise RuntimeError('Preserved modified screen-sharing config; reconcile it locally before setup.')
+    return data
+
+
+def read_config(path):
+    match = re.search(r'^password=([A-Za-z0-9_-]{8})$', read_config_bytes(path).decode(), re.MULTILINE)
     return match[1]
+
+
+def config_stamp_path():
+    root = os.environ.get('XDG_RUNTIME_DIR')
+    if not root:
+        return None
+    return Path(root) / 'groundwork-screen-share' / 'config.sha256'
+
+
+def remember_served_config(data):
+    # The running WayVNC keeps the password it was started with. Record the
+    # bytes this process actually read so a later edit can restart it.
+    stamp = config_stamp_path()
+    if stamp is None:
+        return
+    private_directory(stamp.parent)
+    replace_file(stamp, (hashlib.sha256(data).hexdigest() + '\n').encode(), 0o600)
+
+
+def served_config_changed(path):
+    stamp = config_stamp_path()
+    if stamp is None:
+        return False
+    try:
+        fd = os.open(stamp, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return False
+    with os.fdopen(fd, 'rb') as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            return False
+        recorded = source.read(80).decode().strip()
+    return recorded != hashlib.sha256(read_config_bytes(path)).hexdigest()
 
 
 def configure():
@@ -96,6 +139,10 @@ def configure():
     changed = False
     if path.exists() or path.is_symlink():
         read_config(path)
+        # A valid hand edit, such as a new password, is still the file WayVNC
+        # has not loaded. The serve stamp is the bytes the running process read.
+        if served_config_changed(path):
+            changed = True
     else:
         # DES uses only eight characters. Never reuse an account password here.
         replace_file(path, config_text(secrets.token_urlsafe(6)).encode(), 0o600)
@@ -136,21 +183,25 @@ def tailscale_address():
     return None
 
 
-def stop_child(child):
+def stop_child(child, wait=5):
     if not child or child.poll() is not None:
         return
-    # A second SIGTERM must not abandon the wait. WayVNC holds the listener
-    # until it exits, and systemd starts the replacement only after we do.
-    previous = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    # WayVNC holds the listener until it exits. Block SIGTERM for the wait so
+    # a stop that arrives during an address change stays pending, then exit
+    # once the mask is restored.
+    signal.pthread_sigmask(signal.SIG_BLOCK, [signal.SIGTERM])
     try:
         child.terminate()
         try:
-            child.wait(timeout=5)
+            child.wait(timeout=wait)
         except subprocess.TimeoutExpired:
             child.kill()
-            child.wait(timeout=2)
+            child.wait(timeout=wait)
     finally:
-        signal.signal(signal.SIGTERM, previous)
+        pending = signal.SIGTERM in signal.sigpending()
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, [signal.SIGTERM])
+    if pending:
+        sys.exit(0)
 
 
 # Apple Screen Sharing sends Command as Alt and Option as Super so a Mac
@@ -289,11 +340,12 @@ def start_server(address, runtime):
 
 
 def serve():
-    read_config(config_path())
+    served = read_config_bytes(config_path())
     if not os.environ.get('WAYLAND_DISPLAY') or not os.environ.get('XDG_RUNTIME_DIR'):
         raise RuntimeError('A running Wayland desktop is required; sign in locally first.')
     runtime = Path(os.environ['XDG_RUNTIME_DIR']) / 'groundwork-screen-share'
     private_directory(runtime)
+    remember_served_config(served)
     child = None
     active = None
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
