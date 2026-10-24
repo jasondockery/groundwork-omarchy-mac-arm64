@@ -176,9 +176,6 @@ class InstallKeydTests(unittest.TestCase):
         stub = self.bin / 'stub'
         stub.write_text(STUB)
         stub.chmod(0o755)
-        # update-all checks T3 Code builds with readelf (binutils).
-        if not (self.bin / 'readelf').exists():
-            (self.bin / 'readelf').symlink_to(stub)
         for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw'):
             (self.bin / name).symlink_to(stub)
         (self.root / 'home').mkdir()
@@ -384,14 +381,6 @@ raise SystemExit(os.WEXITSTATUS(status))
                 self.assertEqual(privileged[0], ['sudo', '-n', '/usr/bin/true'])
                 self.assertEqual(oct(manifest.stat().st_mode & 0o777), '0o644')
                 self.assertEqual(manifest.read_bytes(), (REPO / 'chromium/extensions' / manifest.name).read_bytes())
-
-    def test_update_primes_sudo_when_readelf_is_missing(self):
-        self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
-        (self.bin / 'readelf').unlink()
-        self.env['FIXTURE_SUDO_CACHED'] = '1'
-        result = self.run_update()
-        self.assertNotIn('sudo was not used', result.stdout)
-        self.assertEqual(self.privileged_calls()[0], ['sudo', '-n', '/usr/bin/true'])
 
     def test_test_root_without_the_harness_guard_is_refused(self):
         del self.env['GROUNDWORK_TESTING']

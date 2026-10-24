@@ -143,8 +143,7 @@ keyd_current() {
 privileged_changes_needed() {
   local executable
   # Missing tools are installed through omarchy pkg add or Omarchy's installers.
-  # readelf (binutils) is what update-all uses to check T3 Code builds.
-  for executable in cursor herdr tailscale obsidian bw readelf; do
+  for executable in cursor herdr tailscale obsidian bw; do
     command -v "$executable" >/dev/null || return 0
   done
   if ! command -v bitwarden >/dev/null && ! command -v flatpak >/dev/null; then
