@@ -332,11 +332,20 @@ fi
 
 # Nightly is upstream's fast-moving train. Reconcile an existing stable CLI too;
 # executable presence is not evidence that the selected channel is installed.
+# Newer linux-arm64 nightlies have 4 KiB-aligned LOAD segments and cannot
+# start on 16 KiB-page kernels (pingdotgg/t3code#23433). Pin the last
+# known-good nightly there; update-all checks each newer build before moving.
+t3_known_good_16k=0.1.2-nightly.20261021.3499
 if [[ $updating -eq 0 ]] || ! command -v t3 >/dev/null; then
+  t3_pin=()
+  if (($(getconf PAGESIZE) > 4096)); then
+    t3_pin=(T3CODE_VERSION="$t3_known_good_16k")
+    echo "This kernel uses $(getconf PAGESIZE)-byte pages; installing T3 Code $t3_known_good_16k (pingdotgg/t3code#23433)."
+  fi
   t3_installer="$(mktemp)"
   curl --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 10 --max-time 60 \
     -fsSL https://t3.codes/install.sh -o "$t3_installer"
-  env -u T3CODE_VERSION T3CODE_CHANNEL=nightly timeout --kill-after=5s 300 sh "$t3_installer"
+  env -u T3CODE_VERSION T3CODE_CHANNEL=nightly "${t3_pin[@]}" timeout --kill-after=5s 300 sh "$t3_installer"
   rm -f "$t3_installer"
   t3_installer=""
 fi

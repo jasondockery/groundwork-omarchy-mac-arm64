@@ -3,6 +3,7 @@
 import fcntl
 from contextlib import contextmanager
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -11,14 +12,20 @@ import shutil
 import signal
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
+import urllib.request
 import uuid
 
 MARKER = '# Groundwork Omarchy updater'
 CONFIG = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config')) / 'groundwork/omarchy.json'
 STATE = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local/state')) / 'groundwork'
 KEYD_CONFIG = Path('/etc/keyd/default.conf')
+T3_REPO = 'pingdotgg/t3code'
+T3_RELEASES = f'https://api.github.com/repos/{T3_REPO}/releases?per_page=100'
+T3_DOWNLOADS = f'https://github.com/{T3_REPO}/releases/download'
+T3_PAGE_SIZE_ISSUE = 'pingdotgg/t3code#23433'
 
 
 class UpdateError(Exception):
@@ -216,6 +223,114 @@ def run(args, cwd=None, deadline=20, capture=True, lock_fd=None):
                         stream.close()
 
 
+def page_size():
+    # Same value as `getconf PAGESIZE`, without a subprocess.
+    return os.sysconf('SC_PAGESIZE')
+
+
+def fetch(url, deadline=60):
+    request = urllib.request.Request(url, headers={'User-Agent': 'groundwork-omarchy-updater'})
+    with urllib.request.urlopen(request, timeout=deadline) as response:
+        return response.read()
+
+
+def t3_version():
+    reported = run(['t3', '--version']).split()
+    return reported[-1].removeprefix('v') if reported else 'unknown'
+
+
+def t3_latest_nightly():
+    # Same selection as https://t3.codes/install.sh: the newest nightly tag.
+    for release in json.loads(fetch(T3_RELEASES)):
+        tag = release.get('tag_name') or ''
+        version = tag.removeprefix('v')
+        if (tag.startswith('v') and not release.get('draft') and '-nightly.' in version
+                and all(part.isdigit() for part in version.replace('-nightly.', '.').split('.'))):
+            return version
+    raise UpdateError('No T3 Code nightly release was found.')
+
+
+def t3_candidate_binary(version, directory):
+    archive = f't3-{version}-linux-arm64.tar.gz'
+    expected = None
+    for line in fetch(f'{T3_DOWNLOADS}/v{version}/SHA256SUMS').decode().splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[1].lstrip('*') == archive:
+            expected = fields[0]
+    if not expected:
+        raise UpdateError(f'{archive} is not listed in SHA256SUMS.')
+    data = fetch(f'{T3_DOWNLOADS}/v{version}/{archive}', deadline=300)
+    if hashlib.sha256(data).hexdigest() != expected:
+        raise UpdateError(f'Checksum mismatch for {archive}.')
+    with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as bundle:
+        for member in bundle.getmembers():
+            parts = Path(member.name).parts
+            if member.isfile() and len(parts) == 2 and parts[1] == 't3':
+                binary = Path(directory) / 't3'
+                binary.write_bytes(bundle.extractfile(member).read())
+                return binary
+    raise UpdateError(f'{archive} has no t3 executable.')
+
+
+def load_alignments(binary):
+    alignments = []
+    for line in run(['readelf', '-lW', str(binary)]).splitlines():
+        fields = line.split()
+        if fields[:1] == ['LOAD']:
+            alignments.append(int(fields[-1], 16))
+    if not alignments:
+        raise UpdateError(f'readelf found no LOAD segments in {binary}.')
+    return alignments
+
+
+def t3_page_size_block(installed, page):
+    """Return why the newest nightly must not replace a working build, or None.
+
+    An executable whose LOAD segment is aligned below the kernel page size
+    cannot be mapped there (pingdotgg/t3code#23433).
+    """
+    candidate = t3_latest_nightly()
+    if candidate == installed:
+        return None, candidate
+    with tempfile.TemporaryDirectory(prefix='groundwork-t3-') as directory:
+        binary = t3_candidate_binary(candidate, directory)
+        if any(alignment < page for alignment in load_alignments(binary)):
+            return (f'newer linux-arm64 builds crash on 16 KiB pages ({T3_PAGE_SIZE_ISSUE})', candidate)
+    return None, candidate
+
+
+def update_t3(completed):
+    page = page_size()
+    installed = candidate = None
+    if page > 4096:
+        installed = t3_version()
+        try:
+            reason, candidate = t3_page_size_block(installed, page)
+        except (UpdateError, OSError, ValueError, tarfile.TarError) as error:
+            reason = f'the newest linux-arm64 build could not be checked for {page}-byte pages ({error})'
+        if reason:
+            print(f'T3 Code update skipped: {reason}; keeping {installed}.', flush=True)
+            completed.append(f'T3 Code update skipped on {page}-byte pages; kept {installed}')
+            return
+        if candidate == installed:
+            print(f'T3 Code Nightly is already {installed}.', flush=True)
+            completed.append(f'T3 Code Nightly already current ({installed})')
+            return
+    print('Updating T3 Code Nightly (its background service may restart)…', flush=True)
+    run(['t3', 'update', '--channel', 'nightly', '--yes'], deadline=300, capture=False)
+    try:
+        updated = run(['t3', '--version'])
+    except UpdateError as error:
+        if installed:
+            raise UpdateError(f'T3 Code no longer starts after updating; a build newer than the checked {candidate} may have '
+                              f'been published meanwhile ({T3_PAGE_SIZE_ISSUE}). Restore the working build with: '
+                              f'curl -fsSL https://t3.codes/install.sh | T3CODE_VERSION={installed} sh') from error
+        raise
+    if '-nightly.' not in updated:
+        raise UpdateError('T3 Code did not report the selected Nightly channel after updating.')
+    completed.append('T3 Code Nightly update command completed')
+
+
 def git(source, *args, **kwargs):
     return run(['git', '--no-optional-locks', '-C', str(source), *args], **kwargs)
 
@@ -302,11 +417,7 @@ def update(scope, check=False):
                 atomic_write(CONFIG, json.dumps(value, indent=2) + '\n')
             completed.append('Groundwork configuration applied')
             if scope == 'all':
-                print('Updating T3 Code Nightly (its background service may restart)…', flush=True)
-                run(['t3', 'update', '--channel', 'nightly', '--yes'], deadline=300, capture=False)
-                if '-nightly.' not in run(['t3', '--version']):
-                    raise UpdateError('T3 Code did not report the selected Nightly channel after updating.')
-                completed.append('T3 Code Nightly update command completed')
+                update_t3(completed)
                 if shutil.which('flatpak'):
                     # Only Groundwork's installed Bitwarden Flatpak is in scope.
                     installed = run(['flatpak', '--user', 'list', '--app', '--columns=application'])

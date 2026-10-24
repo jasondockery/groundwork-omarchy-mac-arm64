@@ -67,6 +67,14 @@ Bitwarden user Flatpak. T3's background service may restart. Other Flatpaks and
 application sign-in remain outside this command. Omarchy owns the OS, Arch
 packages, default tools, and desktop; no second system updater is installed.
 
+On a kernel with pages larger than 4 KiB (Apple Silicon uses 16 KiB),
+`update-all` first downloads the newest T3 Nightly and checks its ELF LOAD
+segments with `readelf -lW`. If any segment is aligned below the page size,
+the build cannot start there ([pingdotgg/t3code#23433](https://github.com/pingdotgg/t3code/issues/23433)),
+so the installed build is kept, a skip message is printed, and the rest of the
+update continues. A fresh install on such a kernel pins
+`0.1.2-nightly.20261021.3499`, the last known-good build.
+
 For only repository configuration, run `groundwork-update`. It preserves saved
 keyd, screen-sharing, and Obsidian vault choices and does not request routine
 system or app upgrades. It can install a newly declared missing tool needed by

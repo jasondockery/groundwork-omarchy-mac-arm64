@@ -3,12 +3,14 @@ import fcntl
 from contextlib import contextmanager
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -17,6 +19,24 @@ REPO = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('groundwork_updater', REPO / 'scripts/groundwork-update.py')
 updater = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(updater)
+
+# `readelf -lW` program headers from pingdotgg/t3code#23433.
+READELF_GOOD = '''
+Program Headers:
+  Type           Offset   VirtAddr           PhysAddr           FileSiz  MemSiz   Flg Align
+  LOAD           0x000000 0x0000000000400000 0x0000000000400000 0x409510 0x409510 R   0x10000
+  LOAD           0x410000 0x0000000000810000 0x0000000000810000 0x2978c90 0x2978c90 R E 0x10000
+  LOAD           0x8dde000 0x0000000010dde000 0x0000000010dde000 0xffe000 0xffe000 R   0x10000
+'''
+READELF_BAD = '''
+Program Headers:
+  Type           Offset   VirtAddr           PhysAddr           FileSiz  MemSiz   Flg Align
+  PHDR           0x6dad000 0x00000000071ad000 0x00000000071ad000 0x0002a0 0x0002a0 R   0x8
+  LOAD           0x000000 0x0000000000400000 0x0000000000400000 0x41d390 0x41d390 R   0x10000
+  LOAD           0x420000 0x0000000000820000 0x0000000000820000 0x29d82f0 0x29d82f0 R E 0x10000
+  LOAD           0x6dad000 0x00000000071ad000 0x00000000071ad000 0x000508 0x000508 R   0x1000
+  LOAD           0x8faf000 0x000000001015d000 0x000000001015d000 0x1003000 0x1003000 R   0x1000
+'''
 
 
 class UpdateTests(unittest.TestCase):
@@ -38,7 +58,8 @@ class UpdateTests(unittest.TestCase):
                         patch.object(updater, 'STATE', self.state),
                         patch.object(updater.platform, 'system', return_value='Linux'),
                         patch.object(updater.platform, 'machine', return_value='aarch64'),
-                        patch.object(updater.shutil, 'which', side_effect=lambda name: '/fixture/' + name)]
+                        patch.object(updater.shutil, 'which', side_effect=lambda name: '/fixture/' + name),
+                        patch.object(updater, 'page_size', return_value=4096)]
         for item in self.patches:
             item.start()
             self.addCleanup(item.stop)
@@ -64,6 +85,7 @@ class UpdateTests(unittest.TestCase):
         self.initial = self.git('rev-parse', 'HEAD')
         self.machine_calls = []
         self.failure = None
+        self.readelf = READELF_GOOD
         self.real_run = updater.run
         self.run_patch = patch.object(updater, 'run', side_effect=self.run_command)
         self.run_patch.start()
@@ -93,6 +115,8 @@ class UpdateTests(unittest.TestCase):
             raise updater.UpdateError('fixture stage failed')
         if args[:2] == ['t3', '--version']:
             return 't3 v0.0.1-nightly.fixture'
+        if args[:2] == ['readelf', '-lW']:
+            return self.readelf
         if args[:3] == ['flatpak', '--user', 'list']:
             return 'com.bitwarden.desktop\norg.example.Unowned'
         return ''
@@ -242,6 +266,54 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
                 updater.update('all')
             self.assertFalse((self.state / 'update-all-last-success.json').exists())
 
+    def large_pages(self, candidate='0.1.3-nightly.20261024.3604', error=None):
+        stack = [patch.object(updater, 'page_size', return_value=16384),
+                 patch.object(updater, 't3_latest_nightly', return_value=candidate, side_effect=error),
+                 patch.object(updater, 't3_candidate_binary', side_effect=lambda version, directory: Path(directory) / 't3')]
+        for item in stack:
+            item.start()
+            self.addCleanup(item.stop)
+
+    def assert_t3_kept(self, output):
+        self.assertNotIn(['t3', 'update', '--channel', 'nightly', '--yes'], self.machine_calls)
+        receipt = json.loads((self.state / 'update-all-last-success.json').read_text())
+        self.assertEqual(receipt['result'], 'completed')
+        self.assertIn('Bitwarden user Flatpak update command completed', receipt['completed'])
+        return receipt
+
+    def test_large_pages_keep_installed_t3_when_candidate_has_4k_segments(self):
+        self.large_pages()
+        self.readelf = READELF_BAD
+        with patch('sys.stdout', new_callable=io.StringIO) as output:
+            updater.update('all')
+        self.assert_t3_kept(output.getvalue())
+        self.assertIn('T3 Code update skipped: newer linux-arm64 builds crash on 16 KiB pages '
+                      '(pingdotgg/t3code#23433); keeping 0.0.1-nightly.fixture.', output.getvalue())
+
+    def test_large_pages_update_t3_when_candidate_segments_fit_the_page(self):
+        self.large_pages()
+        updater.update('all')
+        self.assertIn(['t3', 'update', '--channel', 'nightly', '--yes'], self.machine_calls)
+        self.assertTrue(any(call[:2] == ['readelf', '-lW'] for call in self.machine_calls))
+
+    def test_large_pages_skip_t3_when_installed_build_is_newest(self):
+        self.large_pages(candidate='0.0.1-nightly.fixture')
+        updater.update('all')
+        self.assertNotIn(['t3', 'update', '--channel', 'nightly', '--yes'], self.machine_calls)
+        self.assertFalse(any(call[0] == 'readelf' for call in self.machine_calls))
+
+    def test_large_pages_keep_installed_t3_when_candidate_cannot_be_checked(self):
+        self.large_pages(error=OSError('network unreachable'))
+        with patch('sys.stdout', new_callable=io.StringIO) as output:
+            updater.update('all')
+        self.assert_t3_kept(output.getvalue())
+        self.assertIn('keeping 0.0.1-nightly.fixture.', output.getvalue())
+
+    def test_small_pages_update_t3_without_checking_the_candidate(self):
+        with patch.object(updater, 't3_latest_nightly', side_effect=AssertionError('unexpected check')):
+            updater.update('all')
+        self.assertIn(['t3', 'update', '--channel', 'nightly', '--yes'], self.machine_calls)
+
     def test_concurrent_update_is_rejected(self):
         updater.private_parent(self.state / 'update.lock')
         with (self.state / 'update.lock').open('a') as lock:
@@ -297,6 +369,48 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
             for arguments, expected in [(['--help'], 0), (['--unknown'], 64), (['--help', 'extra'], 64)]:
                 result = subprocess.run(['bash', str(script), *arguments], capture_output=True, text=True, timeout=5)
                 self.assertEqual(result.returncode, expected, result.stderr)
+
+
+class T3CandidateTests(unittest.TestCase):
+    def archive(self, version, payload=b'#!/bin/sh\n'):
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode='w:gz') as bundle:
+            info = tarfile.TarInfo(f't3-{version}-linux-arm64/t3')
+            info.size = len(payload)
+            bundle.addfile(info, io.BytesIO(payload))
+        return buffer.getvalue()
+
+    def test_load_alignments_read_only_load_segments(self):
+        with patch.object(updater, 'run', return_value=READELF_BAD):
+            self.assertEqual(updater.load_alignments('t3'), [0x10000, 0x10000, 0x1000, 0x1000])
+        with patch.object(updater, 'run', return_value=READELF_GOOD):
+            self.assertEqual(min(updater.load_alignments('t3')), 0x10000)
+        with patch.object(updater, 'run', return_value='not an ELF file'):
+            with self.assertRaises(updater.UpdateError):
+                updater.load_alignments('t3')
+
+    @unittest.skipUnless(shutil.which('readelf'), 'readelf is not installed')
+    def test_load_alignments_parse_real_readelf_output(self):
+        self.assertTrue(updater.load_alignments(os.path.realpath(sys.executable)))
+
+    def test_candidate_binary_is_checksum_verified_and_extracted(self):
+        version = '0.1.3-nightly.20261024.3604'
+        archive = self.archive(version)
+        digest = hashlib.sha256(archive).hexdigest()
+        responses = {f'{updater.T3_DOWNLOADS}/v{version}/SHA256SUMS': f'{digest}  t3-{version}-linux-arm64.tar.gz\n'.encode(),
+                     f'{updater.T3_DOWNLOADS}/v{version}/t3-{version}-linux-arm64.tar.gz': archive}
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(updater, 'fetch', side_effect=lambda url, deadline=60: responses[url]):
+            self.assertEqual(updater.t3_candidate_binary(version, directory).read_bytes(), b'#!/bin/sh\n')
+            responses[f'{updater.T3_DOWNLOADS}/v{version}/SHA256SUMS'] = b'0' * 64 + f'  t3-{version}-linux-arm64.tar.gz\n'.encode()
+            with self.assertRaisesRegex(updater.UpdateError, 'Checksum mismatch'):
+                updater.t3_candidate_binary(version, directory)
+
+    def test_latest_nightly_matches_the_upstream_installer_selection(self):
+        releases = [{'tag_name': 'v0.2.0'}, {'tag_name': 'v0.1.3-preview.1.2'},
+                    {'tag_name': 'v0.1.3-nightly.20261024.3604'}, {'tag_name': 'v0.1.3-nightly.20261023.3592'}]
+        with patch.object(updater, 'fetch', return_value=json.dumps(releases).encode()):
+            self.assertEqual(updater.t3_latest_nightly(), '0.1.3-nightly.20261024.3604')
 
 
 class ProcessTests(unittest.TestCase):

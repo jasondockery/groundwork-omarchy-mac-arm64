@@ -121,7 +121,8 @@ elif name == 'curl':
         sys.exit(status)
     pathlib.Path(args[args.index('-o') + 1]).write_text("""#!/bin/sh
 printf '%s' "$T3CODE_CHANNEL" > "$INSTALL_FIXTURE/t3-channel"
-test -z "${T3CODE_VERSION:-}" || exit 1
+test -z "${T3CODE_VERSION:-}" || test "$T3CODE_VERSION" = "${FIXTURE_PINNED_T3:-}" || exit 1
+printf '%s' "${T3CODE_VERSION:-}" > "$INSTALL_FIXTURE/t3-version"
 if [ "${FIXTURE_INSTALL_STATUS:-0}" != 0 ]; then exit "$FIXTURE_INSTALL_STATUS"; fi
 bin_dir="${T3CODE_INSTALL_BIN_DIR:-$HOME/.local/bin}"
 mkdir -p "$bin_dir"
@@ -139,6 +140,8 @@ elif name == 'flatpak':
         sys.exit(status)
 elif name == 'systemctl':
     sys.exit(int(os.environ.get('FIXTURE_USER_SYSTEMCTL_STATUS', '0')))
+elif name == 'getconf':
+    print(os.environ.get('FIXTURE_PAGESIZE', '4096') if args == ['PAGESIZE'] else '')
 '''
 
 
@@ -162,7 +165,7 @@ class InstallKeydTests(unittest.TestCase):
         stub = self.bin / 'stub'
         stub.write_text(STUB)
         stub.chmod(0o755)
-        for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw'):
+        for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw', 'getconf'):
             (self.bin / name).symlink_to(stub)
         (self.root / 'home').mkdir()
         (self.root / 'nightly-t3').write_text('#!/bin/sh\nprintf "t3 0.0.0-nightly.20261018.1\\n"\n')
@@ -681,6 +684,18 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertEqual((self.root / 't3-channel').read_text(), 'nightly')
         self.run_install()
         self.assertEqual(sum(call[0] == 'curl' for call in self.calls()), 2)
+
+    def test_small_pages_install_the_newest_nightly(self):
+        self.run_install()
+        self.assertEqual((self.root / 't3-version').read_text(), '')
+
+    def test_large_pages_pin_the_last_known_good_nightly(self):
+        self.env.update(FIXTURE_PAGESIZE='16384', FIXTURE_PINNED_T3='0.1.2-nightly.20261021.3499',
+                        T3CODE_VERSION='ambient-fixture')
+        result = self.run_install()
+        self.assertEqual((self.root / 't3-version').read_text(), '0.1.2-nightly.20261021.3499')
+        self.assertEqual((self.root / 't3-channel').read_text(), 'nightly')
+        self.assertIn('pingdotgg/t3code#23433', result.stdout)
 
     def test_nightly_installer_failure_stops_before_home_changes(self):
         self.env['FIXTURE_INSTALL_STATUS'] = '1'
