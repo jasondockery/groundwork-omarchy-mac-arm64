@@ -69,8 +69,6 @@ For desktop-only file trees, Syncthing is another free option. Its iOS path need
 
 ## iMessage and session restoration
 
-There is no native Apple iMessage client in this setup. [Blip (`nixfred/blip`)](https://github.com/nixfred/blip) is an Omarchy community plugin that talks over SSH to a separate, awake Mac running macOS and Messages. The M1 booted into Omarchy cannot also be that macOS gateway. Its setup requires local macOS permission grants and a logged-in desktop. Its source states that SIP can remain enabled; this has not been validated on the reference machine.
-
-The official [marketplace registry](https://github.com/omacom/omarchy-plugin-marketplace/blob/b75ef157243702896ce1de658ec45695ebdfe676/registry.json) and catalog had no `nixfred.blip` entry when checked on 2026-10-18. Under the choice to include an iMessage app only when it is in that marketplace, this layer does not install it. An unrelated selection-actions plugin is also named Blip; check the repository identity. Reassess marketplace status and Apple Silicon support before adopting the messaging plugin.
+iMessage on Omarchy is the opt-in [Blip](imessage.md) client (`nixfred.blip`). It stays off unless you pass `./install.sh --with-blip`. A default run and `--without-blip` leave an existing Blip install unchanged. The macOS gateway is a separate computer; its role is tracked in [groundwork-mac#25](https://github.com/jasondockery/groundwork-mac/issues/25). Follow [iMessage setup](imessage.md) for install, the manual grants, and removal.
 
 Desktop session restoration remains at Omarchy's native defaults. Community restoration plugins are not included. Save documents before rebooting; running terminal/agent processes do not survive a reboot.

@@ -28,6 +28,8 @@ The default installs T3 Code Nightly, Herdr, Tailscale, keyd, Obsidian, and Bitw
 
 WayVNC screen sharing is also configured automatically. It starts with the logged-in desktop and listens only on the current online Tailscale address. Show its generated password locally with `groundwork-screen-share password`, then connect from the Mac's Screen Sharing app using `vnc://MACHINE`. On that virtual keyboard, Command follows Omarchy's Super bindings and Option follows the Alt bindings. Follow [desktop-sharing setup](docs/remote-access.md#automatic-desktop-sharing) for the port grant, modifier check, acceptance, and recovery. `--without-screen-sharing` skips it without disabling an existing service. Tailscale sign-in and OS login remain local steps.
 
+Blip, an iMessage client, stays off unless you pass `--with-blip`. It installs `nixfred.blip` from git through Omarchy's plugin manager and does not run the bridge wizard. A separate Mac on macOS is the gateway. `--without-blip` leaves an existing Blip install unchanged. Follow [iMessage setup](docs/imessage.md).
+
 Finish [Tailscale setup](docs/remote-access.md), including the tailnet policy review, interactive sign-in, and device approval. The local commands are:
 
 ```bash
@@ -50,6 +52,7 @@ Only enable SSH after reviewing that guide and your effective tailnet policy. No
 - Launch Bitwarden from the app menu and finish sign-in/MFA. Restart Chromium to load the registered official extension, approve/enable it if prompted in each profile, and test autofill. `bw --version` checks CLI availability; it does not prove vault sign-in. User Flatpak updates use `flatpak --user update` separately from Omarchy updates.
 - From another approved computer in the same tailnet, run `ssh LOCAL_USER@MACHINE` using this machine's local login and MagicDNS name. Confirm the hostname and attach to tmux or Herdr. Test the reverse direction too using the destination's supported SSH setup.
 - From a Mac, connect to `vnc://MACHINE` with the generated local VNC password. Verify the screen and input, including after logout/login or reboot. Command+1 selects a workspace, and Option+1 selects a multiplexer window. Tailscale visibility alone does not prove a desktop server is running or permitted by policy.
+- If you passed `--with-blip`, finish on the desktop with the printed `blip-setup` command and the checks in [iMessage setup](docs/imessage.md). Send the first test message only to your own number.
 
 If a step fails, keep its error and fix it before treating the setup as accepted. The automated fixtures test installer behavior; they cannot prove your physical input devices, desktop, accounts, or a second machine's connection.
 
@@ -82,12 +85,18 @@ works, it prints a restore command, finishes the other stages, records
 already starts and installs the known-good build only when T3 is missing,
 broken, or not a Nightly.
 
+When Blip is opted in, `update-all` runs `omarchy plugin update nixfred.blip`
+only in an interactive terminal, without `--yes`, so you can read the diff.
+If that diff touches `bridge/`, it reminds you to re-run `blip-setup` and does
+not run the wizard. `groundwork-update` does not update the plugin.
+
 For only repository configuration, run `groundwork-update`. It preserves saved
-keyd, screen-sharing, and Obsidian vault choices and does not request routine
+keyd, screen-sharing, Blip, and Obsidian vault choices and does not request routine
 system or app upgrades. It can install a newly declared missing tool needed by
 the settings. Use `./install.sh` with explicit `--with-keyd`, `--without-keyd`,
-`--with-screen-sharing`, or `--without-screen-sharing` when changing those
-preferences. Skipping an existing feature does not disable its service.
+`--with-screen-sharing`, `--without-screen-sharing`, `--with-blip`, or
+`--without-blip` when changing those preferences. Skipping an existing feature
+does not disable its service or remove Blip.
 
 Routine updates ask for your password only when a system change is needed, for
 example a stopped `tailscaled` or keyd service, a changed keyd config, or a
@@ -279,7 +288,7 @@ omarchy pkg add stow
 ./install.sh
 ```
 
-That links the trackpad override, installs Herdr, Tailscale, keyd, Obsidian, and Bitwarden, enables `tailscaled` and `keyd`, and installs T3 Code's ARM64 CLI. If `~/.config/hypr/input.lua` already exists, the script moves it to `input.lua.bak-omarchy-groundwork`, preserving numbered predecessors if necessary, and then links the copy from this repo. It does not configure Git/SSH accounts. Complete the [Tailscale setup](docs/remote-access.md) and [desktop apps setup](docs/apps.md) after install.
+That links the trackpad override, installs Herdr, Tailscale, keyd, Obsidian, and Bitwarden, enables `tailscaled` and `keyd`, and installs T3 Code's ARM64 CLI. Pass `--with-blip` only when you want the iMessage client; the default leaves it off. If `~/.config/hypr/input.lua` already exists, the script moves it to `input.lua.bak-omarchy-groundwork`, preserving numbered predecessors if necessary, and then links the copy from this repo. It does not configure Git/SSH accounts. Complete the [Tailscale setup](docs/remote-access.md) and [desktop apps setup](docs/apps.md) after install.
 
 ### Caps Lock: Escape on tap, Control while held
 

@@ -5,17 +5,21 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing]"
+  echo "Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip]"
   echo "Caps Lock defaults to Escape on tap and Control while held."
   echo "Saved setup choices are reused; explicit options change those choices."
   echo "--without-keyd leaves any existing keyd configuration and service unchanged."
   echo "--without-screen-sharing leaves any existing desktop-sharing service unchanged."
+  echo "--with-blip installs the Blip iMessage client. It is off by default."
+  echo "--without-blip leaves any existing Blip install unchanged."
 }
 
 with_keyd=1
 with_screen_sharing=1
+with_blip=0
 keyd_choice=""
 sharing_choice=""
+blip_choice=""
 updating=0
 for arg in "$@"; do
   case "$arg" in
@@ -38,6 +42,14 @@ for arg in "$@"; do
       fi
       sharing_choice=$arg
       [[ $arg == --with-screen-sharing ]] && with_screen_sharing=1 || with_screen_sharing=0
+      ;;
+    --with-blip | --without-blip)
+      if [[ -n $blip_choice && $blip_choice != "$arg" ]]; then
+        echo "Choose only one of --with-blip and --without-blip." >&2
+        exit 64
+      fi
+      blip_choice=$arg
+      [[ $arg == --with-blip ]] && with_blip=1 || with_blip=0
       ;;
     --update) updating=1 ;;
     *)
@@ -87,6 +99,16 @@ if [[ -n $stored ]]; then
   [[ -n $keyd_choice ]] || with_keyd=${preferences[0]}
   [[ -n $sharing_choice ]] || with_screen_sharing=${preferences[1]}
   export GROUNDWORK_OBSIDIAN_VAULT="${GROUNDWORK_OBSIDIAN_VAULT:-${preferences[2]}}"
+  if [[ -z $blip_choice ]]; then
+    case ${preferences[3]-} in
+      '') ;;
+      0|1) with_blip=${preferences[3]} ;;
+      *)
+        echo "Saved Blip choice is invalid. Preserve ~/.config/groundwork/omarchy.json and repair it before rerunning." >&2
+        exit 1
+        ;;
+    esac
+  fi
 fi
 
 # Fail before installing packages or moving files when the checkout is incomplete.
@@ -101,6 +123,7 @@ extension_source="$root/chromium/extensions/$bitwarden_extension"
 # refreshed until this script exits so Tailscale, the browser extension, and
 # keyd do not each stop for a password. Nothing is installed if this fails.
 t3_installer=""
+bun_preview_dir=""
 sudo_keepalive_pid=""
 stop_sudo_keepalive() {
   if [[ -n "${sudo_keepalive_pid}" ]]; then
@@ -113,6 +136,10 @@ cleanup() {
   stop_sudo_keepalive
   if [[ -n "${t3_installer}" ]]; then
     rm -f "$t3_installer"
+  fi
+  if [[ -n ${bun_preview_dir} ]]; then
+    rm -rf -- "$bun_preview_dir"
+    bun_preview_dir=""
   fi
 }
 trap cleanup EXIT
@@ -163,6 +190,12 @@ privileged_changes_needed() {
   if [[ $with_keyd -eq 1 ]]; then
     command -v keyd >/dev/null || return 0
     keyd_current || return 0
+  fi
+  # Same executables install_blip adds. bun is a per-user mise tool and needs no sudo.
+  if [[ $with_blip -eq 1 ]]; then
+    for executable in jq ssh notify-send wl-copy xdg-open socat; do
+      command -v "$executable" >/dev/null || return 0
+    done
   fi
   return 1
 }
@@ -534,10 +567,206 @@ if [[ $with_keyd -eq 1 ]]; then
 else
   echo "Skipped keyd setup; any existing keyd configuration and service were left alone."
 fi
+
+# Opt-in Blip iMessage client (decision 0011).
+# One block on purpose, so it can move into the shared plugin list once that
+# list supports git-URL sources and per-entry opt-in. This is not a second
+# plugin installer: Omarchy's own plugin commands do the add and the enable.
+# mise's bun install runs `bun -v` while it verifies the download. Fetch the
+# release `mise latest` names, over https only, and refuse before that install
+# when this kernel cannot map the ELF (oven-sh/bun#17627).
+preview_bun_release() {
+  local version base extracted preview=$1
+  if [[ -z $preview || ! -d $preview ]]; then
+    echo "The bun release preview directory is missing. Blip was not enabled." >&2
+    return 1
+  fi
+  if ! command -v mise >/dev/null; then
+    echo "mise is unavailable, so bun cannot be checked before install. Blip was not enabled." >&2
+    return 1
+  fi
+  if ! version=$(timeout --kill-after=2s 60 mise latest bun); then
+    echo "mise latest bun failed, so Blip was not enabled." >&2
+    return 1
+  fi
+  version=${version//$'\r'/}
+  read -r version <<<"$version"
+  if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z]+)*$ ]]; then
+    printf 'mise latest bun returned an unexpected version (%s). Blip was not enabled.\n' "$version" >&2
+    return 1
+  fi
+  base="https://github.com/oven-sh/bun/releases/download/bun-v${version}"
+  case "$base" in
+    https://github.com/oven-sh/bun/releases/download/bun-v*) ;;
+    *)
+      echo "Refusing a bun download that is not the https GitHub release. Blip was not enabled." >&2
+      return 1
+      ;;
+  esac
+  if ! curl --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 10 --max-time 60 \
+      -fsSL "${base}/SHASUMS256.txt" -o "${preview}/SHASUMS256.txt"; then
+    echo "Could not download the bun checksums over https. Blip was not enabled." >&2
+    return 1
+  fi
+  if ! curl --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 10 --max-time 180 \
+      -fsSL "${base}/bun-linux-aarch64.zip" -o "${preview}/bun-linux-aarch64.zip"; then
+    echo "Could not download bun-linux-aarch64.zip over https. Blip was not enabled." >&2
+    return 1
+  fi
+  if ! extracted=$(python3 "$root/scripts/groundwork-update.py" verify-bun-archive "$preview"); then
+    echo "The bun release failed verification. Blip was not enabled." >&2
+    return 1
+  fi
+  if [[ ! -f $extracted ]]; then
+    echo "The bun release archive has no bun executable. Blip was not enabled." >&2
+    return 1
+  fi
+  # Same readelf -lW helper as T3. Failure already printed oven-sh/bun#17627.
+  if ! python3 "$root/scripts/groundwork-update.py" check-load-alignment "$extracted"; then
+    return 1
+  fi
+  printf '%s\n' "$version"
+}
+install_blip() {
+  local package executable pair bun_bin resolved listed list_status added
+  local checked_version installed_version installed_bun
+  local blip_id=nixfred.blip
+  local blip_url=https://github.com/nixfred/blip.git
+  local -a packages=(jq:jq openssh:ssh libnotify:notify-send wl-clipboard:wl-copy xdg-utils:xdg-open socat:socat)
+  added=0
+  # ffmpeg and mpv play voice messages. blip-setup names them; they stay optional.
+  for pair in "${packages[@]}"; do
+    package=${pair%%:*}
+    executable=${pair#*:}
+    if ! command -v "$executable" >/dev/null; then
+      install_package "$package" "$executable"
+    fi
+  done
+  if ! command -v bun >/dev/null; then
+    if ! command -v omarchy-install-dev-env >/dev/null; then
+      echo "omarchy-install-dev-env is unavailable, so bun cannot be installed for Blip. Blip was not enabled." >&2
+      exit 1
+    fi
+    # Omarchy's dev-env command runs `mise use -g bun@latest`, and mise then runs
+    # `bun -v`. Do not use bun's curl installer. The preview above is the gate.
+    # Create the directory here: preview_bun_release runs in a command substitution.
+    if ! bun_preview_dir=$(mktemp -d); then
+      echo "Could not create a temporary directory for the bun release. Blip was not enabled." >&2
+      exit 1
+    fi
+    if ! checked_version=$(preview_bun_release "$bun_preview_dir"); then
+      exit 1
+    fi
+    omarchy-install-dev-env bun
+    hash -r
+    if ! command -v bun >/dev/null; then
+      echo "bun is still unavailable after omarchy-install-dev-env bun. Blip was not enabled." >&2
+      exit 1
+    fi
+    if ! installed_bun=$(timeout --kill-after=2s 15 mise which bun); then
+      echo "mise could not resolve the bun shim after install. Blip was not enabled." >&2
+      exit 1
+    fi
+    if [[ -z $installed_bun || ! -x $installed_bun ]]; then
+      echo "The resolved bun binary is not executable: ${installed_bun:-missing}. Blip was not enabled." >&2
+      exit 1
+    fi
+    if ! python3 "$root/scripts/groundwork-update.py" check-load-alignment "$installed_bun"; then
+      exit 1
+    fi
+    # Prefer the version in mise's install path. `mise current` is the fallback
+    # when that path does not name a release.
+    installed_version=""
+    case "$installed_bun" in
+      */installs/bun/*/bin/bun)
+        installed_version=${installed_bun%/bin/bun}
+        installed_version=${installed_version##*/}
+        ;;
+    esac
+    if [[ ! $installed_version =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z]+)*$ ]]; then
+      if ! installed_version=$(timeout --kill-after=2s 15 mise current bun); then
+        installed_version=""
+      fi
+      installed_version=${installed_version//$'\r'/}
+      read -r installed_version <<<"${installed_version}"
+    fi
+    if [[ $installed_version != "$checked_version" ]]; then
+      if ! command -v omarchy-remove-dev-env >/dev/null || ! omarchy-remove-dev-env bun; then
+        printf 'Installed bun (%s) is not the checked release %s, and it could not be removed. bun --version was not run. Blip was not enabled.\n' \
+          "${installed_version:-unknown}" "$checked_version" >&2
+        exit 1
+      fi
+      printf 'Installed bun (%s) is not the checked release %s. It was removed before bun --version. Blip was not enabled.\n' \
+        "${installed_version:-unknown}" "$checked_version" >&2
+      exit 1
+    fi
+  fi
+  bun_bin=$(command -v bun)
+  resolved=$bun_bin
+  case "$bun_bin" in
+    "${MISE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mise}"/shims/* | \
+      "${MISE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mise}"/command-wrappers/bin/*)
+      resolved=$(timeout --kill-after=2s 15 mise which bun) || {
+        echo "mise could not resolve the bun shim at $bun_bin. Blip was not enabled." >&2
+        exit 1
+      }
+      ;;
+  esac
+  if [[ -z $resolved || ! -x $resolved ]]; then
+    echo "The resolved bun binary is not executable: ${resolved:-missing}. Blip was not enabled." >&2
+    exit 1
+  fi
+  # Reuse the T3 readelf -lW helper. Do not execute bun when this kernel cannot map it.
+  if ! python3 "$root/scripts/groundwork-update.py" check-load-alignment "$resolved"; then
+    exit 1
+  fi
+  if ! timeout --kill-after=2s 15 bun --version >/dev/null; then
+    echo "bun --version failed, so Blip was not enabled (oven-sh/bun#17627)." >&2
+    echo "https://github.com/oven-sh/bun/issues/17627" >&2
+    exit 1
+  fi
+  local add_command="omarchy plugin add ${blip_url} --enable --yes"
+  # Literal tilde: the person runs this in their own home directory.
+  # shellcheck disable=SC2088
+  local setup_command="~/.config/omarchy/plugins/${blip_id}/scripts/blip-setup GATEWAY_USER@GATEWAY_MAGICDNS_NAME"
+  if [[ -z ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
+    echo "No Hyprland session detected; Blip stays pending until this runs in the Omarchy desktop:"
+    echo "  $add_command"
+    echo "If that reports the plugin is already installed, do not add it again. Then run:"
+    echo "  $setup_command"
+    echo "Answer n to the Inter font prompt. Leave tapbacks off. See docs/imessage.md."
+    return 0
+  fi
+  if ! listed=$(omarchy plugin list --json); then
+    echo "omarchy plugin list failed, so Blip was not enabled. On the desktop, run:" >&2
+    echo "  $add_command" >&2
+    exit 1
+  fi
+  list_status=0
+  printf '%s\n' "$listed" | python3 "$root/scripts/groundwork-update.py" plugin-listed "$blip_id" || list_status=$?
+  if [[ $list_status -eq 0 ]]; then
+    echo "nixfred.blip is already installed; it was left unchanged."
+  elif [[ $list_status -eq 1 ]]; then
+    omarchy plugin add "$blip_url" --enable --yes
+    added=1
+  else
+    echo "omarchy plugin list --json could not be read, so Blip was not enabled." >&2
+    exit 1
+  fi
+  if [[ $updating -eq 0 || $added -eq 1 ]]; then
+    echo "Next, in this desktop session, run:"
+    echo "  $setup_command"
+    echo "The wizard needs a person at the Mac. It is not run from this installer. See docs/imessage.md."
+  fi
+}
+if [[ $with_blip -eq 1 ]]; then
+  install_blip
+fi
+
 python3 "$root/scripts/groundwork-update.py" register "$root" "$with_keyd" "$with_screen_sharing" \
-  "${GROUNDWORK_OBSIDIAN_VAULT:-$HOME/Documents/Obsidian/my_obsidian_vault}"
+  "${GROUNDWORK_OBSIDIAN_VAULT:-$HOME/Documents/Obsidian/my_obsidian_vault}" "$with_blip"
 if [[ $updating -eq 1 ]]; then
-  echo "Groundwork settings applied. Saved keyd, screen-sharing, and vault choices were preserved."
+  echo "Groundwork settings applied. Saved keyd, screen-sharing, Blip, and vault choices were preserved."
   exit 0
 fi
 echo "Trackpad configuration, T3 Code, Herdr, Tailscale, Obsidian, and Bitwarden are installed."

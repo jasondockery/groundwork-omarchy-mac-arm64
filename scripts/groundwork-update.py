@@ -18,6 +18,7 @@ import tempfile
 import time
 import urllib.request
 import uuid
+import zipfile
 
 MARKER = '# Groundwork Omarchy updater'
 CONFIG = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config')) / 'groundwork/omarchy.json'
@@ -28,6 +29,11 @@ T3_RELEASES = f'https://api.github.com/repos/{T3_REPO}/releases?per_page=100'
 T3_DOWNLOADS = f'https://github.com/{T3_REPO}/releases/download'
 T3_PAGE_SIZE_ISSUE = 'pingdotgg/t3code#23433'
 T3_INSTALLER = 'https://t3.codes/install.sh'
+# Bun on non-4 KiB aarch64 pages is unproven upstream (oven-sh/bun#17627).
+BUN_PAGE_SIZE_ISSUE = 'oven-sh/bun#17627'
+BUN_PAGE_SIZE_URL = 'https://github.com/oven-sh/bun/issues/17627'
+BUN_LINUX_ARCHIVE = 'bun-linux-aarch64.zip'
+BLIP_ID = 'nixfred.blip'
 # Last nightly whose ELF files all load on 16 KiB pages (pingdotgg/t3code#23433).
 T3_KNOWN_GOOD_LARGE_PAGE = '0.1.2-nightly.20261021.3499'
 # Captured stages print progress at this interval. Interactive stages own the
@@ -109,9 +115,20 @@ def settings(required=True):
             or type(value.get('screen_sharing')) is not bool
             or not isinstance(value.get('source'), str)
             or not isinstance(value.get('obsidian_vault'), str)
-            or '\n' in value['obsidian_vault']):
+            or '\n' in value['obsidian_vault']
+            or ('blip' in value and type(value['blip']) is not bool)):
         raise UpdateError(f'Invalid updater settings in {CONFIG}; preserve and repair that file before updating.')
     return value
+
+
+def blip_enabled(value):
+    """Saved Blip choice. Setups written before the choice existed stay off."""
+    if value is None or 'blip' not in value:
+        return False
+    flag = value['blip']
+    if type(flag) is not bool:
+        raise UpdateError(f'Invalid updater settings in {CONFIG}; preserve and repair that file before updating.')
+    return flag
 
 
 def validate_registration(source):
@@ -127,11 +144,13 @@ def validate_registration(source):
     return previous
 
 
-def register(source, keyd, screen_sharing, vault):
+def register(source, keyd, screen_sharing, vault, blip='0'):
     source = Path(source).resolve()
     previous = validate_registration(source)
+    if blip not in ('0', '1'):
+        raise UpdateError('Blip choice must be 0 or 1.')
     value = dict(previous or {}, schema=1, source=str(source), keyd=keyd == '1',
-                 screen_sharing=screen_sharing == '1', obsidian_vault=vault)
+                 screen_sharing=screen_sharing == '1', obsidian_vault=vault, blip=blip == '1')
     if value['keyd']:
         value['keyd_sha256'] = hashlib.sha256((source / 'keyd/default.conf').read_bytes()).hexdigest()
     value.pop('pending_keyd', None)
@@ -376,6 +395,69 @@ def load_alignments(binary):
     return alignments
 
 
+def verified_bun_executable(directory):
+    """Verify bun-linux-aarch64.zip against SHASUMS256.txt and return its bun ELF.
+
+    The archive stays in `directory`. The ELF is written to `directory/bun`.
+    Members that escape the archive, and symlink entries named bun, are refused.
+    """
+    directory = Path(directory)
+    archive = directory / BUN_LINUX_ARCHIVE
+    sums = directory / 'SHASUMS256.txt'
+    if not archive.is_file() or archive.is_symlink() or not sums.is_file() or sums.is_symlink():
+        raise UpdateError('The bun release download is incomplete.')
+    expected = None
+    for line in sums.read_text().splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[1].lstrip('*') == BUN_LINUX_ARCHIVE:
+            expected = fields[0].lower()
+            break
+    if expected is None or len(expected) != 64 or any(character not in '0123456789abcdef' for character in expected):
+        raise UpdateError(f'{BUN_LINUX_ARCHIVE} is not listed in SHASUMS256.txt.')
+    if hashlib.sha256(archive.read_bytes()).hexdigest() != expected:
+        raise UpdateError(f'Checksum mismatch for {BUN_LINUX_ARCHIVE}.')
+    destination = directory / 'bun'
+    with zipfile.ZipFile(archive) as bundle:
+        chosen = None
+        for info in bundle.infolist():
+            name = Path(info.filename)
+            if name.is_absolute() or '..' in name.parts:
+                raise UpdateError(f'Refusing a path in {BUN_LINUX_ARCHIVE}: {info.filename}')
+            mode = info.external_attr >> 16
+            if name.name != 'bun' or info.is_dir() or (mode & 0o170000) == 0o120000:
+                continue
+            if chosen is not None:
+                raise UpdateError(f'{BUN_LINUX_ARCHIVE} has more than one bun executable.')
+            chosen = info
+        if chosen is None:
+            raise UpdateError(f'{BUN_LINUX_ARCHIVE} has no bun executable.')
+        with bundle.open(chosen) as source, destination.open('wb') as output:
+            shutil.copyfileobj(source, output)
+    os.chmod(destination, 0o755)
+    return destination
+
+
+def bun_alignment_problem(binary):
+    """Reason `binary` cannot be mapped on this kernel, or None.
+
+    Calls `load_alignments`, the same readelf -lW LOAD check the T3 guard uses.
+    No LOAD segment is a refusal: the file was not shown to be mappable.
+    """
+    page = page_size()
+    issue = f'{BUN_PAGE_SIZE_ISSUE}: {BUN_PAGE_SIZE_URL}'
+    if not shutil.which('readelf'):
+        return (f'readelf is missing, so {binary} cannot be checked for {page // 1024} KiB pages. '
+                f'Install binutils. {issue}')
+    try:
+        alignments = load_alignments(binary)
+    except UpdateError as error:
+        return f'Could not read LOAD alignment for {binary} ({error}). {issue}'
+    # Same predicate as misaligned_elf_files: a LOAD alignment below the page cannot be mapped.
+    if not alignments or any(alignment < page for alignment in alignments):
+        return f'{binary} is not aligned for {page // 1024} KiB pages and cannot start. {issue}'
+    return None
+
+
 def misaligned_elf_files(root, page):
     """Return every ELF file under root with a LOAD segment aligned below page."""
     misaligned = []
@@ -555,6 +637,73 @@ def managed_files(value, source):
             raise UpdateError('The installed keyd configuration changed locally. Preserve and reconcile it before updating.')
 
 
+def interactive_terminal():
+    # Same pair omarchy plugin update uses before it will show a diff.
+    return os.isatty(0) and os.isatty(1)
+
+
+def plugin_is_listed(raw, plugin_id):
+    """True when plugin list JSON contains plugin_id. ValueError if it is not a list."""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ValueError(f'omarchy plugin list --json was not JSON ({error}).') from error
+    if not isinstance(data, list):
+        raise ValueError('omarchy plugin list --json did not return a list.')
+    return any(isinstance(item, dict) and item.get('id') == plugin_id for item in data)
+
+
+def blip_setup_command():
+    return f'~/.config/omarchy/plugins/{BLIP_ID}/scripts/blip-setup GATEWAY_USER@GATEWAY_MAGICDNS_NAME'
+
+
+def remind_blip_setup(completed, reason):
+    print(f'{reason} Re-run blip-setup. It was not run automatically:', flush=True)
+    print(f'  {blip_setup_command()}', flush=True)
+    completed.append('Blip bridge reminder printed')
+
+
+def update_blip(completed):
+    """Fast-forward Blip only from an interactive terminal. Never pass --yes."""
+    if not blip_enabled(settings()):
+        return
+    try:
+        listed = plugin_is_listed(run(['omarchy', 'plugin', 'list', '--json'], deadline=30), BLIP_ID)
+    except (UpdateError, OSError, ValueError) as error:
+        print(f'Blip update skipped: the plugin list could not be read ({error}).', flush=True)
+        completed.append('Blip update skipped; plugin list unavailable')
+        return
+    if not listed:
+        completed.append('Blip plugin not installed; update skipped')
+        return
+    if not interactive_terminal():
+        print('Blip update skipped: run update-all in an interactive terminal to review '
+              f'omarchy plugin update {BLIP_ID}. It is never passed --yes unattended.', flush=True)
+        completed.append('Blip update skipped; no interactive terminal')
+        return
+    plugin = Path.home() / '.config/omarchy/plugins' / BLIP_ID
+    before = None
+    if (plugin / '.git').is_dir():
+        try:
+            before = run(['git', '-C', str(plugin), 'rev-parse', 'HEAD'])
+        except (UpdateError, OSError):
+            before = None
+    print(f'Updating {BLIP_ID}. Review the diff before accepting it.', flush=True)
+    run(['omarchy', 'plugin', 'update', BLIP_ID], deadline=300, capture=False)
+    completed.append('Blip plugin update command completed')
+    if not before:
+        remind_blip_setup(completed, 'Could not compare bridge/ for this Blip update.')
+        return
+    try:
+        after = run(['git', '-C', str(plugin), 'rev-parse', 'HEAD'])
+        names = run(['git', '-C', str(plugin), 'diff', '--name-only', before, after, '--', 'bridge'])
+    except (UpdateError, OSError) as error:
+        remind_blip_setup(completed, f'Could not compare bridge/ after the Blip update ({error}).')
+        return
+    if names.strip():
+        remind_blip_setup(completed, 'Blip changed files under bridge/.')
+
+
 def update(scope, check=False):
     if platform.system() != 'Linux' or platform.machine() != 'aarch64' or not shutil.which('omarchy'):
         raise UpdateError('This updater requires Apple Silicon Omarchy. Use your platform entry point on other systems.')
@@ -620,6 +769,7 @@ def update(scope, check=False):
                         completed.append('Bitwarden user Flatpak not installed; skipped')
                 else:
                     completed.append('User Flatpak tooling not installed; skipped')
+                update_blip(completed)
             git(source, 'update-ref', '-d', candidate_ref, candidate)
             candidate_cleaned = True
             result = 'completed_with_warnings' if warnings else 'completed'
@@ -657,19 +807,38 @@ def main(args):
     if args and args[0] == 'verify-lock' and len(args) == 1:
         verify_lock()
         return 0
+    if args and args[0] == 'check-load-alignment' and len(args) == 2:
+        problem = bun_alignment_problem(args[1])
+        if problem:
+            print(problem, file=sys.stderr)
+            return 1
+        return 0
+    if args and args[0] == 'verify-bun-archive' and len(args) == 2:
+        print(verified_bun_executable(args[1]))
+        return 0
+    if args and args[0] == 'plugin-listed' and len(args) == 2:
+        try:
+            found = plugin_is_listed(sys.stdin.read(), args[1])
+        except ValueError as error:
+            print(error, file=sys.stderr)
+            return 2
+        return 0 if found else 1
     if args and args[0] == 'setup' and len(args) >= 2:
         source, *options = args[1:]
-        valid = {'--with-keyd', '--without-keyd', '--with-screen-sharing', '--without-screen-sharing', '--update', '--help', '-h'}
+        valid = {'--with-keyd', '--without-keyd', '--with-screen-sharing', '--without-screen-sharing',
+                 '--with-blip', '--without-blip', '--update', '--help', '-h'}
         if any(option not in valid for option in options):
             print('Unknown setup argument; nothing changed.', file=sys.stderr)
             return 64
         if ({'--with-keyd', '--without-keyd'} <= set(options)
-                or {'--with-screen-sharing', '--without-screen-sharing'} <= set(options)):
+                or {'--with-screen-sharing', '--without-screen-sharing'} <= set(options)
+                or {'--with-blip', '--without-blip'} <= set(options)):
             print('Choose only one option for each setup preference; nothing changed.', file=sys.stderr)
             return 64
         if '--help' in options or '-h' in options:
-            print('Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing]')
+            print('Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip]')
             print('Saved setup choices are reused. Explicit options change those choices.')
+            print('Blip is off unless --with-blip is set. --without-blip leaves an existing Blip install unchanged.')
             return 0
         if run(['uname', '-s']) != 'Linux' or run(['uname', '-m']) != 'aarch64' or not shutil.which('omarchy'):
             raise UpdateError('This layer requires Apple Silicon Omarchy.')
@@ -696,9 +865,12 @@ def main(args):
     if args and args[0] == 'preferences' and len(args) == 2 and args[1] in ('setup', 'update'):
         value = settings(args[1] == 'update')
         if value:
-            print(f"{int(value['keyd'])}\n{int(value['screen_sharing'])}\n{value['obsidian_vault']}")
+            print(f"{int(value['keyd'])}\n{int(value['screen_sharing'])}\n{value['obsidian_vault']}\n{int(blip_enabled(value))}")
         return 0
-    if args and args[0] == 'register' and len(args) == 5 and args[2] in ('0', '1') and args[3] in ('0', '1'):
+    if args and args[0] == 'register' and len(args) in (5, 6) and args[2] in ('0', '1') and args[3] in ('0', '1'):
+        if len(args) == 6 and args[5] not in ('0', '1'):
+            print('Invalid Blip choice; nothing changed.', file=sys.stderr)
+            return 64
         register(*args[1:])
         return 0
     if not args or args[0] not in ('all', 'layer'):
@@ -710,6 +882,7 @@ def main(args):
         print('Synchronize and apply this Groundwork layer using saved setup choices.')
         if scope == 'all':
             print('Also run omarchy update, update T3 Nightly (including its background service), and update the installed Bitwarden user Flatpak.')
+            print(f'When Blip is opted in, update {BLIP_ID} only in an interactive terminal, without --yes, so its diff can be reviewed.')
         print('--check fetches and displays repository changes without advancing the checkout or applying settings.')
         return 0
     if options not in ([], ['--check']):

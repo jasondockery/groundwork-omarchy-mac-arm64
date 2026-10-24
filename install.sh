@@ -4,7 +4,7 @@ set -euo pipefail
 # Setup and explicit preference changes share the updater's apply code.
 for arg in "$@"; do
   case "$arg" in
-    --with-keyd | --without-keyd | --with-screen-sharing | --without-screen-sharing | --help | -h) ;;
+    --with-keyd | --without-keyd | --with-screen-sharing | --without-screen-sharing | --with-blip | --without-blip | --help | -h) ;;
     *)
       echo "Unknown argument: $arg. Use ./install.sh --help; nothing changed." >&2
       exit 64
