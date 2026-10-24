@@ -559,6 +559,23 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.run_install()
         self.assertEqual(argv.read_text(), original)
 
+    def test_commented_cursor_argv_gains_a_password_store(self):
+        argv = self.cursor_argv()
+        argv.parent.mkdir(parents=True)
+        argv.write_text('// Cursor keeps comments in this file.\n{\n  "disable-hardware-acceleration": true\n}\n')
+        self.run_install()
+        saved = json.loads(self.cursor_argv().read_text())
+        self.assertEqual(saved['password-store'], 'gnome-libsecret')
+        self.assertTrue(saved['disable-hardware-acceleration'])
+
+    def test_commented_cursor_argv_with_a_password_store_is_preserved(self):
+        argv = self.cursor_argv()
+        argv.parent.mkdir(parents=True)
+        original = '// leave this comment\n{"password-store": "gnome-libsecret"}\n'
+        argv.write_text(original)
+        self.run_install()
+        self.assertEqual(argv.read_text(), original)
+
     def test_invalid_cursor_argv_stops_without_rewriting_it(self):
         argv = self.cursor_argv()
         argv.parent.mkdir(parents=True)
