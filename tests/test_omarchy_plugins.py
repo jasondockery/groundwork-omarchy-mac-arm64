@@ -961,9 +961,9 @@ class PluginApplyTests(unittest.TestCase):
 
 
 class ParserTests(unittest.TestCase):
-    def test_stowed_input_keeps_traditional_scrolling(self):
+    def test_stowed_input_omits_upstream_natural_scroll(self):
         value = plugins.touchpad_natural_scroll(REPO / 'packages/hypr/.config/hypr/input.lua')
-        self.assertIs(value, False)
+        self.assertIsNone(value)
 
     def test_touchpad_assignment_ignores_comments_and_input_level_values(self):
         temporary = tempfile.TemporaryDirectory(prefix='omarchy-lua-')

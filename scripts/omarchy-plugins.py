@@ -1068,9 +1068,14 @@ def require_order(path):
 
 
 def warn_trackpad():
-    base = touchpad_natural_scroll(REPO_ROOT / 'packages/hypr/.config/hypr/input.lua')
-    if base is None:
+    stowed = REPO_ROOT / 'packages/hypr/.config/hypr/input.lua'
+    if read_lua(stowed) is None:
         return
+    # Omarchy's input.lua already sets natural_scroll = false. A stowed file
+    # that omits the key keeps that upstream value.
+    base = touchpad_natural_scroll(stowed)
+    if base is None:
+        base = False
     hypr = Path.home() / '.config/hypr'
     differing = []
     for filename, module_name in TRACKPAD_FILES:

@@ -9,8 +9,6 @@ hl.config({
     -- 0.35 is Omarchy's own suggested bump in its stock user template.
     sensitivity = 0.35,
     touchpad = {
-      -- Preserve traditional scrolling; Omarchy defaults to natural scrolling.
-      natural_scroll = false,
       -- Apple trackpads expect tap-to-click; Omarchy leaves it off.
       tap_to_click = true,
       -- Three-finger drag matches the macOS window-move habit.

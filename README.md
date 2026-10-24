@@ -248,7 +248,7 @@ Omarchy keeps its own desktop, tmux file, shell, and Super keybindings. Practice
 
 | Path | Why it is not already in Omarchy |
 |---|---|
-| `packages/hypr/.config/hypr/input.lua` | Trackpad choices that differ from Omarchy's defaults: traditional scrolling, tap-to-click, three-finger drag, faster pointer, slower page scrolling |
+| `packages/hypr/.config/hypr/input.lua` | Trackpad choices that differ from Omarchy's defaults: tap-to-click, three-finger drag, faster pointer, slower page scrolling |
 | `keyd/default.conf` | Default Caps Lock behavior: tap = Escape, hold = Control, via keyd |
 | `packages.txt` | Optional aarch64 packages that are not part of the Omarchy install |
 | `git/config.local.example` | Placeholder for a name and email. Not applied |
