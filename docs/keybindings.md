@@ -20,7 +20,24 @@ Omarchy owns the live keymap on this machine. This repo leaves it in place. Prac
 | `Super+Shift+1` through `Super+Shift+9` | Move the current window to that workspace |
 | `Super+Shift+O` | Open Obsidian |
 
-Stock directional desktop navigation uses arrows. To cycle without reaching for them, use `Alt+Tab` for windows or `Super+Tab` for workspaces. `Super+H/J/K/L` is not a stock directional keymap: `Super+K` already opens help and `Super+L` cycles layouts. This layer preserves those bindings. On Apple keyboards, `Super` is Command and `Alt` is Option.
+Stock directional desktop navigation uses arrows. To cycle without reaching for them, use `Alt+Tab` for windows or `Super+Tab` for workspaces. `Super+H/J/K/L` is not a stock directional keymap: `Super+K` already opens help and `Super+L` cycles layouts. This layer preserves those bindings. On Apple keyboards attached to this machine, `Super` is Command and `Alt` is Option.
+
+## Apple Screen Sharing
+
+Apple's Screen Sharing app sends Command as Alt and Option as Super. That mapping exists so a Mac on the other end of the old VNC keyboard message sees the key the viewer pressed. WayVNC looks the symbols up in the keymap it publishes on its own virtual keyboard and forwards the modifier mask from that keymap. This service's private XKB option keeps the symbols, so the lookup still finds the key, and changes the modifier each key sets: Command sets Super and Option sets Alt. Shift and Control stay Shift and Control. Filling the viewer's display does not change the symbols. A keyboard attached to the Omarchy machine, including one remapped by keyd, keeps Omarchy's keymap.
+
+| From Screen Sharing | Action |
+|---|---|
+| `Command+1` through `Command+9` | Select workspace |
+| `Command+Shift+1` through `Command+Shift+9` | Move the current window to that workspace |
+| `Command+Tab` / `Command+Shift+Tab` | Next/previous workspace |
+| `Option+Tab` / `Option+Shift+Tab` | Next/previous window on this workspace |
+| `Command+Minus` | Expand the window left |
+| `Command+Equal` | Shrink the window left |
+| `Command+Shift+Equal` | Expand the window down |
+| `Command+Ctrl+Z` | Zoom the screen in; press again to zoom further |
+| `Command+Ctrl+Option+Z` | Zoom fully out |
+| `Option+1` through `Option+9` | Select the tmux window or Herdr tab |
 
 ## tmux and Herdr
 
