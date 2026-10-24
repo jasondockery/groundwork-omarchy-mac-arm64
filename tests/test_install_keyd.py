@@ -49,6 +49,18 @@ elif name == 'sudo':
             if answer != b'fixture-password':
                 sys.exit(1)
         sys.exit(int(os.environ.get('FIXTURE_SUDO_V_STATUS', '0')))
+    if args in (['/usr/bin/true'], ['-n', '/usr/bin/true']):
+        if os.environ.get('FIXTURE_SUDO_CACHED', '1') == '1':
+            sys.exit(0)
+        if args[0] == '-n':
+            sys.exit(1)
+        if os.environ.get('FIXTURE_REQUIRE_TTY') == '1':
+            terminal = os.open('/dev/tty', os.O_RDWR)
+            os.write(terminal, b'Fixture password:')
+            answer = os.read(terminal, 128).strip()
+            os.close(terminal)
+            sys.exit(0 if answer == b'fixture-password' else 1)
+        sys.exit(int(os.environ.get('FIXTURE_SUDO_V_STATUS', '0')))
     if args[0] == 'keyd':
         sys.exit(int(os.environ.get('FIXTURE_RELOAD_STATUS', '0')))
     if args[0] in ('systemctl', 'ufw'):
@@ -139,6 +151,8 @@ elif name == 'flatpak':
             (root / 'bitwarden-flatpak').touch()
         sys.exit(status)
 elif name == 'systemctl':
+    if args[:1] in (['is-enabled'], ['is-active']):
+        sys.exit(3 if args[-1] in os.environ.get('FIXTURE_SERVICES_DOWN', '').split() else 0)
     sys.exit(int(os.environ.get('FIXTURE_USER_SYSTEMCTL_STATUS', '0')))
 elif name == 'getconf':
     print(os.environ.get('FIXTURE_PAGESIZE', '4096') if args == ['PAGESIZE'] else '')
@@ -160,7 +174,7 @@ class InstallKeydTests(unittest.TestCase):
         for name in ('bash', 'sh', 'python3', 'env'):
             (self.bin / name).symlink_to(shutil.which(name))
         for name in ('timeout', 'mktemp', 'dirname', 'rm', 'mkdir', 'cp', 'chmod',
-                     'mv', 'find', 'readlink', 'sleep'):
+                     'mv', 'find', 'readlink', 'sleep', 'cmp', 'stat'):
             (self.bin / name).symlink_to(host_tool(name))
         stub = self.bin / 'stub'
         stub.write_text(STUB)
@@ -170,7 +184,8 @@ class InstallKeydTests(unittest.TestCase):
         (self.root / 'home').mkdir()
         (self.root / 'nightly-t3').write_text('#!/bin/sh\nprintf "t3 0.0.0-nightly.20261018.1\\n"\n')
         self.config = self.root / 'etc/keyd/default.conf'
-        self.env = dict(os.environ, INSTALL_FIXTURE=str(self.root),
+        self.env = dict(os.environ, INSTALL_FIXTURE=str(self.root), GROUNDWORK_TEST_ROOT=str(self.root),
+                        GROUNDWORK_TESTING='1',
                         HYPRLAND_INSTANCE_SIGNATURE='',
                         HOME=str(self.root / 'home'),
                         XDG_CONFIG_HOME=str(self.root / 'home/.config'),
@@ -214,7 +229,7 @@ class InstallKeydTests(unittest.TestCase):
         self.assertFalse(any(call[0] == 'curl' for call in self.calls()))
         self.assertNotIn(['sudo', 'keyd', 'reload'], self.calls())
 
-    def run_with_controlling_terminal(self, *args, through_updater=False):
+    def run_with_controlling_terminal(self, *args, through_updater=False, command=None):
         # pty.fork gives the install a controlling terminal, which is what
         # /dev/tty requires. A captured subprocess has no terminal to answer.
         helper = r"""
@@ -253,7 +268,7 @@ if status is None or not os.WIFEXITED(status):
     raise SystemExit(124)
 raise SystemExit(os.WEXITSTATUS(status))
 """
-        command = ['bash', str(REPO / 'install.sh'), *args]
+        command = command or ['bash', str(REPO / 'install.sh'), *args]
         if through_updater:
             bridge = "import os,runpy,sys;u=runpy.run_path(sys.argv[1]);u['run'](sys.argv[2:],capture=False,deadline=8);assert os.tcgetpgrp(0)==os.getpgrp();print('TTY restored')"
             command = [sys.executable, '-c', bridge, str(REPO / 'scripts/groundwork-update.py'), *command]
@@ -267,6 +282,141 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(b'TTY restored', result.stdout)
         self.assertIn(['sudo', '-v'], self.calls())
+
+    def run_update(self):
+        return subprocess.run(['python3', str(REPO / 'scripts/groundwork-update.py'), 'setup', str(REPO), '--update'],
+                              env=self.env, capture_output=True, text=True, timeout=10)
+
+    def prepare_routine_update(self, *setup_args):
+        self.run_install(*(setup_args or ('--without-keyd',)))
+        (self.root / 'calls.jsonl').unlink()
+        self.env['FIXTURE_SUDO_CACHED'] = '0'
+
+    def test_update_with_nothing_to_change_never_calls_sudo(self):
+        self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('sudo was not used', result.stdout)
+        self.assertFalse(any(call[0] == 'sudo' for call in self.calls()))
+
+    def test_update_primes_sudo_only_when_a_privileged_change_is_needed(self):
+        self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
+        self.env.update(FIXTURE_SUDO_CACHED='1', FIXTURE_SERVICES_DOWN='tailscaled')
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        privileged = [call for call in self.calls() if call[0] == 'sudo']
+        self.assertEqual(privileged[0], ['sudo', '-n', '/usr/bin/true'])
+        self.assertIn(['sudo', 'systemctl', 'enable', '--now', 'tailscaled'], privileged)
+        self.assertNotIn(['sudo', '-v'], privileged)
+
+    def test_update_without_terminal_or_cached_sudo_stops_before_changes(self):
+        self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
+        self.env['FIXTURE_SERVICES_DOWN'] = 'tailscaled'
+        result = subprocess.run(['python3', str(REPO / 'scripts/groundwork-update.py'), 'setup', str(REPO), '--update'],
+                                env=self.env, capture_output=True, text=True, timeout=10, start_new_session=True)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('no terminal is available', result.stderr)
+        self.assertNotIn(['sudo', 'systemctl', 'enable', '--now', 'tailscaled'], self.calls())
+
+    def test_update_primes_sudo_at_the_foreground_terminal(self):
+        self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
+        self.env.update(FIXTURE_REQUIRE_TTY='1', FIXTURE_SERVICES_DOWN='tailscaled')
+        result = self.run_with_controlling_terminal(command=[
+            'python3', str(REPO / 'scripts/groundwork-update.py'), 'setup', str(REPO), '--update'])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(b'Fixture password:', result.stdout)
+        privileged = [call for call in self.calls() if call[0] == 'sudo']
+        self.assertEqual(privileged[0], ['sudo', '/usr/bin/true'])
+        self.assertIn(['sudo', 'systemctl', 'enable', '--now', 'tailscaled'], privileged)
+
+    def test_screen_sharing_firewall_rule_is_added_once(self):
+        self.prepare_routine_update('--without-keyd')
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(any(call[0] == 'sudo' for call in self.calls()))
+        (self.root / 'home/.local/state/groundwork/ufw-screen-share-rule').unlink()
+        self.env['FIXTURE_SUDO_CACHED'] = '1'
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(['sudo', 'ufw', 'allow', 'in', 'on', 'tailscale0', 'to', 'any', 'port', '5900', 'proto', 'tcp',
+                       'comment', 'Groundwork screen sharing'], self.calls())
+
+    def privileged_calls(self):
+        return [call for call in self.calls() if call[0] == 'sudo']
+
+    def test_update_with_current_keyd_and_extension_never_calls_sudo(self):
+        self.prepare_routine_update('--with-keyd', '--without-screen-sharing')
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.privileged_calls(), [])
+
+    def test_update_reapplies_drifted_keyd_config_after_priming_sudo(self):
+        self.prepare_routine_update('--with-keyd', '--without-screen-sharing')
+        self.config.write_text('local drift\n')
+        self.env['FIXTURE_SUDO_CACHED'] = '1'
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        privileged = self.privileged_calls()
+        self.assertEqual(privileged[0], ['sudo', '-n', '/usr/bin/true'])
+        self.assertIn(['sudo', 'keyd', 'reload'], privileged)
+        self.assertEqual(self.config.read_text(), (REPO / 'keyd/default.conf').read_text())
+
+    def test_update_restarts_a_stopped_keyd_service_after_priming_sudo(self):
+        self.prepare_routine_update('--with-keyd', '--without-screen-sharing')
+        self.env.update(FIXTURE_SUDO_CACHED='1', FIXTURE_SERVICES_DOWN='keyd')
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        privileged = self.privileged_calls()
+        self.assertEqual(privileged[0], ['sudo', '-n', '/usr/bin/true'])
+        self.assertIn(['sudo', 'systemctl', 'enable', '--now', 'keyd'], privileged)
+
+    def test_update_repairs_chromium_extension_drift_after_priming_sudo(self):
+        self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
+        manifest = self.root / 'usr/share/chromium/extensions/nngceckbapebfimnlniiiahkandclblb.json'
+        for drift in (lambda: manifest.chmod(0o600), lambda: manifest.write_text('{}')):
+            with self.subTest(drift=drift):
+                drift()
+                (self.root / 'calls.jsonl').unlink(missing_ok=True)
+                self.env['FIXTURE_SUDO_CACHED'] = '1'
+                result = self.run_update()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                privileged = self.privileged_calls()
+                self.assertEqual(privileged[0], ['sudo', '-n', '/usr/bin/true'])
+                self.assertEqual(oct(manifest.stat().st_mode & 0o777), '0o644')
+                self.assertEqual(manifest.read_bytes(), (REPO / 'chromium/extensions' / manifest.name).read_bytes())
+
+    def test_update_primes_sudo_when_readelf_is_missing(self):
+        self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
+        (self.bin / 'readelf').unlink()
+        self.env['FIXTURE_SUDO_CACHED'] = '1'
+        result = self.run_update()
+        self.assertNotIn('sudo was not used', result.stdout)
+        self.assertEqual(self.privileged_calls()[0], ['sudo', '-n', '/usr/bin/true'])
+
+    def test_test_root_without_the_harness_guard_is_refused(self):
+        del self.env['GROUNDWORK_TESTING']
+        result = self.run_install(success=False)
+        self.assertIn('GROUNDWORK_TEST_ROOT is a test-only variable', result.stderr)
+        self.assertFalse(any(call[0] in ('sudo', 'omarchy', 'stow', 'curl') for call in self.calls()))
+
+    def test_disabling_screen_sharing_forgets_the_firewall_rule(self):
+        self.run_install('--without-keyd')
+        marker = self.root / 'home/.local/state/groundwork/ufw-screen-share-rule'
+        self.assertTrue(marker.is_file())
+        self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertFalse(marker.exists())
+
+    def test_symlinked_firewall_rule_marker_is_refused(self):
+        self.run_install('--without-keyd')
+        marker = self.root / 'home/.local/state/groundwork/ufw-screen-share-rule'
+        target = self.root / 'elsewhere'
+        target.write_text('keep')
+        marker.unlink()
+        marker.symlink_to(target)
+        result = self.run_update()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('symbolic link', result.stderr)
+        self.assertEqual(target.read_text(), 'keep')
 
     def test_other_checkout_ownership_is_checked_before_any_machine_mutation(self):
         self.run_install()
