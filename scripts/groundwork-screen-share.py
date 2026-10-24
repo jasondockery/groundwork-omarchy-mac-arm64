@@ -270,6 +270,9 @@ def configure():
     subprocess.run(['systemctl', '--user', 'enable', 'groundwork-screen-share.service'], check=True, timeout=20)
     # The running service keeps the session when its unit, helper, and
     # WayVNC config are the same bytes. Restarting here is what drops it.
+    # With WAYLAND_DISPLAY set, including update-all from a desktop terminal,
+    # restart even when the unit is inactive. An inactive unit stays stopped
+    # and the record is cleared only when WAYLAND_DISPLAY is unset (SSH or cron).
     if changed:
         if os.environ.get('WAYLAND_DISPLAY'):
             action = 'restart'
