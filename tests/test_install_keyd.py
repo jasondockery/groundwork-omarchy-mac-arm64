@@ -156,6 +156,31 @@ elif name == 'systemctl':
     sys.exit(int(os.environ.get('FIXTURE_USER_SYSTEMCTL_STATUS', '0')))
 elif name == 'getconf':
     print(os.environ.get('FIXTURE_PAGESIZE', '4096') if args == ['PAGESIZE'] else '')
+elif name == 'readelf':
+    align = os.environ.get('FIXTURE_LOAD_ALIGN', '')
+    if args[:1] == ['-lW'] and align:
+        print('  LOAD 0x000000 0x0000000000400000 0x0000000000400000 0x000100 0x000100 R E ' + align)
+elif name == 'bun':
+    if args == ['--version']:
+        sys.exit(int(os.environ.get('FIXTURE_BUN_STATUS', '0')))
+elif name == 'omarchy-install-dev-env':
+    if args != ['bun']:
+        sys.exit(1)
+    target = root / 'bin' / 'bun'
+    if not target.exists():
+        target.symlink_to(root / 'bin' / 'stub')
+elif name == 'omarchy':
+    if args[:2] == ['pkg', 'add'] and os.environ.get('FIXTURE_MATERIALIZE_ADDED') == '1' and len(args) > 2:
+        mapping = {'openssh': 'ssh', 'libnotify': 'notify-send', 'wl-clipboard': 'wl-copy', 'xdg-utils': 'xdg-open'}
+        executable = mapping.get(args[2], args[2])
+        target = root / 'bin' / executable
+        if not target.exists():
+            target.symlink_to(root / 'bin' / 'stub')
+    if args[:2] == ['plugin', 'list'] and '--json' in args:
+        status = int(os.environ.get('FIXTURE_PLUGIN_LIST_STATUS', '0'))
+        if status:
+            sys.exit(status)
+        print(os.environ.get('FIXTURE_PLUGIN_LIST', '[]'))
 '''
 
 
@@ -179,7 +204,7 @@ class InstallKeydTests(unittest.TestCase):
         stub = self.bin / 'stub'
         stub.write_text(STUB)
         stub.chmod(0o755)
-        for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw', 'getconf', 'readelf'):
+        for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'omarchy-install-dev-env', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw', 'getconf', 'readelf'):
             (self.bin / name).symlink_to(stub)
         (self.root / 'home').mkdir()
         (self.root / 'nightly-t3').write_text('#!/bin/sh\nprintf "t3 0.0.0-nightly.20261018.1\\n"\n')
@@ -615,6 +640,7 @@ raise SystemExit(os.WEXITSTATUS(status))
         for args, success in [(('--typo',), False),
                               (('--with-keyd', '--without-keyd'), False),
                               (('--without-keyd', '--with-keyd'), False),
+                              (('--with-blip', '--without-blip'), False),
                               (('--help',), True)]:
             with self.subTest(args=args):
                 self.run_install(*args, success=success)
@@ -907,6 +933,162 @@ raise SystemExit(os.WEXITSTATUS(status))
         result = self.run_install(success=False)
         self.assertIn('Expected T3 Code Nightly', result.stderr)
         self.assertFalse(any(call[0] in ('stow', 'hyprctl') for call in self.calls()))
+
+    def seed_blip_commands(self, *, socat=True, bun=False):
+        for name in ('jq', 'ssh', 'notify-send', 'wl-copy', 'xdg-open'):
+            target = self.bin / name
+            if not target.exists():
+                target.symlink_to(self.bin / 'stub')
+        socat_path = self.bin / 'socat'
+        if socat and not socat_path.exists():
+            socat_path.symlink_to(self.bin / 'stub')
+        elif not socat and socat_path.is_symlink():
+            socat_path.unlink()
+        bun_path = self.bin / 'bun'
+        if bun and not bun_path.exists():
+            bun_path.symlink_to(self.bin / 'stub')
+
+    def prepare_blip(self, *, align='0x10000', plugins='[]', session=True, socat=True, bun=False):
+        self.seed_blip_commands(socat=socat, bun=bun)
+        self.env['FIXTURE_LOAD_ALIGN'] = align
+        self.env['FIXTURE_PLUGIN_LIST'] = plugins
+        self.env['HYPRLAND_INSTANCE_SIGNATURE'] = 'fixture-session' if session else ''
+
+    def blip_mentions(self, calls):
+        needles = ('bun', 'socat', 'nixfred', 'blip', 'omarchy-install-dev-env', 'jq', 'openssh',
+                   'libnotify', 'wl-clipboard', 'xdg-utils', 'notify-send', 'wl-copy', 'xdg-open', 'ffmpeg', 'mpv')
+        return [call for call in calls if any(needle in arg for arg in call for needle in needles)]
+
+    def test_default_install_leaves_blip_off_and_an_existing_copy_alone(self):
+        self.env['FIXTURE_PLUGIN_LIST'] = '[{"id": "nixfred.blip", "enabled": true}]'
+        result = self.run_install()
+        saved = json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())
+        self.assertFalse(saved['blip'])
+        self.assertEqual(self.blip_mentions(self.calls()), [])
+        self.assertFalse((self.root / 'home/.config/omarchy/shell.json').exists())
+        self.assertNotIn('blip-setup', result.stdout)
+        self.run_install('--without-blip')
+        saved = json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())
+        self.assertFalse(saved['blip'])
+        self.assertFalse(any(call[:3] == ['omarchy', 'plugin', 'remove'] for call in self.calls()))
+
+    def test_blip_preference_is_stored_and_reused_without_readding(self):
+        self.prepare_blip()
+        result = self.run_install('--with-blip')
+        saved = json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())
+        self.assertTrue(saved['blip'])
+        self.assertIn(['omarchy', 'plugin', 'add', 'https://github.com/nixfred/blip.git', '--enable', '--yes'], self.calls())
+        self.assertIn(['omarchy-install-dev-env', 'bun'], self.calls())
+        self.assertIn('blip-setup GATEWAY_USER@GATEWAY_MAGICDNS_NAME', result.stdout)
+        self.assertFalse((self.root / 'home/.config/omarchy/shell.json').exists())
+        self.assertFalse(any(call[0] == 'curl' and any('bun' in arg for arg in call) for call in self.calls()))
+        self.env['FIXTURE_PLUGIN_LIST'] = '[{"id": "nixfred.blip", "enabled": true}]'
+        (self.root / 'calls.jsonl').unlink()
+        self.run_install()
+        saved = json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())
+        self.assertTrue(saved['blip'])
+        calls = self.calls()
+        self.assertIn(['omarchy', 'plugin', 'list', '--json'], calls)
+        self.assertFalse(any(call[:3] == ['omarchy', 'plugin', 'add'] for call in calls))
+        self.assertNotIn(['omarchy-install-dev-env', 'bun'], calls)
+
+    def test_blip_add_is_skipped_when_the_plugin_is_already_listed(self):
+        self.prepare_blip(plugins='[{"id": "nixfred.blip", "enabled": false}]', bun=True)
+        result = self.run_install('--with-blip')
+        self.assertIn('already installed', result.stdout)
+        self.assertFalse(any(call[:3] == ['omarchy', 'plugin', 'add'] for call in self.calls()))
+        self.assertFalse(any(call[:3] == ['omarchy', 'plugin', 'enable'] for call in self.calls()))
+        self.assertNotIn(['omarchy-install-dev-env', 'bun'], self.calls())
+
+    def test_blip_installs_only_missing_packages(self):
+        self.prepare_blip(socat=False, bun=True)
+        self.env['FIXTURE_MATERIALIZE_ADDED'] = '1'
+        self.run_install('--with-blip')
+        calls = self.calls()
+        self.assertIn(['omarchy', 'pkg', 'add', 'socat'], calls)
+        for package in ('jq', 'openssh', 'libnotify', 'wl-clipboard', 'xdg-utils', 'ffmpeg', 'mpv'):
+            self.assertNotIn(['omarchy', 'pkg', 'add', package], calls)
+
+    def test_blip_is_not_enabled_when_bun_fails_the_alignment_check(self):
+        self.prepare_blip(align='0x100')
+        result = self.run_install('--with-blip', success=False)
+        self.assertIn('oven-sh/bun#17627', result.stderr)
+        self.assertIn('https://github.com/oven-sh/bun/issues/17627', result.stderr)
+        self.assertIn('16 KiB', result.stderr + result.stdout) if os.sysconf('SC_PAGESIZE') == 16384 else self.assertIn('KiB pages', result.stderr)
+        self.assertFalse(any(call[:3] == ['omarchy', 'plugin', 'add'] for call in self.calls()))
+        self.assertNotIn(['bun', '--version'], self.calls())
+        self.assertNotIn('are installed.', result.stdout)
+        self.assertFalse((self.root / 'home/.config/groundwork/omarchy.json').exists())
+
+    def test_blip_is_not_enabled_when_bun_version_fails(self):
+        self.prepare_blip()
+        self.env['FIXTURE_BUN_STATUS'] = '1'
+        result = self.run_install('--with-blip', success=False)
+        self.assertIn(['bun', '--version'], self.calls())
+        self.assertIn('oven-sh/bun#17627', result.stderr)
+        self.assertFalse(any(call[:3] == ['omarchy', 'plugin', 'add'] for call in self.calls()))
+
+    def test_blip_outside_a_desktop_session_prints_the_command_and_does_not_add(self):
+        self.prepare_blip(session=False)
+        result = self.run_install('--with-blip')
+        self.assertIn('omarchy plugin add https://github.com/nixfred/blip.git --enable --yes', result.stdout)
+        self.assertIn('blip-setup GATEWAY_USER@GATEWAY_MAGICDNS_NAME', result.stdout)
+        self.assertFalse(any(call[:2] == ['omarchy', 'plugin'] for call in self.calls()))
+        saved = json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())
+        self.assertTrue(saved['blip'])
+
+    def test_blip_refuses_unusable_plugin_list_json(self):
+        self.prepare_blip(plugins='not-json')
+        result = self.run_install('--with-blip', success=False)
+        self.assertIn('could not be read', result.stderr)
+        self.assertFalse(any(call[:3] == ['omarchy', 'plugin', 'add'] for call in self.calls()))
+
+    def test_blip_stops_when_plugin_list_fails(self):
+        self.prepare_blip()
+        self.env['FIXTURE_PLUGIN_LIST_STATUS'] = '1'
+        self.run_install('--with-blip', success=False)
+        self.assertFalse(any(call[:3] == ['omarchy', 'plugin', 'add'] for call in self.calls()))
+
+    def test_blip_checks_the_resolved_bun_binary_not_the_mise_shim(self):
+        shim_dir = self.root / 'home/.local/share/mise/shims'
+        shim_dir.mkdir(parents=True)
+        (shim_dir / 'bun').symlink_to(self.bin / 'stub')
+        resolved = self.root / 'mise-installed/bun'
+        resolved.parent.mkdir()
+        resolved.write_text('#!/bin/sh\nexit 0\n')
+        resolved.chmod(0o755)
+        self.env['PATH'] = f'{shim_dir}:{self.env["PATH"]}'
+        self.prepare_blip(bun=True)
+        self.run_install('--with-blip')
+        readelf_calls = [call for call in self.calls() if call[:2] == ['readelf', '-lW']]
+        self.assertIn(str(resolved), [call[2] for call in readelf_calls])
+        self.assertFalse(any('shims' in call[2] for call in readelf_calls))
+
+    def test_blip_stops_when_the_mise_shim_cannot_be_resolved(self):
+        shim_dir = self.root / 'home/.local/share/mise/shims'
+        shim_dir.mkdir(parents=True)
+        (shim_dir / 'bun').symlink_to(self.bin / 'stub')
+        self.env['PATH'] = f'{shim_dir}:{self.env["PATH"]}'
+        self.prepare_blip()
+        result = self.run_install('--with-blip', success=False)
+        self.assertIn('could not resolve', result.stderr)
+        self.assertFalse(any(call[:3] == ['omarchy', 'plugin', 'add'] for call in self.calls()))
+
+    def test_blip_update_asks_for_administrator_permission_when_a_package_is_missing(self):
+        self.prepare_blip(bun=True)
+        self.run_install('--with-blip')
+        (self.bin / 'socat').unlink()
+        (self.root / 'calls.jsonl').unlink()
+        self.env['FIXTURE_SUDO_CACHED'] = '0'
+        result = self.run_update()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('no terminal is available', result.stderr)
+        self.assertNotIn(['omarchy', 'pkg', 'add', 'socat'], self.calls())
+
+    def test_help_mentions_blip(self):
+        result = self.run_install('--help')
+        self.assertIn('--with-blip', result.stdout)
+        self.assertIn('--without-blip', result.stdout)
 
 
 if __name__ == '__main__':

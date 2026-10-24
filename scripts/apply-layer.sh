@@ -5,17 +5,21 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing]"
+  echo "Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip]"
   echo "Caps Lock defaults to Escape on tap and Control while held."
   echo "Saved setup choices are reused; explicit options change those choices."
   echo "--without-keyd leaves any existing keyd configuration and service unchanged."
   echo "--without-screen-sharing leaves any existing desktop-sharing service unchanged."
+  echo "--with-blip installs the Blip iMessage client. It is off by default."
+  echo "--without-blip leaves any existing Blip install unchanged."
 }
 
 with_keyd=1
 with_screen_sharing=1
+with_blip=0
 keyd_choice=""
 sharing_choice=""
+blip_choice=""
 updating=0
 for arg in "$@"; do
   case "$arg" in
@@ -38,6 +42,14 @@ for arg in "$@"; do
       fi
       sharing_choice=$arg
       [[ $arg == --with-screen-sharing ]] && with_screen_sharing=1 || with_screen_sharing=0
+      ;;
+    --with-blip | --without-blip)
+      if [[ -n $blip_choice && $blip_choice != "$arg" ]]; then
+        echo "Choose only one of --with-blip and --without-blip." >&2
+        exit 64
+      fi
+      blip_choice=$arg
+      [[ $arg == --with-blip ]] && with_blip=1 || with_blip=0
       ;;
     --update) updating=1 ;;
     *)
@@ -87,6 +99,16 @@ if [[ -n $stored ]]; then
   [[ -n $keyd_choice ]] || with_keyd=${preferences[0]}
   [[ -n $sharing_choice ]] || with_screen_sharing=${preferences[1]}
   export GROUNDWORK_OBSIDIAN_VAULT="${GROUNDWORK_OBSIDIAN_VAULT:-${preferences[2]}}"
+  if [[ -z $blip_choice ]]; then
+    case ${preferences[3]-} in
+      '') ;;
+      0|1) with_blip=${preferences[3]} ;;
+      *)
+        echo "Saved Blip choice is invalid. Preserve ~/.config/groundwork/omarchy.json and repair it before rerunning." >&2
+        exit 1
+        ;;
+    esac
+  fi
 fi
 
 # Fail before installing packages or moving files when the checkout is incomplete.
@@ -163,6 +185,12 @@ privileged_changes_needed() {
   if [[ $with_keyd -eq 1 ]]; then
     command -v keyd >/dev/null || return 0
     keyd_current || return 0
+  fi
+  # Same executables install_blip adds. bun is a per-user mise tool and needs no sudo.
+  if [[ $with_blip -eq 1 ]]; then
+    for executable in jq ssh notify-send wl-copy xdg-open socat; do
+      command -v "$executable" >/dev/null || return 0
+    done
   fi
   return 1
 }
@@ -534,10 +562,104 @@ if [[ $with_keyd -eq 1 ]]; then
 else
   echo "Skipped keyd setup; any existing keyd configuration and service were left alone."
 fi
+
+# Opt-in Blip iMessage client (decision 0011).
+# One block on purpose, so it can move into the shared plugin list once that
+# list supports git-URL sources and per-entry opt-in. This is not a second
+# plugin installer: Omarchy's own plugin commands do the add and the enable.
+install_blip() {
+  local package executable pair bun_bin resolved listed list_status added
+  local blip_id=nixfred.blip
+  local blip_url=https://github.com/nixfred/blip.git
+  local -a packages=(jq:jq openssh:ssh libnotify:notify-send wl-clipboard:wl-copy xdg-utils:xdg-open socat:socat)
+  added=0
+  # ffmpeg and mpv play voice messages. blip-setup names them; they stay optional.
+  for pair in "${packages[@]}"; do
+    package=${pair%%:*}
+    executable=${pair#*:}
+    if ! command -v "$executable" >/dev/null; then
+      install_package "$package" "$executable"
+    fi
+  done
+  if ! command -v bun >/dev/null; then
+    if ! command -v omarchy-install-dev-env >/dev/null; then
+      echo "omarchy-install-dev-env is unavailable, so bun cannot be installed for Blip. Blip was not enabled." >&2
+      exit 1
+    fi
+    # Omarchy's dev-env command runs `mise use -g bun@latest`. Do not use bun's curl installer.
+    omarchy-install-dev-env bun
+    hash -r
+  fi
+  if ! command -v bun >/dev/null; then
+    echo "bun is still unavailable after omarchy-install-dev-env bun. Blip was not enabled." >&2
+    exit 1
+  fi
+  bun_bin=$(command -v bun)
+  resolved=$bun_bin
+  case "$bun_bin" in
+    "${MISE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mise}"/shims/* | \
+      "${MISE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mise}"/command-wrappers/bin/*)
+      resolved=$(timeout --kill-after=2s 15 mise which bun) || {
+        echo "mise could not resolve the bun shim at $bun_bin. Blip was not enabled." >&2
+        exit 1
+      }
+      ;;
+  esac
+  if [[ -z $resolved || ! -x $resolved ]]; then
+    echo "The resolved bun binary is not executable: ${resolved:-missing}. Blip was not enabled." >&2
+    exit 1
+  fi
+  # Reuse the T3 readelf -lW helper. Do not execute bun when this kernel cannot map it.
+  if ! python3 "$root/scripts/groundwork-update.py" check-load-alignment "$resolved"; then
+    exit 1
+  fi
+  if ! timeout --kill-after=2s 15 bun --version >/dev/null; then
+    echo "bun --version failed, so Blip was not enabled (oven-sh/bun#17627)." >&2
+    echo "https://github.com/oven-sh/bun/issues/17627" >&2
+    exit 1
+  fi
+  local add_command="omarchy plugin add ${blip_url} --enable --yes"
+  # Literal tilde: the person runs this in their own home directory.
+  # shellcheck disable=SC2088
+  local setup_command="~/.config/omarchy/plugins/${blip_id}/scripts/blip-setup GATEWAY_USER@GATEWAY_MAGICDNS_NAME"
+  if [[ -z ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
+    echo "No Hyprland session detected; Blip stays pending until this runs in the Omarchy desktop:"
+    echo "  $add_command"
+    echo "If that reports the plugin is already installed, do not add it again. Then run:"
+    echo "  $setup_command"
+    echo "Answer n to the Inter font prompt. Leave tapbacks off. See docs/imessage.md."
+    return 0
+  fi
+  if ! listed=$(omarchy plugin list --json); then
+    echo "omarchy plugin list failed, so Blip was not enabled. On the desktop, run:" >&2
+    echo "  $add_command" >&2
+    exit 1
+  fi
+  list_status=0
+  printf '%s\n' "$listed" | python3 "$root/scripts/groundwork-update.py" plugin-listed "$blip_id" || list_status=$?
+  if [[ $list_status -eq 0 ]]; then
+    echo "nixfred.blip is already installed; it was left unchanged."
+  elif [[ $list_status -eq 1 ]]; then
+    omarchy plugin add "$blip_url" --enable --yes
+    added=1
+  else
+    echo "omarchy plugin list --json could not be read, so Blip was not enabled." >&2
+    exit 1
+  fi
+  if [[ $updating -eq 0 || $added -eq 1 ]]; then
+    echo "Next, in this desktop session, run:"
+    echo "  $setup_command"
+    echo "The wizard needs a person at the Mac. It is not run from this installer. See docs/imessage.md."
+  fi
+}
+if [[ $with_blip -eq 1 ]]; then
+  install_blip
+fi
+
 python3 "$root/scripts/groundwork-update.py" register "$root" "$with_keyd" "$with_screen_sharing" \
-  "${GROUNDWORK_OBSIDIAN_VAULT:-$HOME/Documents/Obsidian/my_obsidian_vault}"
+  "${GROUNDWORK_OBSIDIAN_VAULT:-$HOME/Documents/Obsidian/my_obsidian_vault}" "$with_blip"
 if [[ $updating -eq 1 ]]; then
-  echo "Groundwork settings applied. Saved keyd, screen-sharing, and vault choices were preserved."
+  echo "Groundwork settings applied. Saved keyd, screen-sharing, Blip, and vault choices were preserved."
   exit 0
 fi
 echo "Trackpad configuration, T3 Code, Herdr, Tailscale, Obsidian, and Bitwarden are installed."

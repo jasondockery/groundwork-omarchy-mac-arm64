@@ -1,6 +1,6 @@
 """Real local Git transport; isolated home and mocked machine-owner commands."""
 import fcntl
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 import hashlib
 import importlib.util
 import io
@@ -107,6 +107,9 @@ class UpdateTests(unittest.TestCase):
         self.t3_installed = '0.0.1-nightly.fixture'
         self.t3_broken = False
         self.break_after_update = False
+        self.blip_listed = False
+        self.blip_rewrite = None
+        self.blip_plugin = None
         self.install_failures = set()
         self.real_run = updater.run
         self.run_patch = patch.object(updater, 'run', side_effect=self.run_command)
@@ -152,6 +155,21 @@ class UpdateTests(unittest.TestCase):
             return self.readelf.get(Path(args[2]).name, READELF_GOOD)
         if args[:3] == ['flatpak', '--user', 'list']:
             return 'com.bitwarden.desktop\norg.example.Unowned'
+        if args == ['omarchy', 'plugin', 'list', '--json']:
+            if self.blip_listed:
+                return '[{"id": "nixfred.blip", "enabled": true}]'
+            return '[]'
+        if args[:4] == ['omarchy', 'plugin', 'update', 'nixfred.blip']:
+            if '--yes' in args:
+                raise AssertionError('Blip update must not pass --yes')
+            plugin = self.blip_plugin
+            if plugin is not None and self.blip_rewrite == 'bridge':
+                (plugin / 'bridge/mac/install.sh').write_text('new\n')
+                self.commit(plugin)
+            elif plugin is not None and self.blip_rewrite == 'readme':
+                (plugin / 'README.md').write_text('newer\n')
+                self.commit(plugin)
+            return ''
         return ''
 
     def test_check_keeps_live_symlink_head_index_and_configuration_unchanged(self):
@@ -184,6 +202,7 @@ class UpdateTests(unittest.TestCase):
         self.assertIn(['t3', 'update', '--channel', 'nightly', '--yes'], self.machine_calls)
         self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], self.machine_calls)
         self.assertNotIn('org.example.Unowned', str(self.machine_calls))
+        self.assertFalse(any(call[:2] == ['omarchy', 'plugin'] for call in self.machine_calls))
 
     def test_dirty_or_untracked_source_refuses_before_machine_mutation(self):
         for path in [self.source / 'packages/hypr/.config/hypr/input.lua', self.source / 'untracked']:
@@ -507,6 +526,69 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
             for arguments, expected in [(['--help'], 0), (['--unknown'], 64), (['--help', 'extra'], 64)]:
                 result = subprocess.run(['bash', str(script), *arguments], capture_output=True, text=True, timeout=5)
                 self.assertEqual(result.returncode, expected, result.stderr)
+
+
+    def enable_saved_blip(self):
+        saved = json.loads(self.config.read_text())
+        saved['blip'] = True
+        self.config.write_text(json.dumps(saved) + '\n')
+        self.blip_listed = True
+
+    def blip_update_calls(self):
+        return [call for call in self.machine_calls if call[:3] == ['omarchy', 'plugin', 'update']]
+
+    def test_blip_update_is_skipped_without_a_tty(self):
+        self.enable_saved_blip()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            updater.update('all')
+        self.assertEqual(self.blip_update_calls(), [])
+        self.assertNotIn('--yes', [arg for call in self.machine_calls if call[:2] == ['omarchy', 'plugin'] for arg in call])
+        self.assertIn('interactive terminal', output.getvalue())
+        self.assertIn('never passed --yes', output.getvalue())
+
+    def test_layer_update_does_not_update_blip(self):
+        self.enable_saved_blip()
+        with patch.object(updater, 'interactive_terminal', return_value=True):
+            updater.update('layer')
+        self.assertFalse(any(call[:2] == ['omarchy', 'plugin'] for call in self.machine_calls))
+
+    def seed_blip_checkout(self):
+        plugin = self.home / '.config/omarchy/plugins/nixfred.blip'
+        (plugin / 'bridge/mac').mkdir(parents=True)
+        (plugin / 'bridge/mac/install.sh').write_text('old\n')
+        (plugin / 'README.md').write_text('readme\n')
+        self.command('git', 'init', '-b', 'main', str(plugin))
+        self.commit(plugin)
+        self.blip_plugin = plugin
+        return plugin
+
+    def test_blip_update_reminds_when_bridge_changes_and_never_passes_yes(self):
+        self.enable_saved_blip()
+        self.seed_blip_checkout()
+        self.blip_rewrite = 'bridge'
+        output = io.StringIO()
+        with redirect_stdout(output), patch.object(updater, 'interactive_terminal', return_value=True):
+            updater.update('all')
+        updates = self.blip_update_calls()
+        self.assertEqual(updates, [['omarchy', 'plugin', 'update', 'nixfred.blip']])
+        index = self.machine_calls.index(updates[0])
+        self.assertIs(self.machine_kwargs[index].get('capture'), False)
+        text = output.getvalue()
+        self.assertIn('Blip changed files under bridge/.', text)
+        self.assertIn('Re-run blip-setup.', text)
+        self.assertIn('GATEWAY_USER@GATEWAY_MAGICDNS_NAME', text)
+        self.assertFalse(any('blip-setup' in arg for call in self.machine_calls for arg in call))
+
+    def test_blip_update_without_bridge_changes_does_not_remind(self):
+        self.enable_saved_blip()
+        self.seed_blip_checkout()
+        self.blip_rewrite = 'readme'
+        output = io.StringIO()
+        with redirect_stdout(output), patch.object(updater, 'interactive_terminal', return_value=True):
+            updater.update('all')
+        self.assertEqual(self.blip_update_calls(), [['omarchy', 'plugin', 'update', 'nixfred.blip']])
+        self.assertNotIn('Re-run blip-setup.', output.getvalue())
 
 
 class T3CandidateTests(unittest.TestCase):
