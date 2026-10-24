@@ -334,7 +334,7 @@ if sys.argv[1] == 'child':
     raise SystemExit(0)
 pid, master = pty.fork()
 if pid == 0:
-    os.execv(sys.executable, [sys.executable, sys.argv[0], 'child', sys.argv[1]])
+    os.execv(sys.executable, [sys.executable, '-B', sys.argv[0], 'child', sys.argv[1]])
 chunks, deadline = [], time.monotonic() + 9
 while time.monotonic() < deadline:
     ready, _, _ = select.select([master], [], [], 0.1)
@@ -374,7 +374,7 @@ class ProcessTests(unittest.TestCase):
     def test_interactive_stage_prints_no_heartbeat_over_its_terminal(self):
         script = Path(self.report.parent) / 'bridge.py'
         script.write_text(PTY_BRIDGE)
-        result = subprocess.run([sys.executable, str(script), str(REPO / 'scripts/groundwork-update.py')],
+        result = subprocess.run([sys.executable, '-B', str(script), str(REPO / 'scripts/groundwork-update.py')],
                                 capture_output=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(b'interactive stage finished', result.stdout)
