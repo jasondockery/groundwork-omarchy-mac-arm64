@@ -49,6 +49,13 @@ def private_directory(path):
     path.chmod(0o700)
 
 
+def same_file_bytes(path, content):
+    # Match replace_file's decision without writing. A symlink is not the file.
+    if path.is_symlink() or not path.is_file():
+        return False
+    return path.read_bytes() == content
+
+
 def replace_file(path, content, mode):
     if path.is_symlink():
         raise RuntimeError('Refusing to replace a symlink: ' + str(path))
@@ -243,21 +250,22 @@ def configure():
         changed = True
     binary = Path.home() / '.local/bin/groundwork-screen-share'
     binary.parent.mkdir(parents=True, exist_ok=True)
-    if replace_file(binary, Path(__file__).read_bytes(), 0o755):
-        changed = True
     unit = Path.home() / '.config/systemd/user/groundwork-screen-share.service'
     unit.parent.mkdir(parents=True, exist_ok=True)
-    if replace_file(unit, UNIT.encode(), 0o644):
+    helper = Path(__file__).read_bytes()
+    unit_bytes = UNIT.encode()
+    # The record has to exist before these bytes change. Once they match, a
+    # later apply has no other signal that the running process is stale.
+    if not same_file_bytes(binary, helper) or not same_file_bytes(unit, unit_bytes):
+        mark_restart_needed()
+    if replace_file(binary, helper, 0o755):
+        changed = True
+    if replace_file(unit, unit_bytes, 0o644):
         changed = True
     # Persist this before daemon-reload. An SSH apply has no WAYLAND_DISPLAY,
     # and a reload or interrupt must not leave the new files without a record.
     if changed:
-        try:
-            mark_restart_needed()
-        except (OSError, RuntimeError):
-            # The state directory can fail to be created. A service that is
-            # already running still needs the restart below.
-            pass
+        mark_restart_needed()
     subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True, timeout=20)
     subprocess.run(['systemctl', '--user', 'enable', 'groundwork-screen-share.service'], check=True, timeout=20)
     # The running service keeps the session when its unit, helper, and
@@ -273,16 +281,25 @@ def configure():
                 action = 'clear'
             else:
                 # activating, deactivating, or a systemctl error.
+                # WAYLAND_DISPLAY restarts above without reading ActiveState.
                 action = 'keep'
         if action == 'restart':
-            print('Restarting screen sharing; an active remote session will drop.')
-            subprocess.run(['systemctl', '--user', 'restart', 'groundwork-screen-share.service'],
-                           check=True, timeout=20)
-            finish_restart_record(path)
+            restart_screen_share(path)
         elif action == 'clear':
             finish_restart_record(path)
+    elif service_active_state() == 'failed':
+        # Unchanged files leave an active or reloading unit alone. A failed
+        # unit is still down, so bring the listener back.
+        restart_screen_share(path)
     print('Screen sharing enabled for desktop login; it waits for Tailscale sign-in.')
     print('Show its password in a local terminal: groundwork-screen-share password')
+
+
+def restart_screen_share(path):
+    print('Restarting screen sharing; an active remote session will drop.')
+    subprocess.run(['systemctl', '--user', 'restart', 'groundwork-screen-share.service'],
+                   check=True, timeout=20)
+    finish_restart_record(path)
 
 
 def tailscale_address():
@@ -430,19 +447,30 @@ def bind_listener(listener, address, port=5900, device=b'tailscale0', wait=70, p
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, device + b'\0')
     deadline = time.monotonic() + wait
     announced = False
+    retrying = False
     while True:
+        # The address captured before this wait can move while the port is busy.
+        # False tells start_server to drop the socket and let serve() look again.
+        if retrying and tailscale_address() != address:
+            listener.close()
+            return False
         try:
             listener.bind((address, port))
             break
         except OSError as error:
             if error.errno != errno.EADDRINUSE or time.monotonic() >= deadline:
                 raise
+            if tailscale_address() != address:
+                listener.close()
+                return False
+            retrying = True
             if not announced:
                 print('Screen sharing is waiting for TCP ' + str(port) + ' to be released.',
                       file=sys.stderr)
                 announced = True
             time.sleep(pause)
     listener.listen(16)
+    return True
 
 
 def start_server(address, runtime):
@@ -450,10 +478,15 @@ def start_server(address, runtime):
     # packets routed to it through a LAN interface. Pass an interface-bound
     # listening descriptor to WayVNC instead. Failure never falls back to TCP.
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        bind_listener(listener, address)
+        if bind_listener(listener, address) is False:
+            return None
         # Record the bytes WayVNC is about to load. The copy read when serve()
         # started can be older than this file.
         remember_served_config(read_config_bytes(config_path()))
+        # The address can change after the bind and before WayVNC inherits the fd.
+        if tailscale_address() != address:
+            listener.close()
+            return None
         return subprocess.Popen([
             'wayvnc', '--config=' + str(config_path()),
             '--socket=' + str(runtime / 'control'), '--log-level=error',
@@ -479,8 +512,10 @@ def serve():
                 stop_child(child)
                 child = None
             if address and child is None:
-                child = start_server(address, runtime)
-                active = address
+                started = start_server(address, runtime)
+                if started is not None:
+                    child = started
+                    active = address
             time.sleep(5)
     finally:
         stop_child(child)
