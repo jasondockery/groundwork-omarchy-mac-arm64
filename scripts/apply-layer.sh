@@ -294,6 +294,8 @@ for provider in claude codex opencode grok; do
 done
 install_cursor
 
+# update-all checks T3 Code builds with readelf before installing them.
+install_package binutils readelf
 install_package herdr
 install_package tailscale
 sudo systemctl enable --now tailscaled
@@ -332,11 +334,31 @@ fi
 
 # Nightly is upstream's fast-moving train. Reconcile an existing stable CLI too;
 # executable presence is not evidence that the selected channel is installed.
-if [[ $updating -eq 0 ]] || ! command -v t3 >/dev/null; then
+# Newer linux-arm64 nightlies have 4 KiB-aligned LOAD segments and cannot
+# start on kernels with larger pages (pingdotgg/t3code#23433). There, keep a
+# Nightly that already starts; update-all checks every newer build before
+# installing it. Pin the last known-good build only when t3 is missing, does
+# not start, or is not a Nightly.
+t3_known_good_large_page=0.1.2-nightly.20261021.3499
+page_size=$(getconf PAGESIZE)
+t3_pin=()
+reinstall_t3=0
+if ((page_size > 4096)); then
+  if t3_reported=$(timeout --kill-after=5s 15 t3 --version 2>/dev/null) && [[ $t3_reported == *-nightly.* ]]; then
+    [[ $updating -eq 1 ]] || echo "Keeping the installed T3 Code Nightly on this $((page_size / 1024)) KiB-page kernel; update-all checks newer builds first."
+  else
+    reinstall_t3=1
+    t3_pin=(T3CODE_VERSION="$t3_known_good_large_page")
+    echo "This kernel uses $((page_size / 1024)) KiB pages; installing T3 Code $t3_known_good_large_page (pingdotgg/t3code#23433)."
+  fi
+elif [[ $updating -eq 0 ]] || ! command -v t3 >/dev/null; then
+  reinstall_t3=1
+fi
+if [[ $reinstall_t3 -eq 1 ]]; then
   t3_installer="$(mktemp)"
   curl --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 10 --max-time 60 \
     -fsSL https://t3.codes/install.sh -o "$t3_installer"
-  env -u T3CODE_VERSION T3CODE_CHANNEL=nightly timeout --kill-after=5s 300 sh "$t3_installer"
+  env -u T3CODE_VERSION T3CODE_CHANNEL=nightly "${t3_pin[@]}" timeout --kill-after=5s 300 sh "$t3_installer"
   rm -f "$t3_installer"
   t3_installer=""
 fi
