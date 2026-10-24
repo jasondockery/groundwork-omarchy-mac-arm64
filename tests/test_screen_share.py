@@ -1,6 +1,8 @@
 """Test private credentials and fail-closed Tailscale listener lifecycle."""
 import ctypes
+import errno
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -9,11 +11,25 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
-from unittest.mock import Mock, patch
+from contextlib import redirect_stderr, redirect_stdout
+from unittest.mock import Mock, call, patch
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'scripts/groundwork-screen-share.py'
+
+
+def _tcp_states(address, port):
+    # /proc/net/tcp prints IPv4 addresses little-endian. 06 is TIME_WAIT.
+    token = socket.inet_aton(address)[::-1].hex().upper() + f':{port:04X}'
+    states = []
+    for line in Path('/proc/net/tcp').read_text().splitlines()[1:]:
+        local, _remote, state = line.split()[1:4]
+        if local == token:
+            states.append(state)
+    return states
 spec = importlib.util.spec_from_file_location('screen_share', SCRIPT)
 screen_share = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(screen_share)
@@ -178,9 +194,14 @@ class ScreenShareTests(unittest.TestCase):
     def test_configuration_is_private_idempotent_and_automatically_enabled(self):
         with patch.object(screen_share.subprocess, 'run') as run:
             with patch.dict(os.environ, {'WAYLAND_DISPLAY': 'fixture-wayland'}):
-                screen_share.configure()
+                with redirect_stdout(io.StringIO()) as first_out:
+                    screen_share.configure()
                 first = screen_share.config_path().read_bytes()
-                screen_share.configure()
+                first_commands = [call.args[0] for call in run.call_args_list]
+                run.reset_mock()
+                with redirect_stdout(io.StringIO()) as second_out:
+                    screen_share.configure()
+                second_commands = [call.args[0] for call in run.call_args_list]
         config = screen_share.config_path()
         self.assertEqual(first, config.read_bytes())
         self.assertEqual(config.stat().st_mode & 0o777, 0o600)
@@ -190,8 +211,49 @@ class ScreenShareTests(unittest.TestCase):
         unit = (self.home / '.config/systemd/user/groundwork-screen-share.service').read_text()
         self.assertIn('WantedBy=graphical-session.target', unit)
         self.assertIn('PartOf=graphical-session.target', unit)
+        restart = ['systemctl', '--user', 'restart', 'groundwork-screen-share.service']
+        self.assertIn(restart, first_commands)
+        self.assertIn('Restarting screen sharing; an active remote session will drop.',
+                      first_out.getvalue())
+        self.assertNotIn(restart, second_commands)
+        self.assertIn(['systemctl', '--user', 'enable', 'groundwork-screen-share.service'], second_commands)
+        self.assertNotIn('will drop', second_out.getvalue())
+
+    def test_unchanged_unit_helper_and_config_are_not_restarted(self):
+        config = screen_share.config_path()
+        config.parent.mkdir(parents=True)
+        config.write_text(screen_share.config_text('abcdefgh'))
+        binary = self.home / '.local/bin/groundwork-screen-share'
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(Path(screen_share.__file__).read_bytes())
+        unit = self.home / '.config/systemd/user/groundwork-screen-share.service'
+        unit.parent.mkdir(parents=True)
+        unit.write_text(screen_share.UNIT)
+        with patch.object(screen_share.subprocess, 'run') as run:
+            with patch.dict(os.environ, {'WAYLAND_DISPLAY': 'fixture-wayland'}):
+                with redirect_stdout(io.StringIO()) as out:
+                    screen_share.configure()
         commands = [call.args[0] for call in run.call_args_list]
-        self.assertIn(['systemctl', '--user', 'restart', 'groundwork-screen-share.service'], commands)
+        self.assertNotIn(['systemctl', '--user', 'restart', 'groundwork-screen-share.service'], commands)
+        self.assertIn(['systemctl', '--user', 'daemon-reload'], commands)
+        self.assertIn(['systemctl', '--user', 'enable', 'groundwork-screen-share.service'], commands)
+        self.assertNotIn('will drop', out.getvalue())
+        self.assertEqual(config.read_text(), screen_share.config_text('abcdefgh'))
+
+    def test_changed_unit_restarts_and_warns_that_the_session_drops(self):
+        with patch.object(screen_share.subprocess, 'run') as run:
+            with patch.dict(os.environ, {'WAYLAND_DISPLAY': 'fixture-wayland'}):
+                with redirect_stdout(io.StringIO()):
+                    screen_share.configure()
+                unit = self.home / '.config/systemd/user/groundwork-screen-share.service'
+                unit.write_text(screen_share.UNIT.replace('RestartSec=10', 'RestartSec=11'))
+                run.reset_mock()
+                with redirect_stdout(io.StringIO()) as out:
+                    screen_share.configure()
+        self.assertIn(['systemctl', '--user', 'restart', 'groundwork-screen-share.service'],
+                      [call.args[0] for call in run.call_args_list])
+        self.assertIn('Restarting screen sharing; an active remote session will drop.', out.getvalue())
+        self.assertIn('RestartSec=10', unit.read_text())
 
     def test_modified_config_is_preserved_and_service_not_started(self):
         config = screen_share.config_path()
@@ -289,7 +351,10 @@ class ScreenShareTests(unittest.TestCase):
             create.return_value.__enter__.return_value = listener
             with patch.object(screen_share.subprocess, 'Popen') as spawn:
                 screen_share.start_server('100.64.0.2', self.home)
-        listener.setsockopt.assert_called_once_with(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'tailscale0\0')
+        self.assertEqual(listener.setsockopt.call_args_list, [
+            call(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1),
+            call(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'tailscale0\0'),
+        ])
         listener.bind.assert_called_once_with(('100.64.0.2', 5900))
         self.assertEqual(spawn.call_args.args[0][-1], 'fd:42')
         self.assertEqual(spawn.call_args.kwargs['pass_fds'], (42,))
@@ -480,7 +545,12 @@ class ScreenShareTests(unittest.TestCase):
 
     def test_unavailable_interface_binding_never_starts_a_fallback_listener(self):
         listener = Mock()
-        listener.setsockopt.side_effect = PermissionError('interface isolation unavailable')
+
+        def setsockopt(_level, option, _value):
+            if option == socket.SO_BINDTODEVICE:
+                raise PermissionError('interface isolation unavailable')
+
+        listener.setsockopt.side_effect = setsockopt
         with patch.object(screen_share.socket, 'socket') as create:
             create.return_value.__enter__.return_value = listener
             with patch.object(screen_share.subprocess, 'Popen') as spawn:
@@ -504,3 +574,56 @@ class ScreenShareTests(unittest.TestCase):
                 listener.listen(1)
                 client.settimeout(0.3)
                 self.assertEqual(client.connect_ex(listener.getsockname()) == 0, allowed)
+
+    @unittest.skipUnless(sys.platform == 'linux' and hasattr(socket, 'SO_BINDTODEVICE'),
+                         'Linux socket interface isolation')
+    def test_restart_rebinds_while_previous_connection_is_in_time_wait(self):
+        previous = socket.socket()
+        self.addCleanup(previous.close)
+        previous.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        previous.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'lo\0')
+        previous.bind(('127.0.0.1', 0))
+        port = previous.getsockname()[1]
+        previous.listen(1)
+        client = socket.socket()
+        self.addCleanup(client.close)
+        client.connect(('127.0.0.1', port))
+        accepted, _ = previous.accept()
+        self.addCleanup(accepted.close)
+        accepted.close()
+        client.close()
+        previous.close()
+        self.assertIn('06', _tcp_states('127.0.0.1', port))
+        listener = socket.socket()
+        self.addCleanup(listener.close)
+        screen_share.bind_listener(listener, '127.0.0.1', port=port, device=b'lo', wait=2)
+        self.assertEqual(listener.getsockname(), ('127.0.0.1', port))
+
+    @unittest.skipUnless(sys.platform == 'linux' and hasattr(socket, 'SO_BINDTODEVICE'),
+                         'Linux socket interface isolation')
+    def test_bind_waits_for_the_previous_listener_instead_of_raising_eaddrinuse(self):
+        holder = socket.socket()
+        self.addCleanup(holder.close)
+        holder.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'lo\0')
+        holder.bind(('127.0.0.1', 0))
+        port = holder.getsockname()[1]
+        holder.listen(1)
+        busy = socket.socket()
+        self.addCleanup(busy.close)
+        with self.assertRaises(OSError) as caught:
+            screen_share.bind_listener(busy, '127.0.0.1', port=port, device=b'lo', wait=0)
+        self.assertEqual(caught.exception.errno, errno.EADDRINUSE)
+
+        def release():
+            time.sleep(0.2)
+            holder.close()
+
+        thread = threading.Thread(target=release)
+        thread.start()
+        self.addCleanup(thread.join)
+        listener = socket.socket()
+        self.addCleanup(listener.close)
+        with redirect_stderr(io.StringIO()) as err:
+            screen_share.bind_listener(listener, '127.0.0.1', port=port, device=b'lo', wait=5, pause=0.05)
+        self.assertEqual(listener.getsockname(), ('127.0.0.1', port))
+        self.assertIn('Screen sharing is waiting for TCP ' + str(port) + ' to be released.', err.getvalue())

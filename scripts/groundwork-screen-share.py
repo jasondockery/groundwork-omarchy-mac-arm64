@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Own the local WayVNC service; never listen outside the active Tailscale IP."""
 import argparse
+import errno
 import ipaddress
 import json
 import os
@@ -46,7 +47,7 @@ def replace_file(path, content, mode):
         raise RuntimeError('Refusing to replace a symlink: ' + str(path))
     if path.exists() and path.read_bytes() == content:
         path.chmod(mode)
-        return
+        return False
     if path.exists():
         number = 1
         while path.with_name(path.name + '.bak.' + str(number)).exists():
@@ -61,6 +62,7 @@ def replace_file(path, content, mode):
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+    return True
 
 
 def config_path():
@@ -91,20 +93,27 @@ def read_config(path):
 def configure():
     path = config_path()
     private_directory(path.parent)
+    changed = False
     if path.exists() or path.is_symlink():
         read_config(path)
     else:
         # DES uses only eight characters. Never reuse an account password here.
         replace_file(path, config_text(secrets.token_urlsafe(6)).encode(), 0o600)
+        changed = True
     binary = Path.home() / '.local/bin/groundwork-screen-share'
     binary.parent.mkdir(parents=True, exist_ok=True)
-    replace_file(binary, Path(__file__).read_bytes(), 0o755)
+    if replace_file(binary, Path(__file__).read_bytes(), 0o755):
+        changed = True
     unit = Path.home() / '.config/systemd/user/groundwork-screen-share.service'
     unit.parent.mkdir(parents=True, exist_ok=True)
-    replace_file(unit, UNIT.encode(), 0o644)
+    if replace_file(unit, UNIT.encode(), 0o644):
+        changed = True
     subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True, timeout=20)
     subprocess.run(['systemctl', '--user', 'enable', 'groundwork-screen-share.service'], check=True, timeout=20)
-    if os.environ.get('WAYLAND_DISPLAY'):
+    # The running service keeps the session when its unit, helper, and
+    # WayVNC config are the same bytes. Restarting here is what drops it.
+    if changed and os.environ.get('WAYLAND_DISPLAY'):
+        print('Restarting screen sharing; an active remote session will drop.')
         subprocess.run(['systemctl', '--user', 'restart', 'groundwork-screen-share.service'], check=True, timeout=20)
     print('Screen sharing enabled for desktop login; it waits for Tailscale sign-in.')
     print('Show its password in a local terminal: groundwork-screen-share password')
@@ -128,13 +137,20 @@ def tailscale_address():
 
 
 def stop_child(child):
-    if child and child.poll() is None:
+    if not child or child.poll() is not None:
+        return
+    # A second SIGTERM must not abandon the wait. WayVNC holds the listener
+    # until it exits, and systemd starts the replacement only after we do.
+    previous = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    try:
         child.terminate()
         try:
             child.wait(timeout=5)
         except subprocess.TimeoutExpired:
             child.kill()
             child.wait(timeout=2)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 # Apple Screen Sharing sends Command as Alt and Option as Super so a Mac
@@ -233,14 +249,38 @@ def wayvnc_environment():
     return environment
 
 
+def bind_listener(listener, address, port=5900, device=b'tailscale0', wait=70, pause=0.25):
+    # An active client leaves this address in TIME_WAIT for about 60s after
+    # the old listener closes. SO_REUSEADDR lets the new socket bind during
+    # that window only when the old socket had the option too. A predecessor
+    # without it makes bind() return EADDRINUSE, and Restart= would exit and
+    # retry every 10s until the tuple expires. Wait in this process instead.
+    # The option still refuses a second live listener on this address.
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, device + b'\0')
+    deadline = time.monotonic() + wait
+    announced = False
+    while True:
+        try:
+            listener.bind((address, port))
+            break
+        except OSError as error:
+            if error.errno != errno.EADDRINUSE or time.monotonic() >= deadline:
+                raise
+            if not announced:
+                print('Screen sharing is waiting for TCP ' + str(port) + ' to be released.',
+                      file=sys.stderr)
+                announced = True
+            time.sleep(pause)
+    listener.listen(16)
+
+
 def start_server(address, runtime):
     # Linux has weak-host routing: binding a Tailscale IP alone does not reject
     # packets routed to it through a LAN interface. Pass an interface-bound
     # listening descriptor to WayVNC instead. Failure never falls back to TCP.
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'tailscale0\0')
-        listener.bind((address, 5900))
-        listener.listen(16)
+        bind_listener(listener, address)
         return subprocess.Popen([
             'wayvnc', '--config=' + str(config_path()),
             '--socket=' + str(runtime / 'control'), '--log-level=error',

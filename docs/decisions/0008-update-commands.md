@@ -21,6 +21,8 @@ applied keyd digest locally. Bare reruns preserve them; explicit setup options
 change choices. A setup saved before the Blip choice existed stays off until
 `--with-blip`. Older installations repeat exclusions once during transition.
 The optional Core reference remains pinned and is never a setup prerequisite.
+Screen sharing restarts only when its unit, helper, or WayVNC config changed.
+The command warns that an active remote session will drop.
 
 An advisory file lock serializes setup and update commands. The apply child
 verifies the exact inherited lock descriptor. Interactive stages receive the
