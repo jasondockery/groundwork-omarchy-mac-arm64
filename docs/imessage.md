@@ -36,8 +36,8 @@ That is off by default. `./install.sh` without the flag, and `./install.sh --wit
 When the preference is on, setup:
 
 1. Installs any missing command from `jq`, `openssh`, `libnotify`, `wl-clipboard`, `xdg-utils`, and `socat` with `omarchy pkg add`.
-2. Installs bun with `omarchy-install-dev-env bun` when `bun` is not already on `PATH`. That is `mise use -g bun@latest`. It does not use bun's curl installer.
-3. Resolves a mise shim with `mise which`, then checks that binary with the same `readelf -lW` LOAD-alignment helper that guards T3 Code. `bun --version` runs only after the check passes. If bun cannot start on this page size, setup stops and links [oven-sh/bun#17627](https://github.com/oven-sh/bun/issues/17627). The widget is not enabled.
+2. When `bun` is not already on `PATH`, runs `mise latest bun`, downloads that release's `bun-linux-aarch64.zip` over https, and verifies it against `SHASUMS256.txt`. It checks the extracted bun ELF with the same `readelf -lW` LOAD-alignment helper that guards T3 Code. If the build cannot be mapped, setup prints [oven-sh/bun#17627](https://github.com/oven-sh/bun/issues/17627) and does not run `omarchy-install-dev-env`. Bun's curl installer is not used. The download is removed with its temporary directory when setup exits.
+3. When that check passes, installs bun with `omarchy-install-dev-env bun` (`mise use -g bun@latest`). It resolves the installed shim with `mise which`, checks that ELF again, and runs `bun --version` only after the check passes. If the installed version is not the release that was checked, setup removes it with `omarchy-remove-dev-env bun` and stops before `bun --version`. An existing `bun` on `PATH` is checked in place and is not downloaded again. The widget is not enabled when the check fails.
 4. In a Hyprland session, runs `omarchy plugin list --json`. If `nixfred.blip` is absent, it runs `omarchy plugin add https://github.com/nixfred/blip.git --enable --yes` once. A second run sees the id and does not add, enable, or remove it. `--enable` places the bar widget. Setup does not edit `~/.config/omarchy/shell.json`.
 5. Prints the next command and stops. It does not run `blip-setup`.
 
@@ -63,7 +63,7 @@ Do these yourself. The installer cannot see the gateway account, and macOS will 
    ~/.config/omarchy/plugins/nixfred.blip/scripts/blip-setup GATEWAY_USER@GATEWAY_MAGICDNS_NAME
    ```
 
-   Replace the placeholder with the gateway account and its MagicDNS name. The wizard reads Enter before the permission check and `y`/`N` for the Inter font. Answer `n` unless you want that font. Leave tapbacks off. With no terminal it stops on purpose: an unanswered Automation prompt is stored as a denial. `printf '\nn\n' | blip-setup …` is only for a later re-run, after the grants are already confirmed.
+   Replace the placeholder with the gateway account and its MagicDNS name. The wizard reads Enter before the permission check and `y`/`N` for the Inter font. Answer `n` unless you want that font. Leave tapbacks off. With no terminal, blip-setup stops before the Automation check, because an unanswered prompt would be recorded as a denial. `printf '\nn\n' | blip-setup …` is only for a later re-run, after the grants are already confirmed.
 
 4. While the wizard waits, at the gateway Mac:
    - Full Disk Access: add `/usr/libexec/sshd-keygen-wrapper` (⌘⇧G in the file picker).
@@ -86,13 +86,13 @@ ssh GATEWAY_USER@GATEWAY_MAGICDNS_NAME 'python3 "$HOME/.blip/bin/blip-check"'
 
 `blip-check` should be all green. Do not pass `--markread` unless you are at the Mac and want that prompt. Send a message to your own number and confirm it arrives.
 
-The confined key must refuse a shell:
+The confined key must answer the bridge and refuse a shell. Use the same options `blip-setup` uses:
 
 ```bash
-ssh -i ~/.ssh/blip_ed25519 -o IdentityAgent=none GATEWAY_USER@GATEWAY_MAGICDNS_NAME true
+ssh -n -i ~/.ssh/blip_ed25519 -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes -o ControlPath=none GATEWAY_USER@GATEWAY_MAGICDNS_NAME ping
 ```
 
-That command fails. That is the expected result.
+That command prints `pong`. The same command with `true` in place of `ping` fails.
 
 Package presence, a saved `blip: true`, and a green fixture do not prove the grants, the bar, or a message round-trip. Those stay first-run acceptance. `docs/status.md` is updated only after that acceptance.
 
@@ -113,7 +113,7 @@ If the diff touches `bridge/`, `update-all` reminds you to re-run `blip-setup`. 
 `--without-blip` does not uninstall Blip. Upstream's removal steps are [Removing Blip](https://github.com/nixfred/blip#removing-blip). In short, the pieces are:
 
 1. The plugin and bar widget: `omarchy plugin remove nixfred.blip --yes`, then `omarchy-restart-shell`. `omarchy plugin disable nixfred.blip` takes it off the bar and keeps the checkout.
-2. The `~/bin` shims (`imsg`, `imsg-send`, `imsg-read`, `imsg-react`, `contacts`, `contact-save`), plus any `.pre-blip` backups you want to restore.
+2. The `~/bin` shims (`imsg`, `imsg-send`, `imsg-read`, `imsg-react`, `contacts`, `contact-save`, and `~/bin/blip-bridged`). Backups are named `<tool>.pre-blip.<epoch>`. Restore any of those you still want.
 3. `~/.config/blip`, `~/.local/state/blip`, `~/.cache/blip`, and the runtime directory under `$XDG_RUNTIME_DIR/blip`. The attachment cache holds real media.
 4. `~/.ssh/blip_ed25519` and its `.pub`. A ControlMaster `Host` block in `~/.ssh/config` is optional to delete.
 5. On the gateway, `~/.blip` and the single `authorized_keys` line that runs `blip-dispatch`. The everyday key stays.

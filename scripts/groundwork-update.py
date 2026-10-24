@@ -18,6 +18,7 @@ import tempfile
 import time
 import urllib.request
 import uuid
+import zipfile
 
 MARKER = '# Groundwork Omarchy updater'
 CONFIG = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config')) / 'groundwork/omarchy.json'
@@ -31,6 +32,7 @@ T3_INSTALLER = 'https://t3.codes/install.sh'
 # Bun on non-4 KiB aarch64 pages is unproven upstream (oven-sh/bun#17627).
 BUN_PAGE_SIZE_ISSUE = 'oven-sh/bun#17627'
 BUN_PAGE_SIZE_URL = 'https://github.com/oven-sh/bun/issues/17627'
+BUN_LINUX_ARCHIVE = 'bun-linux-aarch64.zip'
 BLIP_ID = 'nixfred.blip'
 # Last nightly whose ELF files all load on 16 KiB pages (pingdotgg/t3code#23433).
 T3_KNOWN_GOOD_LARGE_PAGE = '0.1.2-nightly.20261021.3499'
@@ -391,6 +393,48 @@ def load_alignments(binary):
         if fields[:1] == ['LOAD']:
             alignments.append(int(fields[-1], 16))
     return alignments
+
+
+def verified_bun_executable(directory):
+    """Verify bun-linux-aarch64.zip against SHASUMS256.txt and return its bun ELF.
+
+    The archive stays in `directory`. The ELF is written to `directory/bun`.
+    Members that escape the archive, and symlink entries named bun, are refused.
+    """
+    directory = Path(directory)
+    archive = directory / BUN_LINUX_ARCHIVE
+    sums = directory / 'SHASUMS256.txt'
+    if not archive.is_file() or archive.is_symlink() or not sums.is_file() or sums.is_symlink():
+        raise UpdateError('The bun release download is incomplete.')
+    expected = None
+    for line in sums.read_text().splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[1].lstrip('*') == BUN_LINUX_ARCHIVE:
+            expected = fields[0].lower()
+            break
+    if expected is None or len(expected) != 64 or any(character not in '0123456789abcdef' for character in expected):
+        raise UpdateError(f'{BUN_LINUX_ARCHIVE} is not listed in SHASUMS256.txt.')
+    if hashlib.sha256(archive.read_bytes()).hexdigest() != expected:
+        raise UpdateError(f'Checksum mismatch for {BUN_LINUX_ARCHIVE}.')
+    destination = directory / 'bun'
+    with zipfile.ZipFile(archive) as bundle:
+        chosen = None
+        for info in bundle.infolist():
+            name = Path(info.filename)
+            if name.is_absolute() or '..' in name.parts:
+                raise UpdateError(f'Refusing a path in {BUN_LINUX_ARCHIVE}: {info.filename}')
+            mode = info.external_attr >> 16
+            if name.name != 'bun' or info.is_dir() or (mode & 0o170000) == 0o120000:
+                continue
+            if chosen is not None:
+                raise UpdateError(f'{BUN_LINUX_ARCHIVE} has more than one bun executable.')
+            chosen = info
+        if chosen is None:
+            raise UpdateError(f'{BUN_LINUX_ARCHIVE} has no bun executable.')
+        with bundle.open(chosen) as source, destination.open('wb') as output:
+            shutil.copyfileobj(source, output)
+    os.chmod(destination, 0o755)
+    return destination
 
 
 def bun_alignment_problem(binary):
@@ -768,6 +812,9 @@ def main(args):
         if problem:
             print(problem, file=sys.stderr)
             return 1
+        return 0
+    if args and args[0] == 'verify-bun-archive' and len(args) == 2:
+        print(verified_bun_executable(args[1]))
         return 0
     if args and args[0] == 'plugin-listed' and len(args) == 2:
         try:

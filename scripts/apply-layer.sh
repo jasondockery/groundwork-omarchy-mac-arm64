@@ -123,6 +123,7 @@ extension_source="$root/chromium/extensions/$bitwarden_extension"
 # refreshed until this script exits so Tailscale, the browser extension, and
 # keyd do not each stop for a password. Nothing is installed if this fails.
 t3_installer=""
+bun_preview_dir=""
 sudo_keepalive_pid=""
 stop_sudo_keepalive() {
   if [[ -n "${sudo_keepalive_pid}" ]]; then
@@ -135,6 +136,10 @@ cleanup() {
   stop_sudo_keepalive
   if [[ -n "${t3_installer}" ]]; then
     rm -f "$t3_installer"
+  fi
+  if [[ -n ${bun_preview_dir} ]]; then
+    rm -rf -- "$bun_preview_dir"
+    bun_preview_dir=""
   fi
 }
 trap cleanup EXIT
@@ -567,8 +572,64 @@ fi
 # One block on purpose, so it can move into the shared plugin list once that
 # list supports git-URL sources and per-entry opt-in. This is not a second
 # plugin installer: Omarchy's own plugin commands do the add and the enable.
+# mise's bun install runs `bun -v` while it verifies the download. Fetch the
+# release `mise latest` names, over https only, and refuse before that install
+# when this kernel cannot map the ELF (oven-sh/bun#17627).
+preview_bun_release() {
+  local version base extracted preview=$1
+  if [[ -z $preview || ! -d $preview ]]; then
+    echo "The bun release preview directory is missing. Blip was not enabled." >&2
+    return 1
+  fi
+  if ! command -v mise >/dev/null; then
+    echo "mise is unavailable, so bun cannot be checked before install. Blip was not enabled." >&2
+    return 1
+  fi
+  if ! version=$(timeout --kill-after=2s 60 mise latest bun); then
+    echo "mise latest bun failed, so Blip was not enabled." >&2
+    return 1
+  fi
+  version=${version//$'\r'/}
+  read -r version <<<"$version"
+  if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z]+)*$ ]]; then
+    printf 'mise latest bun returned an unexpected version (%s). Blip was not enabled.\n' "$version" >&2
+    return 1
+  fi
+  base="https://github.com/oven-sh/bun/releases/download/bun-v${version}"
+  case "$base" in
+    https://github.com/oven-sh/bun/releases/download/bun-v*) ;;
+    *)
+      echo "Refusing a bun download that is not the https GitHub release. Blip was not enabled." >&2
+      return 1
+      ;;
+  esac
+  if ! curl --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 10 --max-time 60 \
+      -fsSL "${base}/SHASUMS256.txt" -o "${preview}/SHASUMS256.txt"; then
+    echo "Could not download the bun checksums over https. Blip was not enabled." >&2
+    return 1
+  fi
+  if ! curl --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 10 --max-time 180 \
+      -fsSL "${base}/bun-linux-aarch64.zip" -o "${preview}/bun-linux-aarch64.zip"; then
+    echo "Could not download bun-linux-aarch64.zip over https. Blip was not enabled." >&2
+    return 1
+  fi
+  if ! extracted=$(python3 "$root/scripts/groundwork-update.py" verify-bun-archive "$preview"); then
+    echo "The bun release failed verification. Blip was not enabled." >&2
+    return 1
+  fi
+  if [[ ! -f $extracted ]]; then
+    echo "The bun release archive has no bun executable. Blip was not enabled." >&2
+    return 1
+  fi
+  # Same readelf -lW helper as T3. Failure already printed oven-sh/bun#17627.
+  if ! python3 "$root/scripts/groundwork-update.py" check-load-alignment "$extracted"; then
+    return 1
+  fi
+  printf '%s\n' "$version"
+}
 install_blip() {
   local package executable pair bun_bin resolved listed list_status added
+  local checked_version installed_version installed_bun
   local blip_id=nixfred.blip
   local blip_url=https://github.com/nixfred/blip.git
   local -a packages=(jq:jq openssh:ssh libnotify:notify-send wl-clipboard:wl-copy xdg-utils:xdg-open socat:socat)
@@ -586,13 +647,59 @@ install_blip() {
       echo "omarchy-install-dev-env is unavailable, so bun cannot be installed for Blip. Blip was not enabled." >&2
       exit 1
     fi
-    # Omarchy's dev-env command runs `mise use -g bun@latest`. Do not use bun's curl installer.
+    # Omarchy's dev-env command runs `mise use -g bun@latest`, and mise then runs
+    # `bun -v`. Do not use bun's curl installer. The preview above is the gate.
+    # Create the directory here: preview_bun_release runs in a command substitution.
+    if ! bun_preview_dir=$(mktemp -d); then
+      echo "Could not create a temporary directory for the bun release. Blip was not enabled." >&2
+      exit 1
+    fi
+    if ! checked_version=$(preview_bun_release "$bun_preview_dir"); then
+      exit 1
+    fi
     omarchy-install-dev-env bun
     hash -r
-  fi
-  if ! command -v bun >/dev/null; then
-    echo "bun is still unavailable after omarchy-install-dev-env bun. Blip was not enabled." >&2
-    exit 1
+    if ! command -v bun >/dev/null; then
+      echo "bun is still unavailable after omarchy-install-dev-env bun. Blip was not enabled." >&2
+      exit 1
+    fi
+    if ! installed_bun=$(timeout --kill-after=2s 15 mise which bun); then
+      echo "mise could not resolve the bun shim after install. Blip was not enabled." >&2
+      exit 1
+    fi
+    if [[ -z $installed_bun || ! -x $installed_bun ]]; then
+      echo "The resolved bun binary is not executable: ${installed_bun:-missing}. Blip was not enabled." >&2
+      exit 1
+    fi
+    if ! python3 "$root/scripts/groundwork-update.py" check-load-alignment "$installed_bun"; then
+      exit 1
+    fi
+    # Prefer the version in mise's install path. `mise current` is the fallback
+    # when that path does not name a release.
+    installed_version=""
+    case "$installed_bun" in
+      */installs/bun/*/bin/bun)
+        installed_version=${installed_bun%/bin/bun}
+        installed_version=${installed_version##*/}
+        ;;
+    esac
+    if [[ ! $installed_version =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z]+)*$ ]]; then
+      if ! installed_version=$(timeout --kill-after=2s 15 mise current bun); then
+        installed_version=""
+      fi
+      installed_version=${installed_version//$'\r'/}
+      read -r installed_version <<<"${installed_version}"
+    fi
+    if [[ $installed_version != "$checked_version" ]]; then
+      if ! command -v omarchy-remove-dev-env >/dev/null || ! omarchy-remove-dev-env bun; then
+        printf 'Installed bun (%s) is not the checked release %s, and it could not be removed. bun --version was not run. Blip was not enabled.\n' \
+          "${installed_version:-unknown}" "$checked_version" >&2
+        exit 1
+      fi
+      printf 'Installed bun (%s) is not the checked release %s. It was removed before bun --version. Blip was not enabled.\n' \
+        "${installed_version:-unknown}" "$checked_version" >&2
+      exit 1
+    fi
   fi
   bun_bin=$(command -v bun)
   resolved=$bun_bin

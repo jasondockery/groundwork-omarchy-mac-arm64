@@ -1,4 +1,5 @@
 """Blip preference, plugin-list parsing, and the shared bun alignment check."""
+import hashlib
 import importlib.util
 import io
 import json
@@ -7,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from contextlib import redirect_stdout
 from unittest.mock import patch
 
@@ -47,6 +49,43 @@ class BunAlignmentTests(unittest.TestCase):
             problem = updater.bun_alignment_problem('/usr/bin/bun')
         self.assertIn('readelf is missing', problem)
         self.assertIn('oven-sh/bun#17627', problem)
+
+
+class BunArchiveTests(unittest.TestCase):
+    def archive(self, directory, member='bun-linux-aarch64/bun', payload=b'\x7fELFfixture', name='bun-linux-aarch64.zip'):
+        path = directory / 'bun-linux-aarch64.zip'
+        with zipfile.ZipFile(path, 'w') as bundle:
+            bundle.writestr(member, payload)
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        (directory / 'SHASUMS256.txt').write_text(f'{digest}  {name}\n')
+        return path
+
+    def test_matching_checksum_extracts_the_bun_elf(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            self.archive(directory)
+            extracted = updater.verified_bun_executable(directory)
+            self.assertEqual(extracted, directory / 'bun')
+            self.assertEqual(extracted.read_bytes(), b'\x7fELFfixture')
+            self.assertTrue(extracted.stat().st_mode & 0o111)
+
+    def test_checksum_mismatch_is_refused(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            self.archive(directory, name='other.zip')
+            with self.assertRaisesRegex(updater.UpdateError, 'not listed in SHASUMS256.txt'):
+                updater.verified_bun_executable(directory)
+            (directory / 'SHASUMS256.txt').write_text(f'{"0" * 64}  bun-linux-aarch64.zip\n')
+            with self.assertRaisesRegex(updater.UpdateError, 'Checksum mismatch'):
+                updater.verified_bun_executable(directory)
+
+    def test_archive_paths_that_escape_are_refused(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            self.archive(directory, member='../bun')
+            with self.assertRaisesRegex(updater.UpdateError, 'Refusing a path'):
+                updater.verified_bun_executable(directory)
+            self.assertFalse((directory.parent / 'bun').exists())
 
 
 class BlipPreferenceTests(unittest.TestCase):
