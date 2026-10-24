@@ -154,7 +154,7 @@ class UpdateTests(unittest.TestCase):
         if args[:2] == ['readelf', '-lW']:
             return self.readelf.get(Path(args[2]).name, READELF_GOOD)
         if args[:3] == ['flatpak', '--user', 'list']:
-            return 'com.bitwarden.desktop\norg.example.Unowned'
+            return 'com.bitwarden.desktop\nio.freetubeapp.FreeTube\norg.example.Unowned'
         if args == ['omarchy', 'plugin', 'list', '--json']:
             if self.blip_listed:
                 return '[{"id": "nixfred.blip", "enabled": true}]'
@@ -209,6 +209,7 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(self.machine_calls[0], ['omarchy', 'update'])
         self.assertIn(['t3', 'update', '--channel', 'nightly', '--yes'], self.machine_calls)
         self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], self.machine_calls)
+        self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'io.freetubeapp.FreeTube'], self.machine_calls)
         self.assertNotIn('org.example.Unowned', str(self.machine_calls))
         self.assertFalse(any(call[:2] == ['omarchy', 'plugin'] for call in self.machine_calls))
 
@@ -349,6 +350,7 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
         receipt = json.loads((self.state / 'update-all-last-success.json').read_text())
         self.assertEqual(receipt['result'], result)
         self.assertIn('Bitwarden user Flatpak update command completed', receipt['completed'])
+        self.assertIn('FreeTube user Flatpak update command completed', receipt['completed'])
         return output.getvalue() + errors.getvalue(), receipt
 
     def installer_versions(self):
@@ -461,6 +463,7 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
         receipt = json.loads((self.state / 'update-all-last-success.json').read_text())
         self.assertEqual(receipt['result'], 'completed_with_warnings')
         self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], self.machine_calls)
+        self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'io.freetubeapp.FreeTube'], self.machine_calls)
 
     def test_successful_update_all_exits_zero(self):
         with patch('sys.stdout', new_callable=io.StringIO):

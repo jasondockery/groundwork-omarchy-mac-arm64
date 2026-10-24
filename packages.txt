@@ -1,5 +1,5 @@
 # Optional aarch64 packages. Not part of the Omarchy Mac install. The normal
-# ./install.sh setup installs Herdr, Tailscale, keyd, Obsidian, and Bitwarden;
+# ./install.sh setup installs Herdr, Tailscale, keyd, Obsidian, Bitwarden, and FreeTube;
 # its desktop uses Flathub on ARM when a native app is absent. See docs/apps.md.
 # T3 Code Nightly uses its official
 # checksum-verifying ARM64 CLI installer because the community Arch package is

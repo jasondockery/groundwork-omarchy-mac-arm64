@@ -176,7 +176,9 @@ privileged_changes_needed() {
   for executable in cursor herdr tailscale obsidian bw readelf; do
     command -v "$executable" >/dev/null || return 0
   done
-  if ! command -v bitwarden >/dev/null && ! command -v flatpak >/dev/null; then
+  # FreeTube is a user Flatpak, so a missing flatpak package still needs
+  # administrator permission even when a native Bitwarden desktop is present.
+  if ! command -v flatpak >/dev/null; then
     return 0
   fi
   service_ready tailscaled || return 0
@@ -426,16 +428,35 @@ fi
 # desktop package is absent from the current ARM feed; use its ARM64 Flathub
 # distribution unless a native desktop app is already available. Sign-in
 # remains user-owned, with no vault export in this repo.
+# FreeTube is the same kind of gap. Checked 2026-10-24: freetube is absent
+# from Arch Linux, Arch Linux ARM, pkgs.omarchy.org/edge/aarch64, and ALARM's
+# prebuilt aur database. AUR freetube-bin is a PKGBUILD, and omarchy pkg add
+# is pacman-only. Flathub io.freetubeapp.FreeTube unpacks upstream's
+# linux-arm64 portable zip (FreeTube 0.25.3-beta, Electron 42.5.2). Every ELF
+# in that zip has LOAD alignment 0x10000, which maps on 16 KiB pages, so the
+# T3/bun load_alignments rejection does not apply. Settings stay upstream.
+flathub_ready=0
+ensure_user_flatpak() {
+  local app=$1
+  if command -v flatpak >/dev/null && flatpak --user info "$app" >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ $flathub_ready -eq 0 ]]; then
+    install_package flatpak
+    flatpak --user remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+    flathub_ready=1
+  fi
+  if ! flatpak --user info "$app" >/dev/null 2>&1; then
+    flatpak --user install --noninteractive flathub "$app"
+  fi
+  flatpak --user info "$app" >/dev/null
+}
 install_package obsidian
 install_package bitwarden-cli bw
 if ! command -v bitwarden >/dev/null; then
-  install_package flatpak
-  flatpak --user remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-  if ! flatpak --user info com.bitwarden.desktop >/dev/null 2>&1; then
-    flatpak --user install --noninteractive flathub com.bitwarden.desktop
-  fi
-  flatpak --user info com.bitwarden.desktop >/dev/null
+  ensure_user_flatpak com.bitwarden.desktop
 fi
+ensure_user_flatpak io.freetubeapp.FreeTube
 
 # Use the same external-extension mechanism as Omarchy's 1Password service.
 # Chromium fetches and updates the official Web Store extension per profile;
@@ -783,7 +804,7 @@ if [[ $updating -eq 1 ]]; then
   echo "Groundwork settings applied. Saved keyd, screen-sharing, Blip, and vault choices were preserved."
   exit 0
 fi
-echo "Trackpad configuration, T3 Code, Herdr, Tailscale, Obsidian, and Bitwarden are installed."
+echo "Trackpad configuration, T3 Code, Herdr, Tailscale, Obsidian, Bitwarden, and FreeTube are installed."
 echo "Next time, run update-all for maintenance or groundwork-update for configuration only."
 echo "Open Obsidian with Super+Shift+O; finish vault, sync, and Bitwarden sign-in using docs/apps.md."
 echo "Remote access still requires your sign-in and tailnet policy; see docs/remote-access.md."

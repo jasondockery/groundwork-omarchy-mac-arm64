@@ -176,12 +176,18 @@ chmod +x "$bin_dir/t3"
 exit "${FIXTURE_INSTALL_STATUS:-0}"
 """)
 elif name == 'flatpak':
+    app = next((arg for arg in reversed(args) if '.' in arg and not arg.startswith('-')), '')
+    marker = {
+        'com.bitwarden.desktop': root / 'bitwarden-flatpak',
+        'io.freetubeapp.FreeTube': root / 'freetube-flatpak',
+    }.get(app)
     if 'info' in args:
-        sys.exit(0 if (root / 'bitwarden-flatpak').exists() else 1)
+        sys.exit(0 if marker is not None and marker.exists() else 1)
     if 'install' in args:
-        status = int(os.environ.get('FIXTURE_FLATPAK_STATUS', '0'))
-        if not status:
-            (root / 'bitwarden-flatpak').touch()
+        status_var = 'FIXTURE_FREETUBE_FLATPAK_STATUS' if app == 'io.freetubeapp.FreeTube' else 'FIXTURE_FLATPAK_STATUS'
+        status = int(os.environ.get(status_var, '0'))
+        if not status and marker is not None:
+            marker.touch()
         sys.exit(status)
 elif name == 'systemctl':
     if args[:1] in (['is-enabled'], ['is-active']):
@@ -556,6 +562,8 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertIn(['omarchy', 'pkg', 'add', 'obsidian'], calls)
         self.assertIn(['omarchy', 'pkg', 'add', 'bitwarden-cli'], calls)
         self.assertTrue((self.root / 'bitwarden-flatpak').exists())
+        self.assertTrue((self.root / 'freetube-flatpak').exists())
+        self.assertIn(['flatpak', '--user', 'install', '--noninteractive', 'flathub', 'io.freetubeapp.FreeTube'], calls)
         settings = self.root / 'home/Documents/Obsidian/my_obsidian_vault/.obsidian/app.json'
         self.assertEqual(json.loads(settings.read_text()), {'vimMode': True})
         self.assertIn(['sudo', 'systemctl', 'enable', '--now', 'tailscaled'], calls)
@@ -591,11 +599,15 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertFalse(self.config.with_name('default.conf.~2~').exists())
         self.assertEqual(self.calls().count(['sudo', 'keyd', 'reload']), 2)
 
-    def test_existing_native_bitwarden_avoids_flatpak(self):
+    def test_existing_native_bitwarden_avoids_its_flatpak_and_still_installs_freetube(self):
         (self.bin / 'bitwarden').symlink_to(self.bin / 'stub')
         self.run_install()
-        self.assertFalse(any(call[0] == 'flatpak' for call in self.calls()))
-        self.assertNotIn(['omarchy', 'pkg', 'add', 'flatpak'], self.calls())
+        calls = self.calls()
+        self.assertNotIn(['flatpak', '--user', 'install', '--noninteractive', 'flathub', 'com.bitwarden.desktop'], calls)
+        self.assertFalse((self.root / 'bitwarden-flatpak').exists())
+        self.assertIn(['flatpak', '--user', 'install', '--noninteractive', 'flathub', 'io.freetubeapp.FreeTube'], calls)
+        self.assertTrue((self.root / 'freetube-flatpak').exists())
+        self.assertEqual(calls.count(['omarchy', 'pkg', 'add', 'flatpak']), 1)
 
     def test_chromium_directories_are_readable_with_private_umask_and_on_rerun(self):
         directory = self.root / 'usr/share/chromium/extensions'
@@ -645,8 +657,10 @@ raise SystemExit(os.WEXITSTATUS(status))
 
     def test_existing_flatpak_is_reused_without_install(self):
         (self.root / 'bitwarden-flatpak').touch()
+        (self.root / 'freetube-flatpak').touch()
         self.run_install()
         self.assertFalse(any(call[0] == 'flatpak' and 'install' in call for call in self.calls()))
+        self.assertNotIn(['omarchy', 'pkg', 'add', 'flatpak'], self.calls())
 
     def test_failed_bitwarden_install_stops_before_configuration(self):
         self.env['FIXTURE_FLATPAK_STATUS'] = '1'
@@ -654,6 +668,29 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertNotIn('are installed.', result.stdout)
         self.assertFalse(any(call[0] in ('stow', 'hyprctl') for call in self.calls()))
         self.assertFalse(self.config.exists())
+
+    def test_failed_freetube_install_stops_before_configuration(self):
+        (self.root / 'bitwarden-flatpak').touch()
+        self.env['FIXTURE_FREETUBE_FLATPAK_STATUS'] = '1'
+        result = self.run_install(success=False)
+        self.assertIn(['flatpak', '--user', 'install', '--noninteractive', 'flathub', 'io.freetubeapp.FreeTube'], self.calls())
+        self.assertNotIn('are installed.', result.stdout)
+        self.assertFalse(any(call[0] in ('stow', 'hyprctl') for call in self.calls()))
+        self.assertFalse(self.config.exists())
+
+    def test_update_installs_missing_freetube_once(self):
+        self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
+        (self.root / 'freetube-flatpak').unlink()
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        install = ['flatpak', '--user', 'install', '--noninteractive', 'flathub', 'io.freetubeapp.FreeTube']
+        self.assertEqual(self.calls().count(install), 1)
+        self.assertNotIn(['flatpak', '--user', 'install', '--noninteractive', 'flathub', 'com.bitwarden.desktop'], self.calls())
+        self.assertFalse(any(call[0] == 'sudo' for call in self.calls()))
+        (self.root / 'calls.jsonl').unlink()
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn(install, self.calls())
 
     def test_existing_obsidian_settings_and_custom_path_are_preserved(self):
         vault = self.root / 'home/Notes'

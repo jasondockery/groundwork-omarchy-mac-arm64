@@ -1,6 +1,6 @@
 # Desktop apps and personal notes
 
-`./install.sh` ensures Obsidian, the Bitwarden CLI (`bw`), and the Bitwarden desktop app are available alongside T3 Code Nightly, Herdr, and Tailscale. It registers the official Bitwarden extension for installed Chromium. Omarchy (`omacom/omarchy` `quattro`) continues to own desktop bindings and application updates, including the Qt 6.12 palette fix [omarchy#14553](https://github.com/omacom/omarchy/pull/14553) on this path. Account sign-in, extension approval, and sync enrollment stay local to each user.
+`./install.sh` ensures Obsidian, the Bitwarden CLI (`bw`), the Bitwarden desktop app, and FreeTube are available alongside T3 Code Nightly, Herdr, and Tailscale. It registers the official Bitwarden extension for installed Chromium. Omarchy (`omacom/omarchy` `quattro`) continues to own desktop bindings and application updates, including the Qt 6.12 palette fix [omarchy#14553](https://github.com/omacom/omarchy/pull/14553) on this path. Account sign-in, extension approval, and sync enrollment stay local to each user.
 
 ## Bitwarden
 
@@ -27,6 +27,22 @@ flatpak --user update
 Rerunning this layer reuses an installed desktop app. If its installation fails, resolve that error and rerun; the installer stops before changing input settings. If its launcher is missing immediately after installing Flatpak for the first time, log out and back in to refresh desktop application discovery.
 
 To remove the layer-installed Flatpak, use `flatpak --user uninstall com.bitwarden.desktop`. Keep its local data unless you deliberately choose to remove it after checking account recovery. The shared Flathub remote and Flatpak runtime may serve other apps; leave those in place. Native apps and browser extensions are removed through their own package/browser controls.
+
+## FreeTube
+
+FreeTube is a private YouTube desktop client with no Google sign-in. Subscriptions, history, and playlists stay on this machine. Setup installs it by default and leaves its settings at the upstream defaults.
+
+Arch Linux, Arch Linux ARM, the Omarchy edge feed (`pkgs.omarchy.org/edge/aarch64`), and ALARM's prebuilt `aur` database have no `freetube` package (checked 2026-10-24). `omarchy pkg add` is pacman-only, so the AUR `freetube-bin` PKGBUILD is outside this installer. This layer installs the [Flathub app](https://flathub.org/apps/io.freetubeapp.FreeTube) `io.freetubeapp.FreeTube`, which publishes an aarch64 build. That build unpacks FreeTube's official `freetube-0.25.3-beta-linux-arm64-portable.zip` (SHA-256 `2416b0ce365b4bea0caf3d17b177ac134c9d9a627a4a97bac01afaca2c1c681e`). The bundle is Electron 42.5.2. Every ELF file in it (`freetube`, `chrome-sandbox`, `chrome_crashpad_handler`, and the bundled `lib*.so`) has LOAD alignment `0x10000`, so the kernel can map it on this machine's 16 KiB pages. Electron 42 includes the 16 KiB page fixes from Electron 34.3.0. The T3 and bun `load_alignments` rejection is for a build whose LOAD alignment is below the page size; this FreeTube build is above that line.
+
+Launch **FreeTube** from `Super+Space`, or run `flatpak run io.freetubeapp.FreeTube`. Its data directory is:
+
+```text
+~/.var/app/io.freetubeapp.FreeTube/config/FreeTube
+```
+
+That is the Flatpak path from [FreeTube's data-location guide](https://docs.freetubeapp.io/usage/data-location/). `profiles.db`, `settings.db`, `playlists.db`, and `history.db` live there. Setup leaves that directory to FreeTube. Cross-machine sync of it is a separate task.
+
+`update-all` updates this user Flatpak when it is installed. To remove the app, run `flatpak --user uninstall io.freetubeapp.FreeTube`. Leave the data directory in place unless you mean to delete subscriptions and history.
 
 ## Obsidian and the Markdown folder
 
