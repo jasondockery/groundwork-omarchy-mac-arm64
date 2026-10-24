@@ -133,10 +133,47 @@ def served_config_changed(path):
     return recorded != hashlib.sha256(read_config_bytes(path)).hexdigest()
 
 
+def restart_marker_path():
+    root = os.environ.get('XDG_RUNTIME_DIR')
+    if not root:
+        return None
+    return Path(root) / 'groundwork-screen-share' / 'restart-needed'
+
+
+def restart_is_pending():
+    path = restart_marker_path()
+    if path is None:
+        return False
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return False
+    with os.fdopen(fd, 'rb') as source:
+        info = os.fstat(source.fileno())
+        return stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+
+
+def mark_restart_needed():
+    path = restart_marker_path()
+    if path is None:
+        return
+    private_directory(path.parent)
+    replace_file(path, b'pending\n', 0o600)
+
+
+def clear_restart_marker():
+    path = restart_marker_path()
+    if path is None or path.is_symlink() or not path.is_file():
+        return
+    path.unlink()
+
+
 def configure():
     path = config_path()
     private_directory(path.parent)
-    changed = False
+    # A failed restart leaves the new helper and unit in place. The marker
+    # is the only record that the running process still has the old ones.
+    changed = restart_is_pending()
     if path.exists() or path.is_symlink():
         read_config(path)
         # A valid hand edit, such as a new password, is still the file WayVNC
@@ -161,7 +198,9 @@ def configure():
     # WayVNC config are the same bytes. Restarting here is what drops it.
     if changed and os.environ.get('WAYLAND_DISPLAY'):
         print('Restarting screen sharing; an active remote session will drop.')
+        mark_restart_needed()
         subprocess.run(['systemctl', '--user', 'restart', 'groundwork-screen-share.service'], check=True, timeout=20)
+        clear_restart_marker()
     print('Screen sharing enabled for desktop login; it waits for Tailscale sign-in.')
     print('Show its password in a local terminal: groundwork-screen-share password')
 
@@ -332,6 +371,9 @@ def start_server(address, runtime):
     # listening descriptor to WayVNC instead. Failure never falls back to TCP.
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         bind_listener(listener, address)
+        # Record the bytes WayVNC is about to load. The copy read when serve()
+        # started can be older than this file.
+        remember_served_config(read_config_bytes(config_path()))
         return subprocess.Popen([
             'wayvnc', '--config=' + str(config_path()),
             '--socket=' + str(runtime / 'control'), '--log-level=error',
@@ -340,12 +382,11 @@ def start_server(address, runtime):
 
 
 def serve():
-    served = read_config_bytes(config_path())
+    read_config(config_path())
     if not os.environ.get('WAYLAND_DISPLAY') or not os.environ.get('XDG_RUNTIME_DIR'):
         raise RuntimeError('A running Wayland desktop is required; sign in locally first.')
     runtime = Path(os.environ['XDG_RUNTIME_DIR']) / 'groundwork-screen-share'
     private_directory(runtime)
-    remember_served_config(served)
     child = None
     active = None
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
