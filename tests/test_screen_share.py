@@ -1,19 +1,41 @@
 """Test private credentials and fail-closed Tailscale listener lifecycle."""
 import ctypes
+import errno
+import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
-from unittest.mock import Mock, patch
+from contextlib import redirect_stderr, redirect_stdout
+from unittest.mock import Mock, call, patch
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'scripts/groundwork-screen-share.py'
+SHOW_ACTIVE_STATE = [
+    'systemctl', 'show', '--user', '-p', 'ActiveState', '--value',
+    'groundwork-screen-share.service',
+]
+
+
+def _tcp_states(address, port):
+    # /proc/net/tcp prints IPv4 addresses little-endian. 06 is TIME_WAIT.
+    token = socket.inet_aton(address)[::-1].hex().upper() + f':{port:04X}'
+    states = []
+    for line in Path('/proc/net/tcp').read_text().splitlines()[1:]:
+        local, _remote, state = line.split()[1:4]
+        if local == token:
+            states.append(state)
+    return states
 spec = importlib.util.spec_from_file_location('screen_share', SCRIPT)
 screen_share = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(screen_share)
@@ -174,13 +196,41 @@ class ScreenShareTests(unittest.TestCase):
         self.home_patch = patch.object(Path, 'home', return_value=self.home)
         self.home_patch.start()
         self.addCleanup(self.home_patch.stop)
+        # served_config_changed reads the process runtime dir, not Path.home.
+        # A desktop's live config.sha256 would otherwise look like a change.
+        self.runtime = self.home / 'runtime'
+        self.runtime.mkdir()
+        self.marker = self.home / '.local/state/groundwork/screen-share-restart-needed'
+        self.runtime_patch = patch.dict(os.environ, {'XDG_RUNTIME_DIR': str(self.runtime)})
+        self.runtime_patch.start()
+        self.addCleanup(self.runtime_patch.stop)
+
+    def _seed_matching_files(self, password='abcdefgh'):
+        config = screen_share.config_path()
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(screen_share.config_text(password))
+        binary = self.home / '.local/bin/groundwork-screen-share'
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_bytes(Path(screen_share.__file__).read_bytes())
+        unit = self.home / '.config/systemd/user/groundwork-screen-share.service'
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        unit.write_text(screen_share.UNIT)
+        return config, unit
+
+    def _commands(self, run):
+        return [call.args[0] for call in run.call_args_list]
 
     def test_configuration_is_private_idempotent_and_automatically_enabled(self):
         with patch.object(screen_share.subprocess, 'run') as run:
             with patch.dict(os.environ, {'WAYLAND_DISPLAY': 'fixture-wayland'}):
-                screen_share.configure()
+                with redirect_stdout(io.StringIO()) as first_out:
+                    screen_share.configure()
                 first = screen_share.config_path().read_bytes()
-                screen_share.configure()
+                first_commands = [call.args[0] for call in run.call_args_list]
+                run.reset_mock()
+                with redirect_stdout(io.StringIO()) as second_out:
+                    screen_share.configure()
+                second_commands = [call.args[0] for call in run.call_args_list]
         config = screen_share.config_path()
         self.assertEqual(first, config.read_bytes())
         self.assertEqual(config.stat().st_mode & 0o777, 0o600)
@@ -190,8 +240,604 @@ class ScreenShareTests(unittest.TestCase):
         unit = (self.home / '.config/systemd/user/groundwork-screen-share.service').read_text()
         self.assertIn('WantedBy=graphical-session.target', unit)
         self.assertIn('PartOf=graphical-session.target', unit)
+        restart = ['systemctl', '--user', 'restart', 'groundwork-screen-share.service']
+        self.assertIn(restart, first_commands)
+        self.assertIn('Restarting screen sharing; an active remote session will drop.',
+                      first_out.getvalue())
+        self.assertNotIn(restart, second_commands)
+        self.assertIn(['systemctl', '--user', 'enable', 'groundwork-screen-share.service'], second_commands)
+        self.assertNotIn('will drop', second_out.getvalue())
+
+    def test_unchanged_unit_helper_and_config_are_not_restarted(self):
+        config = screen_share.config_path()
+        config.parent.mkdir(parents=True)
+        config.write_text(screen_share.config_text('abcdefgh'))
+        binary = self.home / '.local/bin/groundwork-screen-share'
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(Path(screen_share.__file__).read_bytes())
+        unit = self.home / '.config/systemd/user/groundwork-screen-share.service'
+        unit.parent.mkdir(parents=True)
+        unit.write_text(screen_share.UNIT)
+        with patch.object(screen_share.subprocess, 'run') as run:
+            with patch.dict(os.environ, {'WAYLAND_DISPLAY': 'fixture-wayland'}):
+                with redirect_stdout(io.StringIO()) as out:
+                    screen_share.configure()
         commands = [call.args[0] for call in run.call_args_list]
-        self.assertIn(['systemctl', '--user', 'restart', 'groundwork-screen-share.service'], commands)
+        self.assertNotIn(['systemctl', '--user', 'restart', 'groundwork-screen-share.service'], commands)
+        self.assertIn(['systemctl', '--user', 'daemon-reload'], commands)
+        self.assertIn(['systemctl', '--user', 'enable', 'groundwork-screen-share.service'], commands)
+        self.assertNotIn('will drop', out.getvalue())
+        self.assertEqual(config.read_text(), screen_share.config_text('abcdefgh'))
+
+    def test_changed_unit_restarts_and_warns_that_the_session_drops(self):
+        with patch.object(screen_share.subprocess, 'run') as run:
+            with patch.dict(os.environ, {'WAYLAND_DISPLAY': 'fixture-wayland'}):
+                with redirect_stdout(io.StringIO()):
+                    screen_share.configure()
+                unit = self.home / '.config/systemd/user/groundwork-screen-share.service'
+                unit.write_text(screen_share.UNIT.replace('RestartSec=10', 'RestartSec=11'))
+                run.reset_mock()
+                with redirect_stdout(io.StringIO()) as out:
+                    screen_share.configure()
+        self.assertIn(['systemctl', '--user', 'restart', 'groundwork-screen-share.service'],
+                      [call.args[0] for call in run.call_args_list])
+        self.assertIn('Restarting screen sharing; an active remote session will drop.', out.getvalue())
+        self.assertIn('RestartSec=10', unit.read_text())
+
+    def test_deleted_unit_is_rewritten_and_restarted(self):
+        with patch.object(screen_share.subprocess, 'run') as run:
+            with patch.dict(os.environ, {'WAYLAND_DISPLAY': 'fixture-wayland'}):
+                with redirect_stdout(io.StringIO()):
+                    screen_share.configure()
+                unit = self.home / '.config/systemd/user/groundwork-screen-share.service'
+                unit.unlink()
+                run.reset_mock()
+                with redirect_stdout(io.StringIO()) as out:
+                    screen_share.configure()
+        self.assertEqual(unit.read_text(), screen_share.UNIT)
+        self.assertIn(['systemctl', '--user', 'restart', 'groundwork-screen-share.service'],
+                      [call.args[0] for call in run.call_args_list])
+        self.assertIn('Restarting screen sharing; an active remote session will drop.', out.getvalue())
+
+    def test_served_config_stamp_restarts_after_a_valid_password_edit(self):
+        config = screen_share.config_path()
+        config.parent.mkdir(parents=True)
+        config.write_text(screen_share.config_text('abcdefgh'))
+        binary = self.home / '.local/bin/groundwork-screen-share'
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(Path(screen_share.__file__).read_bytes())
+        unit = self.home / '.config/systemd/user/groundwork-screen-share.service'
+        unit.parent.mkdir(parents=True)
+        unit.write_text(screen_share.UNIT)
+        runtime = self.home / 'runtime'
+        restart = ['systemctl', '--user', 'restart', 'groundwork-screen-share.service']
+        with patch.dict(os.environ, {'WAYLAND_DISPLAY': 'fixture-wayland', 'XDG_RUNTIME_DIR': str(runtime)}):
+            screen_share.remember_served_config(config.read_bytes())
+            with patch.object(screen_share.subprocess, 'run') as run:
+                with redirect_stdout(io.StringIO()) as same:
+                    screen_share.configure()
+                same_commands = [call.args[0] for call in run.call_args_list]
+                config.write_text(screen_share.config_text('ijklmnop'))
+                run.reset_mock()
+                with redirect_stdout(io.StringIO()) as edited:
+                    screen_share.configure()
+                edited_commands = [call.args[0] for call in run.call_args_list]
+        self.assertNotIn(restart, same_commands)
+        self.assertNotIn('will drop', same.getvalue())
+        self.assertIn(restart, edited_commands)
+        self.assertIn('Restarting screen sharing; an active remote session will drop.', edited.getvalue())
+        self.assertEqual(config.read_text(), screen_share.config_text('ijklmnop'))
+
+    def test_serve_waits_without_recording_a_config_stamp(self):
+        config = screen_share.config_path()
+        config.parent.mkdir(parents=True)
+        config.write_text(screen_share.config_text('abcdefgh'))
+        with patch.dict(os.environ, {'WAYLAND_DISPLAY': 'fixture-wayland'}):
+            with patch.object(screen_share, 'tailscale_address', return_value=None):
+                with patch.object(screen_share.time, 'sleep', side_effect=KeyboardInterrupt):
+                    with patch.object(screen_share.signal, 'signal'):
+                        with self.assertRaises(KeyboardInterrupt):
+                            screen_share.serve()
+        self.assertFalse((self.runtime / 'groundwork-screen-share' / 'config.sha256').exists())
+
+    def test_config_stamp_is_taken_immediately_before_wayvnc_starts(self):
+        config = screen_share.config_path()
+        config.parent.mkdir(parents=True)
+        config.write_text(screen_share.config_text('abcdefgh'))
+
+        def edit_after_bind(listener, address, port=5900, device=b'tailscale0', wait=70, pause=0.25):
+            config.write_text(screen_share.config_text('ijklmnop'))
+
+        listener = Mock()
+        listener.fileno.return_value = 42
+        with patch.object(screen_share.socket, 'socket') as create:
+            create.return_value.__enter__.return_value = listener
+            with patch.object(screen_share, 'bind_listener', side_effect=edit_after_bind):
+                with patch.object(screen_share, 'tailscale_address', return_value='100.64.0.2'):
+                    with patch.object(screen_share.subprocess, 'Popen', return_value=Mock()) as spawn:
+                        screen_share.start_server('100.64.0.2', self.runtime)
+        stamp = self.runtime / 'groundwork-screen-share' / 'config.sha256'
+        digest = hashlib.sha256(config.read_bytes()).hexdigest()
+        self.assertEqual(stamp.read_text(), digest + '\n')
+        self.assertEqual(stamp.stat().st_mode & 0o777, 0o600)
+        self.assertIn('--config=' + str(config), spawn.call_args.args[0])
+
+    def test_failed_restart_is_retried_after_the_files_match(self):
+        restart = ['systemctl', '--user', 'restart', 'groundwork-screen-share.service']
+        marker = self.marker
+
+        def fail_restart(command, **kwargs):
+            if command == restart:
+                raise subprocess.CalledProcessError(1, command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch.dict(os.environ, {'WAYLAND_DISPLAY': 'fixture-wayland'}):
+            with patch.object(screen_share.subprocess, 'run', side_effect=fail_restart):
+                with redirect_stdout(io.StringIO()):
+                    with self.assertRaises(subprocess.CalledProcessError):
+                        screen_share.configure()
+            self.assertEqual(marker.read_text(), 'pending\n')
+            with patch.object(screen_share.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
+                with redirect_stdout(io.StringIO()) as out:
+                    screen_share.configure()
+        self.assertIn(restart, [call.args[0] for call in run.call_args_list])
+        self.assertIn('Restarting screen sharing; an active remote session will drop.', out.getvalue())
+        self.assertFalse(marker.exists())
+
+    def test_restart_marker_is_recorded_before_daemon_reload(self):
+        marker = self.marker
+        reload = ['systemctl', '--user', 'daemon-reload']
+
+        def fail_reload(command, **kwargs):
+            if command == reload:
+                self.assertEqual(marker.read_text(), 'pending\n')
+                raise subprocess.CalledProcessError(1, command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch.object(screen_share.subprocess, 'run', side_effect=fail_reload) as run:
+            with redirect_stdout(io.StringIO()):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    screen_share.configure()
+        self.assertEqual(marker.read_text(), 'pending\n')
+        self.assertNotIn(['systemctl', '--user', 'restart', 'groundwork-screen-share.service'],
+                         self._commands(run))
+
+    def test_active_service_restarts_without_a_wayland_display(self):
+        self._seed_matching_files()
+        unit = self.home / '.config/systemd/user/groundwork-screen-share.service'
+        unit.write_text(screen_share.UNIT.replace('RestartSec=10', 'RestartSec=11'))
+        marker = self.marker
+        restart = ['systemctl', '--user', 'restart', 'groundwork-screen-share.service']
+        seen = []
+
+        def answer(command, **kwargs):
+            if command == ['systemctl', '--user', 'daemon-reload']:
+                seen.append(marker.read_text())
+            if command == SHOW_ACTIVE_STATE:
+                return subprocess.CompletedProcess(command, 0, stdout='active\n')
+            return subprocess.CompletedProcess(command, 0, stdout='')
+
+        with patch.dict(os.environ):
+            os.environ.pop('WAYLAND_DISPLAY', None)
+            with patch.object(screen_share.subprocess, 'run', side_effect=answer) as run:
+                with redirect_stdout(io.StringIO()) as out:
+                    screen_share.configure()
+        self.assertEqual(seen, ['pending\n'])
+        self.assertIn(SHOW_ACTIVE_STATE, self._commands(run))
+        self.assertIn(restart, self._commands(run))
+        self.assertIn('Restarting screen sharing; an active remote session will drop.', out.getvalue())
+        self.assertFalse(marker.exists())
+
+    def test_inactive_service_drops_the_marker_without_restarting(self):
+        marker = self.marker
+        recorded = []
+
+        def answer(command, **kwargs):
+            if command == ['systemctl', '--user', 'daemon-reload']:
+                recorded.append(marker.read_text())
+            if command == SHOW_ACTIVE_STATE:
+                return subprocess.CompletedProcess(command, 0, stdout='inactive\n')
+            return subprocess.CompletedProcess(command, 0, stdout='')
+
+        with patch.dict(os.environ):
+            os.environ.pop('WAYLAND_DISPLAY', None)
+            with patch.object(screen_share.subprocess, 'run', side_effect=answer) as run:
+                with redirect_stdout(io.StringIO()) as out:
+                    screen_share.configure()
+        self.assertEqual(recorded, ['pending\n'])
+        self.assertNotIn(['systemctl', '--user', 'restart', 'groundwork-screen-share.service'],
+                         self._commands(run))
+        self.assertNotIn('will drop', out.getvalue())
+        self.assertFalse(marker.exists())
+
+    def test_systemctl_error_keeps_the_restart_marker(self):
+        self._seed_matching_files()
+        unit = self.home / '.config/systemd/user/groundwork-screen-share.service'
+        unit.write_text(screen_share.UNIT.replace('RestartSec=10', 'RestartSec=11'))
+        marker = self.marker
+        restart = ['systemctl', '--user', 'restart', 'groundwork-screen-share.service']
+
+        def unknown(command, **kwargs):
+            if command == SHOW_ACTIVE_STATE:
+                return subprocess.CompletedProcess(command, 1, stdout='')
+            return subprocess.CompletedProcess(command, 0, stdout='')
+
+        def active(command, **kwargs):
+            if command == SHOW_ACTIVE_STATE:
+                return subprocess.CompletedProcess(command, 0, stdout='active\n')
+            return subprocess.CompletedProcess(command, 0, stdout='')
+
+        with patch.dict(os.environ):
+            os.environ.pop('WAYLAND_DISPLAY', None)
+            with patch.object(screen_share.subprocess, 'run', side_effect=unknown) as first:
+                with redirect_stdout(io.StringIO()):
+                    screen_share.configure()
+            self.assertEqual(marker.read_text(), 'pending\n')
+            self.assertNotIn(restart, self._commands(first))
+            unit.write_text(screen_share.UNIT)
+            with patch.object(screen_share.subprocess, 'run', side_effect=active) as second:
+                with redirect_stdout(io.StringIO()) as out:
+                    screen_share.configure()
+        self.assertIn(restart, self._commands(second))
+        self.assertIn('Restarting screen sharing; an active remote session will drop.', out.getvalue())
+        self.assertFalse(marker.exists())
+
+    def test_systemctl_oserror_keeps_the_restart_marker(self):
+        marker = self.marker
+
+        def fail(command, **kwargs):
+            if command == SHOW_ACTIVE_STATE:
+                raise OSError('systemctl is unavailable')
+            return subprocess.CompletedProcess(command, 0, stdout='')
+
+        with patch.dict(os.environ):
+            os.environ.pop('WAYLAND_DISPLAY', None)
+            with patch.object(screen_share.subprocess, 'run', side_effect=fail) as run:
+                with redirect_stdout(io.StringIO()) as out:
+                    screen_share.configure()
+        self.assertEqual(marker.read_text(), 'pending\n')
+        self.assertNotIn(['systemctl', '--user', 'restart', 'groundwork-screen-share.service'],
+                         self._commands(run))
+        self.assertNotIn('will drop', out.getvalue())
+
+    def test_home_restart_record_restarts_while_a_runtime_dir_exists(self):
+        self._seed_matching_files()
+        self.marker.parent.mkdir(parents=True)
+        self.marker.write_text('pending\n')
+        restart = ['systemctl', '--user', 'restart', 'groundwork-screen-share.service']
+
+        def active(command, **kwargs):
+            if command == SHOW_ACTIVE_STATE:
+                return subprocess.CompletedProcess(command, 0, stdout='active\n')
+            return subprocess.CompletedProcess(command, 0, stdout='')
+
+        with patch.dict(os.environ):
+            os.environ.pop('WAYLAND_DISPLAY', None)
+            with patch.object(screen_share.subprocess, 'run', side_effect=active) as run:
+                with redirect_stdout(io.StringIO()) as out:
+                    screen_share.configure()
+        self.assertTrue(self.runtime.is_dir())
+        self.assertIn(restart, self._commands(run))
+        self.assertIn('Restarting screen sharing; an active remote session will drop.', out.getvalue())
+        self.assertFalse(self.marker.exists())
+        self.assertFalse((self.runtime / 'groundwork-screen-share' / 'restart-needed').exists())
+
+    def test_failed_unit_is_restarted(self):
+        self._seed_matching_files()
+        self.marker.parent.mkdir(parents=True)
+        self.marker.write_text('pending\n')
+        restart = ['systemctl', '--user', 'restart', 'groundwork-screen-share.service']
+
+        def failed(command, **kwargs):
+            if command == SHOW_ACTIVE_STATE:
+                return subprocess.CompletedProcess(command, 0, stdout='failed\n')
+            return subprocess.CompletedProcess(command, 0, stdout='')
+
+        with patch.dict(os.environ):
+            os.environ.pop('WAYLAND_DISPLAY', None)
+            with patch.object(screen_share.subprocess, 'run', side_effect=failed) as run:
+                with redirect_stdout(io.StringIO()) as out:
+                    screen_share.configure()
+        self.assertIn(restart, self._commands(run))
+        self.assertIn('Restarting screen sharing; an active remote session will drop.', out.getvalue())
+        self.assertFalse(self.marker.exists())
+
+    def test_activating_unit_keeps_the_restart_record(self):
+        self._seed_matching_files()
+        self.marker.parent.mkdir(parents=True)
+        self.marker.write_text('pending\n')
+        restart = ['systemctl', '--user', 'restart', 'groundwork-screen-share.service']
+
+        def activating(command, **kwargs):
+            if command == SHOW_ACTIVE_STATE:
+                return subprocess.CompletedProcess(command, 0, stdout='activating\n')
+            return subprocess.CompletedProcess(command, 0, stdout='')
+
+        with patch.dict(os.environ):
+            os.environ.pop('WAYLAND_DISPLAY', None)
+            with patch.object(screen_share.subprocess, 'run', side_effect=activating) as run:
+                with redirect_stdout(io.StringIO()) as out:
+                    screen_share.configure()
+        self.assertIn(SHOW_ACTIVE_STATE, self._commands(run))
+        self.assertNotIn(restart, self._commands(run))
+        self.assertNotIn('will drop', out.getvalue())
+        self.assertEqual(self.marker.read_text(), 'pending\n')
+
+    def test_deactivating_unit_keeps_the_restart_record(self):
+        self._seed_matching_files()
+        self.marker.parent.mkdir(parents=True)
+        self.marker.write_text('pending\n')
+        restart = ['systemctl', '--user', 'restart', 'groundwork-screen-share.service']
+
+        def deactivating(command, **kwargs):
+            if command == SHOW_ACTIVE_STATE:
+                return subprocess.CompletedProcess(command, 0, stdout='deactivating\n')
+            return subprocess.CompletedProcess(command, 0, stdout='')
+
+        with patch.dict(os.environ):
+            os.environ.pop('WAYLAND_DISPLAY', None)
+            with patch.object(screen_share.subprocess, 'run', side_effect=deactivating) as run:
+                with redirect_stdout(io.StringIO()) as out:
+                    screen_share.configure()
+        self.assertIn(SHOW_ACTIVE_STATE, self._commands(run))
+        self.assertNotIn(restart, self._commands(run))
+        self.assertNotIn('will drop', out.getvalue())
+        self.assertEqual(self.marker.read_text(), 'pending\n')
+
+    def test_reloading_unit_is_restarted(self):
+        self._seed_matching_files()
+        self.marker.parent.mkdir(parents=True)
+        self.marker.write_text('pending\n')
+        restart = ['systemctl', '--user', 'restart', 'groundwork-screen-share.service']
+
+        def reloading(command, **kwargs):
+            if command == SHOW_ACTIVE_STATE:
+                return subprocess.CompletedProcess(command, 0, stdout='reloading\n')
+            return subprocess.CompletedProcess(command, 0, stdout='')
+
+        with patch.dict(os.environ):
+            os.environ.pop('WAYLAND_DISPLAY', None)
+            with patch.object(screen_share.subprocess, 'run', side_effect=reloading) as run:
+                with redirect_stdout(io.StringIO()) as out:
+                    screen_share.configure()
+        self.assertIn(restart, self._commands(run))
+        self.assertIn('Restarting screen sharing; an active remote session will drop.', out.getvalue())
+        self.assertFalse(self.marker.exists())
+
+    def test_failed_unit_restarts_when_nothing_else_changed(self):
+        config, _unit = self._seed_matching_files()
+        screen_share.remember_served_config(config.read_bytes())
+        self.assertFalse(self.marker.exists())
+        restart = ['systemctl', '--user', 'restart', 'groundwork-screen-share.service']
+        stamp = self.runtime / 'groundwork-screen-share' / 'config.sha256'
+        current = stamp.read_text()
+
+        def failed(command, **kwargs):
+            if command == ['systemctl', '--user', 'daemon-reload']:
+                self.assertFalse(self.marker.exists())
+            if command == SHOW_ACTIVE_STATE:
+                return subprocess.CompletedProcess(command, 0, stdout='failed\n')
+            if command == restart:
+                self.assertEqual(stamp.read_text(), current)
+                self.assertFalse(self.marker.exists())
+            return subprocess.CompletedProcess(command, 0, stdout='')
+
+        with patch.dict(os.environ):
+            os.environ.pop('WAYLAND_DISPLAY', None)
+            with patch.object(screen_share.subprocess, 'run', side_effect=failed) as run:
+                with redirect_stdout(io.StringIO()) as out:
+                    screen_share.configure()
+        self.assertIn(SHOW_ACTIVE_STATE, self._commands(run))
+        self.assertIn(restart, self._commands(run))
+        self.assertIn('Restarting screen sharing; an active remote session will drop.', out.getvalue())
+        self.assertFalse(self.marker.exists())
+        self.assertEqual(stamp.read_text(), current)
+
+        def fail_restart(command, **kwargs):
+            if command == SHOW_ACTIVE_STATE:
+                return subprocess.CompletedProcess(command, 0, stdout='failed\n')
+            if command == restart:
+                raise subprocess.CalledProcessError(1, command)
+            return subprocess.CompletedProcess(command, 0, stdout='')
+
+        with patch.dict(os.environ):
+            os.environ.pop('WAYLAND_DISPLAY', None)
+            with patch.object(screen_share, 'remember_served_config',
+                              wraps=screen_share.remember_served_config) as remember:
+                with patch.object(screen_share.subprocess, 'run', side_effect=fail_restart):
+                    with redirect_stdout(io.StringIO()):
+                        with self.assertRaises(subprocess.CalledProcessError):
+                            screen_share.configure()
+        remember.assert_not_called()
+        self.assertFalse(self.marker.exists())
+        self.assertEqual(stamp.read_text(), current)
+
+    def test_restart_record_is_written_before_helper_or_unit_bytes_change(self):
+        _config, unit = self._seed_matching_files()
+        binary = self.home / '.local/bin/groundwork-screen-share'
+        binary.write_bytes(b'previous-helper')
+        previous_unit = screen_share.UNIT.replace('RestartSec=10', 'RestartSec=11')
+        unit.write_text(previous_unit)
+
+        def refuse():
+            self.assertEqual(binary.read_bytes(), b'previous-helper')
+            self.assertEqual(unit.read_text(), previous_unit)
+            raise OSError('restart record unavailable')
+
+        with patch.object(screen_share, 'mark_restart_needed', side_effect=refuse):
+            with patch.object(screen_share.subprocess, 'run') as run:
+                with redirect_stdout(io.StringIO()):
+                    with self.assertRaises(OSError):
+                        screen_share.configure()
+        self.assertEqual(binary.read_bytes(), b'previous-helper')
+        self.assertEqual(unit.read_text(), previous_unit)
+        run.assert_not_called()
+
+    def test_user_runtime_stamp_is_a_config_change_without_xdg_runtime_dir(self):
+        config, _unit = self._seed_matching_files()
+        user_runtime = self.home / 'user-runtime'
+        stamp = user_runtime / 'groundwork-screen-share' / 'config.sha256'
+        stamp.parent.mkdir(parents=True)
+        stamp.write_text(hashlib.sha256(screen_share.config_text('ijklmnop').encode()).hexdigest() + '\n')
+        restart = ['systemctl', '--user', 'restart', 'groundwork-screen-share.service']
+        with patch.dict(os.environ, {'WAYLAND_DISPLAY': 'fixture-wayland'}):
+            os.environ.pop('XDG_RUNTIME_DIR', None)
+            with patch.object(screen_share, 'user_runtime_root', return_value=user_runtime):
+                with patch.object(screen_share.subprocess, 'run',
+                                  return_value=subprocess.CompletedProcess([], 0)) as run:
+                    with redirect_stdout(io.StringIO()) as out:
+                        screen_share.configure()
+        self.assertIn(restart, self._commands(run))
+        self.assertIn('Restarting screen sharing; an active remote session will drop.', out.getvalue())
+        self.assertEqual(config.read_text(), screen_share.config_text('abcdefgh'))
+        self.assertFalse((user_runtime / 'groundwork-screen-share' / 'restart-needed').exists())
+
+    def test_missing_user_runtime_stamp_is_not_a_config_change(self):
+        self._seed_matching_files()
+        user_runtime = self.home / 'user-runtime'
+        user_runtime.mkdir()
+        with patch.dict(os.environ, {'WAYLAND_DISPLAY': 'fixture-wayland'}):
+            os.environ.pop('XDG_RUNTIME_DIR', None)
+            with patch.object(screen_share, 'user_runtime_root', return_value=user_runtime):
+                stamp = screen_share.config_stamp_path()
+                self.assertEqual(stamp, user_runtime / 'groundwork-screen-share' / 'config.sha256')
+                self.assertFalse(stamp.exists())
+                self.assertFalse(screen_share.served_config_changed(screen_share.config_path()))
+                with patch.object(screen_share.subprocess, 'run',
+                                  return_value=subprocess.CompletedProcess([], 0)) as run:
+                    with redirect_stdout(io.StringIO()) as out:
+                        screen_share.configure()
+        self.assertNotIn(['systemctl', '--user', 'restart', 'groundwork-screen-share.service'],
+                         self._commands(run))
+        self.assertNotIn('will drop', out.getvalue())
+        self.assertFalse((user_runtime / 'groundwork-screen-share' / 'config.sha256').exists())
+
+    def test_state_file_marker_is_used_when_no_runtime_dir_is_writable(self):
+        blocked = self.home / 'norun'
+        blocked.mkdir()
+        blocked.chmod(0)
+        self.addCleanup(blocked.chmod, 0o700)
+        xdg = self.home / 'xdg-file'
+        xdg.write_text('not a directory')
+        marker = self.home / '.local/state/groundwork/screen-share-restart-needed'
+
+        def fail_reload(command, **kwargs):
+            if command == ['systemctl', '--user', 'daemon-reload']:
+                self.assertEqual(marker.read_text(), 'pending\n')
+                raise subprocess.CalledProcessError(1, command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch.dict(os.environ, {'XDG_RUNTIME_DIR': str(xdg)}):
+            os.environ.pop('WAYLAND_DISPLAY', None)
+            with patch.object(screen_share, 'user_runtime_root', return_value=blocked / '1000'):
+                self.assertIsNone(screen_share.config_stamp_path())
+                self.assertFalse(screen_share.served_config_changed(screen_share.config_path()))
+                with patch.object(screen_share.subprocess, 'run', side_effect=fail_reload):
+                    with redirect_stdout(io.StringIO()):
+                        with self.assertRaises(subprocess.CalledProcessError):
+                            screen_share.configure()
+        self.assertEqual(marker.read_text(), 'pending\n')
+        self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
+
+    def test_second_apply_after_a_successful_restart_leaves_the_service_running(self):
+        config, _unit = self._seed_matching_files()
+        # The previous process stamped other bytes and has not bound the new file.
+        screen_share.remember_served_config(screen_share.config_text('ijklmnop').encode())
+        fallback = self.home / '.local/state/groundwork/screen-share-restart-needed'
+        fallback.parent.mkdir(parents=True)
+        fallback.write_text('pending\n')
+        restart = ['systemctl', '--user', 'restart', 'groundwork-screen-share.service']
+        stamp = self.runtime / 'groundwork-screen-share' / 'config.sha256'
+        with patch.dict(os.environ, {'WAYLAND_DISPLAY': 'fixture-wayland'}):
+            with patch.object(screen_share.subprocess, 'run',
+                              return_value=subprocess.CompletedProcess([], 0)) as first:
+                with redirect_stdout(io.StringIO()) as first_out:
+                    screen_share.configure()
+            self.assertIn(restart, self._commands(first))
+            self.assertIn('Restarting screen sharing; an active remote session will drop.',
+                          first_out.getvalue())
+            self.assertEqual(stamp.read_text(), hashlib.sha256(config.read_bytes()).hexdigest() + '\n')
+            self.assertFalse(self.marker.exists())
+            self.assertFalse((self.runtime / 'groundwork-screen-share' / 'restart-needed').exists())
+            with patch.object(screen_share.subprocess, 'run',
+                              return_value=subprocess.CompletedProcess([], 0)) as second:
+                with redirect_stdout(io.StringIO()) as second_out:
+                    screen_share.configure()
+        self.assertNotIn(restart, self._commands(second))
+        self.assertNotIn('will drop', second_out.getvalue())
+
+    def test_inactive_apply_records_the_stamp_and_clears_the_home_record(self):
+        config, unit = self._seed_matching_files()
+        screen_share.remember_served_config(screen_share.config_text('ijklmnop').encode())
+        unit.write_text(screen_share.UNIT.replace('RestartSec=10', 'RestartSec=11'))
+        self.marker.parent.mkdir(parents=True)
+        self.marker.write_text('pending\n')
+        restart = ['systemctl', '--user', 'restart', 'groundwork-screen-share.service']
+        stamp = self.runtime / 'groundwork-screen-share' / 'config.sha256'
+
+        def inactive(command, **kwargs):
+            if command == SHOW_ACTIVE_STATE:
+                return subprocess.CompletedProcess(command, 0, stdout='inactive\n')
+            return subprocess.CompletedProcess(command, 0, stdout='')
+
+        with patch.dict(os.environ):
+            os.environ.pop('WAYLAND_DISPLAY', None)
+            with patch.object(screen_share.subprocess, 'run', side_effect=inactive) as run:
+                with redirect_stdout(io.StringIO()) as out:
+                    screen_share.configure()
+        self.assertNotIn(restart, self._commands(run))
+        self.assertNotIn('will drop', out.getvalue())
+        self.assertFalse(self.marker.exists())
+        self.assertFalse((self.runtime / 'groundwork-screen-share' / 'restart-needed').exists())
+        self.assertEqual(stamp.read_text(), hashlib.sha256(config.read_bytes()).hexdigest() + '\n')
+        blocked = self.home / 'norun'
+        blocked.mkdir()
+        blocked.chmod(0)
+        self.addCleanup(blocked.chmod, 0o700)
+        xdg = self.home / 'xdg-file'
+        xdg.write_text('not a directory')
+        with patch.dict(os.environ, {'XDG_RUNTIME_DIR': str(xdg), 'WAYLAND_DISPLAY': 'fixture-wayland'}):
+            with patch.object(screen_share, 'user_runtime_root', return_value=blocked / '1000'):
+                self.assertFalse(screen_share.restart_is_pending())
+                with patch.object(screen_share.subprocess, 'run',
+                                  return_value=subprocess.CompletedProcess([], 0)) as later:
+                    with redirect_stdout(io.StringIO()) as later_out:
+                        screen_share.configure()
+        self.assertNotIn(restart, self._commands(later))
+        self.assertNotIn('will drop', later_out.getvalue())
+
+    def test_stop_child_kills_when_the_wait_times_out(self):
+        child = subprocess.Popen(
+            [sys.executable, '-c',
+             'import signal, sys, time\n'
+             'signal.signal(signal.SIGTERM, signal.SIG_IGN)\n'
+             'sys.stdout.write("ready\\n"); sys.stdout.flush()\n'
+             'time.sleep(30)\n'],
+            stdout=subprocess.PIPE)
+        self.addCleanup(child.stdout.close)
+        self.addCleanup(lambda: child.poll() is None and child.kill())
+        self.assertEqual(child.stdout.readline(), b'ready\n')
+        screen_share.stop_child(child, wait=0.2)
+        self.assertEqual(child.poll(), -signal.SIGKILL)
+
+    def test_stop_child_exits_when_sigterm_arrives_during_the_wait(self):
+        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+        self.addCleanup(lambda: child.poll() is None and child.kill())
+        previous = signal.signal(signal.SIGTERM, lambda *_: None)
+        original_wait = child.wait
+
+        def wait_and_signal(timeout=None):
+            os.kill(os.getpid(), signal.SIGTERM)
+            return original_wait(timeout=timeout)
+
+        try:
+            with patch.object(child, 'wait', side_effect=wait_and_signal):
+                with self.assertRaises(SystemExit) as caught:
+                    screen_share.stop_child(child, wait=2)
+            self.assertEqual(caught.exception.code, 0)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+        self.assertIsNotNone(child.poll())
 
     def test_modified_config_is_preserved_and_service_not_started(self):
         config = screen_share.config_path()
@@ -283,13 +929,20 @@ class ScreenShareTests(unittest.TestCase):
         child2.terminate.assert_called_once()
 
     def test_inherited_listener_is_bound_to_tailscale_interface_before_start(self):
+        config = screen_share.config_path()
+        config.parent.mkdir(parents=True)
+        config.write_text(screen_share.config_text('abcdefgh'))
         listener = Mock()
         listener.fileno.return_value = 42
         with patch.object(screen_share.socket, 'socket') as create:
             create.return_value.__enter__.return_value = listener
-            with patch.object(screen_share.subprocess, 'Popen') as spawn:
-                screen_share.start_server('100.64.0.2', self.home)
-        listener.setsockopt.assert_called_once_with(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'tailscale0\0')
+            with patch.object(screen_share, 'tailscale_address', return_value='100.64.0.2'):
+                with patch.object(screen_share.subprocess, 'Popen') as spawn:
+                    screen_share.start_server('100.64.0.2', self.home)
+        self.assertEqual(listener.setsockopt.call_args_list, [
+            call(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1),
+            call(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'tailscale0\0'),
+        ])
         listener.bind.assert_called_once_with(('100.64.0.2', 5900))
         self.assertEqual(spawn.call_args.args[0][-1], 'fd:42')
         self.assertEqual(spawn.call_args.kwargs['pass_fds'], (42,))
@@ -478,9 +1131,53 @@ class ScreenShareTests(unittest.TestCase):
         self.assertEqual(_mods(library, keymap, ['Alt_L']), 0x08)
         library.xkb_keymap_unref(keymap)
 
+    def test_bind_retry_drops_a_stale_tailscale_address_without_starting_wayvnc(self):
+        config = screen_share.config_path()
+        config.parent.mkdir(parents=True)
+        config.write_text(screen_share.config_text('abcdefgh'))
+        listener = Mock()
+        listener.fileno.return_value = 42
+        listener.bind.side_effect = OSError(errno.EADDRINUSE, 'in use')
+        answers = iter(['100.64.0.2', '100.64.0.3'])
+
+        with patch.dict(os.environ, {'WAYLAND_DISPLAY': 'fixture-wayland', 'XDG_RUNTIME_DIR': str(self.runtime)}):
+            with patch.object(screen_share.socket, 'socket') as create:
+                create.return_value.__enter__.return_value = listener
+                with patch.object(screen_share, 'tailscale_address', side_effect=lambda: next(answers)):
+                    with patch.object(screen_share.subprocess, 'Popen') as spawn:
+                        with patch.object(screen_share.time, 'sleep', side_effect=KeyboardInterrupt):
+                            with patch.object(screen_share.signal, 'signal'):
+                                with redirect_stderr(io.StringIO()):
+                                    with self.assertRaises(KeyboardInterrupt):
+                                        screen_share.serve()
+        spawn.assert_not_called()
+        listener.close.assert_called()
+        listener.bind.assert_called_once_with(('100.64.0.2', 5900))
+
+    def test_address_change_after_bind_does_not_start_wayvnc(self):
+        config = screen_share.config_path()
+        config.parent.mkdir(parents=True)
+        config.write_text(screen_share.config_text('abcdefgh'))
+        listener = Mock()
+        listener.fileno.return_value = 42
+        with patch.object(screen_share.socket, 'socket') as create:
+            create.return_value.__enter__.return_value = listener
+            with patch.object(screen_share, 'tailscale_address', return_value='100.64.0.3'):
+                with patch.object(screen_share.subprocess, 'Popen') as spawn:
+                    started = screen_share.start_server('100.64.0.2', self.runtime)
+        self.assertIsNone(started)
+        spawn.assert_not_called()
+        listener.bind.assert_called_once_with(('100.64.0.2', 5900))
+        listener.close.assert_called()
+
     def test_unavailable_interface_binding_never_starts_a_fallback_listener(self):
         listener = Mock()
-        listener.setsockopt.side_effect = PermissionError('interface isolation unavailable')
+
+        def setsockopt(_level, option, _value):
+            if option == socket.SO_BINDTODEVICE:
+                raise PermissionError('interface isolation unavailable')
+
+        listener.setsockopt.side_effect = setsockopt
         with patch.object(screen_share.socket, 'socket') as create:
             create.return_value.__enter__.return_value = listener
             with patch.object(screen_share.subprocess, 'Popen') as spawn:
@@ -504,3 +1201,105 @@ class ScreenShareTests(unittest.TestCase):
                 listener.listen(1)
                 client.settimeout(0.3)
                 self.assertEqual(client.connect_ex(listener.getsockname()) == 0, allowed)
+
+    @unittest.skipUnless(sys.platform == 'linux' and hasattr(socket, 'SO_BINDTODEVICE'),
+                         'Linux socket interface isolation')
+    def test_restart_rebinds_while_previous_connection_is_in_time_wait(self):
+        previous = socket.socket()
+        self.addCleanup(previous.close)
+        previous.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        previous.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'lo\0')
+        previous.bind(('127.0.0.1', 0))
+        port = previous.getsockname()[1]
+        previous.listen(1)
+        client = socket.socket()
+        self.addCleanup(client.close)
+        client.connect(('127.0.0.1', port))
+        accepted, _ = previous.accept()
+        self.addCleanup(accepted.close)
+        accepted.close()
+        client.close()
+        previous.close()
+        self.assertIn('06', _tcp_states('127.0.0.1', port))
+        listener = socket.socket()
+        self.addCleanup(listener.close)
+        screen_share.bind_listener(listener, '127.0.0.1', port=port, device=b'lo', wait=2)
+        self.assertEqual(listener.getsockname(), ('127.0.0.1', port))
+
+    @unittest.skipUnless(sys.platform == 'linux' and hasattr(socket, 'SO_BINDTODEVICE'),
+                         'Linux socket interface isolation')
+    def test_bind_waits_for_the_previous_listener_instead_of_raising_eaddrinuse(self):
+        holder = socket.socket()
+        self.addCleanup(holder.close)
+        holder.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'lo\0')
+        holder.bind(('127.0.0.1', 0))
+        port = holder.getsockname()[1]
+        holder.listen(1)
+        busy = socket.socket()
+        self.addCleanup(busy.close)
+        with self.assertRaises(OSError) as caught:
+            screen_share.bind_listener(busy, '127.0.0.1', port=port, device=b'lo', wait=0)
+        self.assertEqual(caught.exception.errno, errno.EADDRINUSE)
+
+        def release():
+            time.sleep(0.2)
+            holder.close()
+
+        thread = threading.Thread(target=release)
+        thread.start()
+        self.addCleanup(thread.join)
+        listener = socket.socket()
+        self.addCleanup(listener.close)
+        with redirect_stderr(io.StringIO()) as err:
+            with patch.object(screen_share, 'tailscale_address', return_value='127.0.0.1'):
+                screen_share.bind_listener(listener, '127.0.0.1', port=port, device=b'lo', wait=5, pause=0.05)
+        self.assertEqual(listener.getsockname(), ('127.0.0.1', port))
+        self.assertIn('Screen sharing is waiting for TCP ' + str(port) + ' to be released.', err.getvalue())
+
+    @unittest.skipUnless(sys.platform == 'linux' and hasattr(socket, 'SO_BINDTODEVICE'),
+                         'Linux socket interface isolation')
+    def test_bind_gives_up_when_the_port_stays_busy(self):
+        holder = socket.socket()
+        self.addCleanup(holder.close)
+        holder.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'lo\0')
+        holder.bind(('127.0.0.1', 0))
+        port = holder.getsockname()[1]
+        holder.listen(1)
+        listener = socket.socket()
+        self.addCleanup(listener.close)
+        started = time.monotonic()
+        with redirect_stderr(io.StringIO()) as err:
+            with patch.object(screen_share, 'tailscale_address', return_value='127.0.0.1'):
+                with self.assertRaises(OSError) as caught:
+                    screen_share.bind_listener(listener, '127.0.0.1', port=port, device=b'lo', wait=0.3, pause=0.05)
+        self.assertEqual(caught.exception.errno, errno.EADDRINUSE)
+        self.assertIn('to be released', err.getvalue())
+        elapsed = time.monotonic() - started
+        self.assertGreaterEqual(elapsed, 0.3)
+        self.assertLess(elapsed, 2)
+
+    @unittest.skipUnless(sys.platform == 'linux' and hasattr(socket, 'SO_BINDTODEVICE'),
+                         'Linux socket interface isolation')
+    def test_time_wait_without_reuse_keeps_the_address_busy(self):
+        previous = socket.socket()
+        self.addCleanup(previous.close)
+        previous.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'lo\0')
+        previous.bind(('127.0.0.1', 0))
+        port = previous.getsockname()[1]
+        previous.listen(1)
+        client = socket.socket()
+        self.addCleanup(client.close)
+        client.connect(('127.0.0.1', port))
+        accepted, _ = previous.accept()
+        self.addCleanup(accepted.close)
+        accepted.close()
+        client.close()
+        previous.close()
+        self.assertIn('06', _tcp_states('127.0.0.1', port))
+        listener = socket.socket()
+        self.addCleanup(listener.close)
+        with redirect_stderr(io.StringIO()):
+            with patch.object(screen_share, 'tailscale_address', return_value='127.0.0.1'):
+                with self.assertRaises(OSError) as caught:
+                    screen_share.bind_listener(listener, '127.0.0.1', port=port, device=b'lo', wait=0.2, pause=0.05)
+        self.assertEqual(caught.exception.errno, errno.EADDRINUSE)
