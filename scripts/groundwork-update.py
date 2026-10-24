@@ -19,6 +19,12 @@ MARKER = '# Groundwork Omarchy updater'
 CONFIG = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config')) / 'groundwork/omarchy.json'
 STATE = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local/state')) / 'groundwork'
 KEYD_CONFIG = Path('/etc/keyd/default.conf')
+# Captured stages print progress at this interval. Interactive stages own the
+# terminal and stay quiet so a prompt (for example sudo) is never interrupted.
+HEARTBEAT_SECONDS = 30
+# On a deadline or an interrupt, the stage gets SIGINT and this long to clean
+# up before SIGTERM and then SIGKILL.
+INTERRUPT_GRACE_SECONDS = 10
 
 
 class UpdateError(Exception):
@@ -127,7 +133,30 @@ def register(source, keyd, screen_sharing, vault):
         atomic_write(Path.home() / '.local/bin' / command, launcher, 0o755, owned=True)
 
 
-def stop(process):
+def group_alive(process):
+    try:
+        os.killpg(process.pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    return True
+
+
+def stop(process, grace=0):
+    # On a deadline or an interrupt, forward SIGINT first so interactive tools
+    # (omarchy update, pacman, sudo) can clean up, as if Ctrl+C was pressed.
+    if grace:
+        try:
+            os.killpg(process.pid, signal.SIGINT)
+        except ProcessLookupError:
+            process.wait()
+            return
+        ends = time.monotonic() + grace
+        while time.monotonic() < ends:
+            if process.poll() is not None and not group_alive(process):
+                return
+            time.sleep(0.05)
     # A completed wrapper can leave a child in its session. Drain that owned
     # group before releasing the updater lock, even after the leader exited.
     try:
@@ -170,6 +199,7 @@ def run(args, cwd=None, deadline=20, capture=True, lock_fd=None):
         # group. Hand terminal input and Ctrl+C to it, then restore the caller.
         group_options = dict(process_group=0)
     started = time.monotonic()
+    interrupted = False
     try:
         environment = dict(os.environ, GIT_TERMINAL_PROMPT='0', GIT_PAGER='cat')
         if lock_fd is not None:
@@ -186,15 +216,23 @@ def run(args, cwd=None, deadline=20, capture=True, lock_fd=None):
             except ProcessLookupError:
                 if process.poll() is None:
                     raise
-        while True:
-            remaining = deadline - (time.monotonic() - started)
-            if remaining <= 0:
-                raise UpdateError(f'{args[0]} exceeded its {deadline}-second deadline. Retry after repairing that stage.')
-            try:
-                stdout, stderr = process.communicate(timeout=min(remaining, 30))
-                break
-            except subprocess.TimeoutExpired:
-                print(f'Still running {args[0]}; elapsed {int(time.monotonic() - started)} seconds.', flush=True)
+        try:
+            while True:
+                remaining = deadline - (time.monotonic() - started)
+                if remaining <= 0:
+                    interrupted = True
+                    raise UpdateError(f'{args[0]} exceeded its {deadline}-second deadline. Retry after repairing that stage.')
+                try:
+                    stdout, stderr = process.communicate(timeout=min(remaining, HEARTBEAT_SECONDS))
+                    break
+                except subprocess.TimeoutExpired:
+                    # Only captured stages report progress; an interactive
+                    # child owns the terminal and may be waiting at a prompt.
+                    if capture and time.monotonic() - started < deadline:
+                        print(f'Still running {args[0]}; elapsed {int(time.monotonic() - started)} seconds.', flush=True)
+        except KeyboardInterrupt:
+            interrupted = True
+            raise
         if process.returncode in (-signal.SIGINT, -signal.SIGTERM, -signal.SIGHUP, 130, 143, 129):
             raise KeyboardInterrupt(abs(process.returncode) if process.returncode < 0 else process.returncode - 128)
         if process.returncode:
@@ -203,7 +241,7 @@ def run(args, cwd=None, deadline=20, capture=True, lock_fd=None):
     finally:
         try:
             if process:
-                stop(process)
+                stop(process, INTERRUPT_GRACE_SECONDS if interrupted else 0)
         finally:
             if terminal is not None:
                 try:

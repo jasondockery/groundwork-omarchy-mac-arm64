@@ -3,13 +3,16 @@ import fcntl
 from contextlib import contextmanager
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -299,10 +302,113 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
                 self.assertEqual(result.returncode, expected, result.stderr)
 
 
+# A child that records which signal stopped it.
+SIGNAL_CHILD = r"""
+import os, signal, sys, time
+report = sys.argv[1]
+def record(signum, _frame):
+    with open(report, 'w') as output:
+        output.write(signal.Signals(signum).name)
+    sys.exit(130)
+if len(sys.argv) > 2:
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+else:
+    signal.signal(signal.SIGINT, record)
+signal.signal(signal.SIGTERM, record)
+with open(report + '.pid', 'w') as output:
+    output.write(str(os.getpid()))
+time.sleep(30)
+"""
+
+# Run one interactive stage under a real pseudo-terminal and echo its output.
+PTY_BRIDGE = r"""
+import importlib.util, os, pty, select, sys, time
+if sys.argv[1] == 'child':
+    spec = importlib.util.spec_from_file_location('updater', sys.argv[2])
+    updater = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(updater)
+    updater.HEARTBEAT_SECONDS = 0.1
+    updater.run([sys.executable, '-c', 'import time; time.sleep(0.8)'], capture=False, deadline=8)
+    assert os.tcgetpgrp(0) == os.getpgrp()
+    print('interactive stage finished')
+    raise SystemExit(0)
+pid, master = pty.fork()
+if pid == 0:
+    os.execv(sys.executable, [sys.executable, sys.argv[0], 'child', sys.argv[1]])
+chunks, deadline = [], time.monotonic() + 9
+while time.monotonic() < deadline:
+    ready, _, _ = select.select([master], [], [], 0.1)
+    if ready:
+        try:
+            data = os.read(master, 65536)
+        except OSError:
+            data = b''
+        chunks.append(data)
+    waited, status = os.waitpid(pid, os.WNOHANG)
+    if waited == pid:
+        break
+sys.stdout.buffer.write(b''.join(chunks))
+raise SystemExit(os.WEXITSTATUS(status) if waited == pid else 124)
+"""
+
+
 class ProcessTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='groundwork-process-')
+        self.addCleanup(temporary.cleanup)
+        self.report = Path(temporary.name) / 'signal'
+
+    def child(self, *extra):
+        return [sys.executable, '-c', SIGNAL_CHILD, str(self.report), *extra]
+
+    def wait_for_child(self):
+        for _ in range(100):
+            if Path(str(self.report) + '.pid').exists():
+                return
+            time.sleep(0.02)
+
     def test_deadline_terminates_owned_child(self):
         with self.assertRaisesRegex(updater.UpdateError, 'deadline'):
             updater.run([sys.executable, '-c', 'import time; time.sleep(30)'], deadline=0.1)
+
+    def test_interactive_stage_prints_no_heartbeat_over_its_terminal(self):
+        script = Path(self.report.parent) / 'bridge.py'
+        script.write_text(PTY_BRIDGE)
+        result = subprocess.run([sys.executable, str(script), str(REPO / 'scripts/groundwork-update.py')],
+                                capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(b'interactive stage finished', result.stdout)
+        self.assertNotIn(b'Still running', result.stdout)
+
+    def test_captured_stage_still_reports_progress(self):
+        with patch.object(updater, 'HEARTBEAT_SECONDS', 0.1), patch('sys.stdout', new_callable=io.StringIO) as output:
+            updater.run([sys.executable, '-c', 'import time; time.sleep(0.5)'], deadline=8)
+        self.assertIn('Still running', output.getvalue())
+
+    def test_deadline_forwards_sigint_before_terminating(self):
+        with self.assertRaisesRegex(updater.UpdateError, 'deadline'):
+            updater.run(self.child(), deadline=1)
+        self.assertEqual(self.report.read_text(), 'SIGINT')
+
+    def test_interrupt_forwards_sigint_to_the_stage(self):
+        def interrupt(_signum, _frame):
+            raise KeyboardInterrupt
+        previous = signal.signal(signal.SIGALRM, interrupt)
+        self.addCleanup(signal.signal, signal.SIGALRM, previous)
+        signal.setitimer(signal.ITIMER_REAL, 1)
+        with self.assertRaises(KeyboardInterrupt):
+            updater.run(self.child(), deadline=8)
+        self.assertEqual(self.report.read_text(), 'SIGINT')
+
+    def test_stage_ignoring_sigint_is_terminated_after_the_grace_period(self):
+        started = time.monotonic()
+        with patch.object(updater, 'INTERRUPT_GRACE_SECONDS', 0.3):
+            with self.assertRaisesRegex(updater.UpdateError, 'deadline'):
+                updater.run(self.child('ignore-sigint'), deadline=1)
+        self.assertEqual(self.report.read_text(), 'SIGTERM')
+        self.assertLess(time.monotonic() - started, 6)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int(Path(str(self.report) + '.pid').read_text()), 0)
 
 
 if __name__ == '__main__':
