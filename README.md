@@ -74,18 +74,29 @@ packages, default tools, and desktop; no second system updater is installed.
 
 On a kernel with pages larger than 4 KiB (Apple Silicon uses 16 KiB),
 `update-all` first downloads the newest T3 Nightly, verifies its checksum, and
-checks the LOAD segments of every ELF file in it with `readelf -lW` (from
-`binutils`, which setup installs). If any segment is aligned below the page
-size, the build cannot start there ([pingdotgg/t3code#23433](https://github.com/pingdotgg/t3code/issues/23433)):
-the installed build is kept, the version is remembered in
-`~/.local/state/groundwork/t3-rejected.json` so it is not downloaded again, and
-the rest of the update continues. A build that passes is installed by exact
-version. If the installed T3 no longer starts, `update-all` reinstalls the
-checked build or the last known-good `0.1.2-nightly.20261021.3499`. If neither
-works, it prints a restore command, finishes the other stages, records
-`completed_with_warnings`, and exits non-zero. Setup on such a kernel keeps a Nightly that
-already starts and installs the known-good build only when T3 is missing,
-broken, or not a Nightly.
+checks the LOAD segments of every ELF file with `readelf -lW` (from `binutils`,
+which setup installs). A misaligned build is remembered in
+`~/.local/state/groundwork/t3-rejected.json` and is not downloaded again
+([pingdotgg/t3code#23433](https://github.com/pingdotgg/t3code/issues/23433)).
+An aligned build is smoke-tested with `t3 --version` from the directory that
+contains that binary. The child gets a fresh environment (`HOME`, `TMPDIR`, and
+`XDG_*` inside the download, and `PATH=/usr/bin:/bin`) and runs under
+`bwrap --die-with-parent --unshare-pid --unshare-net`, with system directories
+read-only and the download writable. Omarchy ships `bwrap` with Flatpak. A
+scrubbed environment alone is not confinement — the binary could still read the
+home directory and use the network — so a missing `bwrap` skips that run with a
+warning and does not execute the candidate. The smoke test is accepted only
+when `--version` prints that candidate. A signal death, or T3's
+`PinnedRuntimeInstallError` from `t3 update`, is remembered like a misaligned
+build. A timeout, transport error, or other OS error warns and is retried on
+the next `update-all` without writing `t3-rejected.json`. If `t3 update` fails
+and the installed version is unchanged and still starts, the stage is a
+warning, not a failure. If the installed T3 no longer starts, `update-all`
+reinstalls the checked build or the last known-good
+`0.1.2-nightly.20261021.3499`. If neither works, it prints a restore command,
+finishes the other stages, records `completed_with_warnings`, and exits
+non-zero. Setup on such a kernel keeps a Nightly that already starts and
+installs the known-good build only when T3 is missing, broken, or not a Nightly.
 
 When Blip is opted in, `update-all` runs `omarchy plugin update nixfred.blip`
 only in an interactive terminal, without `--yes`, so you can read the diff.

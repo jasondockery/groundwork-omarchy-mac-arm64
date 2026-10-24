@@ -112,6 +112,13 @@ class UpdateTests(unittest.TestCase):
         self.blip_plugin = None
         self.install_failures = set()
         self.freetube_update_failure = False
+        self.candidate_crashes = False
+        self.candidate_smoke_error = None
+        self.smoke_version = CANDIDATE
+        self.t3_update_fails = False
+        self.t3_update_error = None
+        self.break_version_after_failed_update = False
+        self.version_after_failed_update = None
         self.real_run = updater.run
         self.run_patch = patch.object(updater, 'run', side_effect=self.run_command)
         self.run_patch.start()
@@ -144,9 +151,23 @@ class UpdateTests(unittest.TestCase):
             if self.t3_broken:
                 raise updater.UpdateError('t3 failed (exit -11).')
             return f't3 v{self.t3_installed}'
+        if args[:2] == ['t3', 'update'] and self.t3_update_fails:
+            if self.break_version_after_failed_update:
+                self.t3_broken = True
+            if self.version_after_failed_update:
+                self.t3_installed = self.version_after_failed_update
+            if self.t3_update_error is not None:
+                raise self.t3_update_error
+            raise updater.UpdateError('t3 failed (exit 1).')
         if args[:2] == ['t3', 'update'] and len(args) == 6:
             self.t3_installed = args[-1]
             self.t3_broken = self.break_after_update
+        if Path(args[0]).name == 'bwrap' and '--version' in args:
+            if self.candidate_crashes:
+                raise updater.UpdateError(f'{args[0]} failed (exit -11).')
+            if self.candidate_smoke_error is not None:
+                raise self.candidate_smoke_error
+            return f't3 v{self.smoke_version}'
         if args[0] == 'sh':
             version = kwargs['extra_env']['T3CODE_VERSION']
             if version in self.install_failures:
@@ -355,6 +376,7 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
                      f'{updater.T3_DOWNLOADS}/v{candidate}/SHA256SUMS': sums.encode(),
                      f'{updater.T3_DOWNLOADS}/v{candidate}/t3-{candidate}-linux-arm64.tar.gz': archive,
                      updater.T3_INSTALLER: b'#!/bin/sh\n'}
+        self.smoke_version = candidate
         self.fetched = []
         def fetch(url, deadline=60):
             self.fetched.append(url)
@@ -374,6 +396,44 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
         self.assertIn('FreeTube user Flatpak update command completed', receipt['completed'])
         return output.getvalue() + errors.getvalue(), receipt
 
+    def candidate_smokes(self):
+        return [(call, kwargs) for call, kwargs in zip(self.machine_calls, self.machine_kwargs)
+                if Path(call[0]).name == 'bwrap' and '--version' in call]
+
+    def assert_smoke_is_confined(self, call, kwargs):
+        self.assertEqual(Path(call[0]).name, 'bwrap')
+        for flag in ('--die-with-parent', '--unshare-pid', '--unshare-net', '--ro-bind', '--bind', '--chdir', '--'):
+            self.assertIn(flag, call)
+        binary = call[call.index('--') + 1]
+        chdir = call[call.index('--chdir') + 1]
+        self.assertEqual(call[call.index('--') + 2], '--version')
+        self.assertEqual(chdir, str(Path(binary).parent))
+        self.assertEqual(kwargs['cwd'], chdir)
+        bound = None
+        index = 0
+        while index < len(call) and call[index] != '--':
+            if call[index] == '--bind':
+                bound = call[index + 1]
+            if call[index] == '--ro-bind':
+                self.assertNotIn('groundwork-t3-', call[index + 1])
+            index += 1
+        self.assertIsNotNone(bound)
+        self.assertIn('groundwork-t3-', bound)
+        self.assertIn('/usr', call)
+        env = kwargs['env']
+        self.assertEqual(set(env), {'HOME', 'TMPDIR', 'PATH', 'XDG_CACHE_HOME', 'XDG_CONFIG_HOME',
+                                     'XDG_DATA_HOME', 'XDG_RUNTIME_DIR', 'XDG_STATE_HOME'})
+        self.assertEqual(env['PATH'], '/usr/bin:/bin')
+        self.assertTrue(env['HOME'].startswith(bound + '/'))
+        self.assertTrue(env['TMPDIR'].startswith(bound + '/'))
+        for key, value in env.items():
+            if key.startswith('XDG_'):
+                self.assertTrue(value.startswith(bound + '/'), key)
+        self.assertNotEqual(env['HOME'], os.environ.get('HOME'))
+        self.assertIs(kwargs.get('stdin'), subprocess.DEVNULL)
+        self.assertEqual(kwargs['deadline'], updater.T3_CANDIDATE_SMOKE_SECONDS)
+        self.assertFalse(Path(bound).exists())
+
     def installer_versions(self):
         return [kwargs['extra_env']['T3CODE_VERSION'] for call, kwargs in zip(self.machine_calls, self.machine_kwargs)
                 if call[0] == 'sh']
@@ -391,6 +451,7 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
         self.assert_t3_kept(output, 'newer linux-arm64 builds crash on 16 KiB pages (pingdotgg/t3code#23433)')
         rejected = json.loads((self.state / 't3-rejected.json').read_text())
         self.assertEqual(rejected, {'16384': [CANDIDATE]})
+        self.assertFalse(self.candidate_smokes())
 
     def test_rejected_candidate_is_not_downloaded_again(self):
         self.large_pages()
@@ -420,6 +481,170 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
         output, receipt = self.update_all()
         self.assertIn(['t3', 'update', '--channel', 'nightly', '--yes', CANDIDATE], self.machine_calls)
         self.assertIn(f'T3 Code Nightly updated to {CANDIDATE}', receipt['completed'])
+        smokes = self.candidate_smokes()
+        self.assertEqual(len(smokes), 1)
+        self.assert_smoke_is_confined(*smokes[0])
+
+    def test_smoke_command_uses_the_resolved_path_when_tmpdir_is_a_symlink(self):
+        self.large_pages()
+        real = self.root / 'real-tmp'
+        real.mkdir()
+        link = self.root / 'linked-tmp'
+        link.symlink_to(real, target_is_directory=True)
+        previous = tempfile.tempdir
+        tempfile.tempdir = str(link)
+        self.addCleanup(setattr, tempfile, 'tempdir', previous)
+        with patch.dict(os.environ, TMPDIR=str(link)):
+            self.update_all()
+        smokes = self.candidate_smokes()
+        self.assertEqual(len(smokes), 1)
+        call, kwargs = smokes[0]
+        self.assert_smoke_is_confined(call, kwargs)
+        binary = call[call.index('--') + 1]
+        chdir = call[call.index('--chdir') + 1]
+        bind = call[call.index('--bind') + 1]
+        resolved = os.path.realpath(link)
+        self.assertEqual(call[call.index('--bind') + 2], bind)
+        self.assertEqual(bind, os.path.realpath(bind))
+        self.assertTrue(bind.startswith(resolved + os.sep))
+        self.assertEqual(chdir, os.path.realpath(chdir))
+        self.assertTrue(chdir.startswith(bind + os.sep))
+        self.assertEqual(binary, os.path.realpath(binary))
+        self.assertEqual(str(Path(binary).parent), chdir)
+        self.assertEqual(kwargs['cwd'], chdir)
+        for argument in call:
+            self.assertNotIn(str(link), argument)
+        for key, value in kwargs['env'].items():
+            if key == 'PATH':
+                continue
+            self.assertEqual(value, os.path.realpath(value))
+            self.assertTrue(value.startswith(bind + os.sep), key)
+            self.assertNotIn(str(link), value)
+
+    def test_aligned_candidate_that_crashes_is_rejected(self):
+        self.large_pages()
+        self.candidate_crashes = True
+        output, _ = self.update_all()
+        self.assert_t3_kept(output, 'the newest linux-arm64 build does not start on 16 KiB pages '
+                            '(crashed (SIGSEGV); pingdotgg/t3code#23433)')
+        rejected = json.loads((self.state / 't3-rejected.json').read_text())
+        self.assertEqual(rejected, {'16384': [CANDIDATE]})
+        smokes = self.candidate_smokes()
+        self.assertEqual(len(smokes), 1)
+        self.assert_smoke_is_confined(*smokes[0])
+        call, kwargs = smokes[0]
+        readelfs = [item[2] for item in self.machine_calls if item[:2] == ['readelf', '-lW']]
+        self.assertTrue(readelfs)
+        self.assertTrue(all(path.startswith(str(Path(kwargs['cwd']).parent)) for path in readelfs))
+
+    def test_smoke_timeout_or_wrong_version_is_not_remembered(self):
+        self.large_pages()
+        self.candidate_smoke_error = updater.UpdateError(
+            f'bwrap exceeded its {updater.T3_CANDIDATE_SMOKE_SECONDS}-second deadline. Retry after repairing that stage.')
+        output, receipt = self.update_all(result='completed_with_warnings')
+        self.assert_t3_kept(output, 'the newest linux-arm64 build was not smoke-tested')
+        self.assertIn('exceeded its', output)
+        self.assertIn('deadline', output)
+        self.assertFalse((self.state / 't3-rejected.json').exists())
+        self.assertTrue(receipt['warnings'])
+        self.candidate_smoke_error = None
+        self.smoke_version = '0.0.0-nightly.nope'
+        self.machine_calls.clear()
+        output, _ = self.update_all(result='completed_with_warnings')
+        self.assert_t3_kept(output, f'the newest linux-arm64 build reported 0.0.0-nightly.nope, not {CANDIDATE}')
+        self.assertFalse((self.state / 't3-rejected.json').exists())
+
+    def test_missing_bwrap_skips_without_running_the_candidate(self):
+        self.large_pages()
+        def which(name):
+            return None if name == 'bwrap' else '/fixture/' + name
+        with patch.object(updater.shutil, 'which', side_effect=which):
+            output, receipt = self.update_all(result='completed_with_warnings')
+        self.assert_t3_kept(output, updater.T3_NO_BWRAP)
+        self.assertIn(f'Warning: {updater.T3_NO_BWRAP}', output)
+        self.assertEqual(receipt['warnings'], [updater.T3_NO_BWRAP])
+        self.assertFalse(self.candidate_smokes())
+        self.assertFalse(any(url.endswith('.tar.gz') for url in self.fetched))
+        self.assertFalse((self.state / 't3-rejected.json').exists())
+
+    def test_failed_t3_update_keeps_a_working_install(self):
+        self.large_pages()
+        self.t3_update_fails = True
+        with patch('sys.stdout', new_callable=io.StringIO) as output, patch('sys.stderr', new_callable=io.StringIO) as errors:
+            self.assertEqual(updater.main(['all']), 1)
+        text = output.getvalue() + errors.getvalue()
+        detail = 't3 failed (exit 1)'
+        self.assertNotIn('Update incomplete', text)
+        self.assertIn(f'T3 Code {CANDIDATE} was not installed ({detail}). Keeping 0.0.1-nightly.fixture.', text)
+        self.assertIn(f'Warning: T3 Code {CANDIDATE} was not installed ({detail}); kept 0.0.1-nightly.fixture.', text)
+        self.assertEqual(self.t3_installed, '0.0.1-nightly.fixture')
+        self.assertIn(['t3', 'update', '--channel', 'nightly', '--yes', CANDIDATE], self.machine_calls)
+        self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], self.machine_calls)
+        receipt = json.loads((self.state / 'update-all-last-success.json').read_text())
+        self.assertEqual(receipt['result'], 'completed_with_warnings')
+        self.assertEqual(receipt['warnings'], [f'T3 Code {CANDIDATE} was not installed ({detail}); kept 0.0.1-nightly.fixture.'])
+        self.assertIn('T3 Code update skipped on 16 KiB pages; kept 0.0.1-nightly.fixture', receipt['completed'])
+        self.assertIn('Bitwarden user Flatpak update command completed', receipt['completed'])
+        self.assertFalse((self.state / 't3-rejected.json').exists())
+
+    def test_t3_update_failure_is_remembered_only_when_the_candidate_did_not_start(self):
+        cases = [
+            (updater.UpdateError('t3 exceeded its 300-second deadline. Retry after repairing that stage.'),
+             False, 'exceeded its 300-second deadline'),
+            (OSError('network unreachable'), False, 'network unreachable'),
+            (updater.UpdateError('t3 failed (exit 1).\nconnection refused'), False, 'connection refused'),
+            (updater.UpdateError('t3 failed (exit 1).\nPinnedRuntimeInstallError: staged binary crashed'),
+             True, 'PinnedRuntimeInstallError'),
+            (updater.UpdateError('t3 failed (exit -11).'), True, 'SIGSEGV'),
+            (updater.UpdateError('bwrap failed (exit 139).'), True, 'SIGSEGV'),
+        ]
+        for error, remembered, detail in cases:
+            with self.subTest(detail=detail):
+                self.machine_calls.clear()
+                self.machine_kwargs.clear()
+                self.t3_installed = '0.0.1-nightly.fixture'
+                self.t3_broken = False
+                rejected = self.state / 't3-rejected.json'
+                if rejected.exists():
+                    rejected.unlink()
+                receipt = self.state / 'update-all-last-success.json'
+                if receipt.exists():
+                    receipt.unlink()
+                self.large_pages()
+                self.t3_update_fails = True
+                self.t3_update_error = error
+                output, saved = self.update_all(result='completed_with_warnings')
+                self.assertIn(detail, output)
+                self.assertIn(f'was not installed ({updater.t3_failure_reason(error)})', output)
+                self.assertEqual(self.t3_installed, '0.0.1-nightly.fixture')
+                self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], self.machine_calls)
+                self.assertEqual(rejected.exists(), remembered)
+                if remembered:
+                    self.assertEqual(json.loads(rejected.read_text())['16384'], [CANDIDATE])
+                self.assertTrue(any(detail in warning for warning in saved['warnings']))
+
+    def test_failed_t3_update_repairs_when_the_installed_binary_no_longer_starts(self):
+        self.large_pages()
+        self.t3_update_fails = True
+        self.break_version_after_failed_update = True
+        output, receipt = self.update_all()
+        self.assertIn(f'T3 Code {CANDIDATE} does not start after updating', output)
+        self.assertEqual(self.installer_versions(), ['0.0.1-nightly.fixture'])
+        self.assertIn('T3 Code repaired with 0.0.1-nightly.fixture', receipt['completed'])
+        self.assertNotIn('warnings', receipt)
+        self.assertFalse((self.state / 't3-rejected.json').exists())
+
+    def test_failed_t3_update_reraises_when_the_version_changed(self):
+        self.large_pages()
+        self.t3_update_fails = True
+        self.version_after_failed_update = '9.9.9-nightly.changed'
+        with self.assertRaises(updater.UpdateError) as caught:
+            updater.update('all')
+        self.assertIn('t3 failed (exit 1)', str(caught.exception))
+        self.assertEqual(self.t3_installed, '9.9.9-nightly.changed')
+        self.assertFalse((self.state / 'update-all-last-success.json').exists())
+        self.assertFalse(any(call[:3] == ['flatpak', '--user', 'update'] for call in self.machine_calls))
+        self.assertFalse((self.state / 't3-rejected.json').exists())
 
     def test_large_pages_skip_t3_when_installed_build_is_newest(self):
         self.large_pages(candidate='0.0.1-nightly.fixture')
@@ -673,6 +898,124 @@ class T3CandidateTests(unittest.TestCase):
                     {'tag_name': 'v0.1.3-nightly.20261024.3604'}, {'tag_name': 'v0.1.3-nightly.20261023.3592'}]
         with patch.object(updater, 'fetch', return_value=json.dumps(releases).encode()):
             self.assertEqual(updater.t3_latest_nightly(), '0.1.3-nightly.20261024.3604')
+
+    def test_run_replacement_env_drops_the_caller_environment(self):
+        reported = updater.run([sys.executable, '-c', 'import os; print("\\n".join(sorted(os.environ)))'],
+                               env={'FOO': 'bar', 'PATH': '/usr/bin:/bin'})
+        names = set(reported.splitlines())
+        # CPython may add LC_CTYPE for its own filesystem encoding. Nothing else from the caller is copied.
+        self.assertTrue({'FOO', 'PATH'} <= names)
+        self.assertFalse(names - {'FOO', 'PATH', 'LC_CTYPE'})
+        self.assertNotIn('HOME', names)
+        self.assertNotIn(os.environ.get('HOME', ''), reported)
+
+    def _candidate_responses(self, script):
+        payload = script.encode()
+        buffer = io.BytesIO()
+        info = tarfile.TarInfo(f't3-{CANDIDATE}-linux-arm64/t3')
+        info.size = len(payload)
+        info.mode = 0o755
+        with tarfile.open(fileobj=buffer, mode='w:gz') as bundle:
+            bundle.addfile(info, io.BytesIO(payload))
+        packed = buffer.getvalue()
+        digest = hashlib.sha256(packed).hexdigest()
+        return {updater.T3_RELEASES: json.dumps([{'tag_name': f'v{CANDIDATE}'}]).encode(),
+                f'{updater.T3_DOWNLOADS}/v{CANDIDATE}/SHA256SUMS': f'{digest}  t3-{CANDIDATE}-linux-arm64.tar.gz\n'.encode(),
+                f'{updater.T3_DOWNLOADS}/v{CANDIDATE}/t3-{CANDIDATE}-linux-arm64.tar.gz': packed}
+
+    def test_candidate_check_rejects_a_crash_and_retries_a_hang(self):
+        if shutil.which('bwrap') is None:
+            self.skipTest('bubblewrap is not installed')
+        real_which = shutil.which
+        paths = []
+        real_temporary = tempfile.TemporaryDirectory
+        class Recording(real_temporary):
+            def __enter__(self):
+                path = super().__enter__()
+                if 'groundwork-t3-' in path:
+                    paths.append(path)
+                return path
+        def which(name):
+            if name == 'bwrap':
+                return real_which('bwrap')
+            if name == 'readelf':
+                return real_which('readelf') or '/usr/bin/readelf'
+            return real_which(name)
+        def check(script, deadline, grace):
+            responses = self._candidate_responses(script)
+            paths.clear()
+            with tempfile.TemporaryDirectory() as state, \
+                    patch.object(updater, 'STATE', Path(state)), \
+                    patch.object(updater, 'fetch', side_effect=lambda url, deadline=60: responses[url]), \
+                    patch.object(updater.shutil, 'which', side_effect=which), \
+                    patch.object(updater.tempfile, 'TemporaryDirectory', Recording), \
+                    patch.object(updater, 'T3_CANDIDATE_SMOKE_SECONDS', deadline), \
+                    patch.object(updater, 'INTERRUPT_GRACE_SECONDS', grace):
+                reason, version = updater.t3_candidate_check('0.0.1-nightly.fixture', 16384, [])
+                rejected = (Path(state) / 't3-rejected.json').exists()
+            self.assertEqual(version, CANDIDATE)
+            self.assertTrue(paths)
+            self.assertFalse(Path(paths[-1]).exists())
+            return reason, rejected
+        reason, rejected = check('#!/bin/sh\nkill -SEGV $$\n', updater.T3_CANDIDATE_SMOKE_SECONDS, 0.2)
+        self.assertIn('crashed (SIGSEGV)', reason)
+        self.assertTrue(rejected)
+        reason, rejected = check('#!/bin/sh\nsleep 30\n', 0.2, 0.2)
+        self.assertIn('deadline', reason)
+        self.assertFalse(rejected)
+
+    @unittest.skipUnless(shutil.which('bwrap'), 'bubblewrap is not installed')
+    def test_sandbox_reaps_a_double_fork_and_sees_a_scrubbed_env(self):
+        token = 'groundwork-t3-smoke-orphan'
+        script = f'''#!/bin/bash
+ok=1
+case "$HOME" in */groundwork-t3-*/home) ;; *) ok=0 ;; esac
+case "$TMPDIR" in */groundwork-t3-*/tmp) ;; *) ok=0 ;; esac
+case "$XDG_CONFIG_HOME" in */groundwork-t3-*/home/.config) ;; *) ok=0 ;; esac
+case "$XDG_CACHE_HOME" in */groundwork-t3-*) ;; *) ok=0 ;; esac
+case "$XDG_DATA_HOME" in */groundwork-t3-*) ;; *) ok=0 ;; esac
+case "$XDG_STATE_HOME" in */groundwork-t3-*) ;; *) ok=0 ;; esac
+case "$XDG_RUNTIME_DIR" in */groundwork-t3-*) ;; *) ok=0 ;; esac
+case "$(pwd)" in */t3-{CANDIDATE}-linux-arm64) ;; *) ok=0 ;; esac
+[ "$PATH" = /usr/bin:/bin ] || ok=0
+[ -z "$USER" ] || ok=0
+if [ "$ok" -eq 1 ]; then echo "t3 v{CANDIDATE}"; else echo "t3 vunscrubbed"; fi
+# A real double-fork that ignores the shell exiting. The pid namespace must reap it.
+(
+  setsid bash -c 'exec -a {token} sleep 30' </dev/null >/dev/null 2>&1 &
+) &
+exit 0
+'''
+        self.addCleanup(subprocess.run, ['pkill', '-f', token], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        paths = []
+        real_temporary = tempfile.TemporaryDirectory
+        class Recording(real_temporary):
+            def __enter__(self):
+                path = super().__enter__()
+                if 'groundwork-t3-' in path:
+                    paths.append(path)
+                return path
+        responses = self._candidate_responses(script)
+        real_which = shutil.which
+        def which(name):
+            if name == 'bwrap':
+                return real_which('bwrap')
+            if name == 'readelf':
+                return real_which('readelf') or '/usr/bin/readelf'
+            return real_which(name)
+        with tempfile.TemporaryDirectory() as state, \
+                patch.object(updater, 'STATE', Path(state)), \
+                patch.object(updater, 'fetch', side_effect=lambda url, deadline=60: responses[url]), \
+                patch.object(updater.shutil, 'which', side_effect=which), \
+                patch.object(updater.tempfile, 'TemporaryDirectory', Recording):
+            reason, version = updater.t3_candidate_check('0.0.1-nightly.fixture', 16384, [])
+        self.assertEqual(version, CANDIDATE)
+        self.assertIsNone(reason)
+        self.assertTrue(paths)
+        self.assertFalse(Path(paths[-1]).exists())
+        time.sleep(0.3)
+        found = subprocess.run(['pgrep', '-a', '-f', token], capture_output=True, text=True)
+        self.assertNotEqual(found.returncode, 0, found.stdout)
 
 
 # A child that records which signal stopped it.

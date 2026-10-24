@@ -36,6 +36,16 @@ BUN_LINUX_ARCHIVE = 'bun-linux-aarch64.zip'
 BLIP_ID = 'nixfred.blip'
 # Last nightly whose ELF files all load on 16 KiB pages (pingdotgg/t3code#23433).
 T3_KNOWN_GOOD_LARGE_PAGE = '0.1.2-nightly.20261021.3499'
+# A downloaded candidate must finish --version inside its temp directory.
+T3_CANDIDATE_SMOKE_SECONDS = 30
+# bubblewrap ships with Flatpak on Omarchy. A scrubbed environment is not a
+# substitute: without a mount and network namespace the candidate can still
+# read the home directory and open sockets, so a missing bwrap skips this run
+# instead of executing the download. The version is not rejected.
+T3_NO_BWRAP = (
+    'bubblewrap is missing, so the newest build was not smoke-tested or installed '
+    '(install flatpak, which ships bwrap)'
+)
 # Captured stages print progress at this interval. Interactive stages own the
 # terminal and stay quiet so a prompt (for example sudo) is never interrupted.
 HEARTBEAT_SECONDS = 30
@@ -249,7 +259,7 @@ def foreground(fd, group):
         signal.signal(signal.SIGTTOU, previous)
 
 
-def run(args, cwd=None, deadline=20, capture=True, lock_fd=None, extra_env=None):
+def run(args, cwd=None, deadline=20, capture=True, lock_fd=None, extra_env=None, stdin=None, env=None):
     terminal = None
     original_group = None
     process = None
@@ -266,11 +276,15 @@ def run(args, cwd=None, deadline=20, capture=True, lock_fd=None, extra_env=None)
     started = time.monotonic()
     interrupted = False
     try:
-        environment = dict(os.environ, GIT_TERMINAL_PROMPT='0', GIT_PAGER='cat')
+        if env is None:
+            environment = dict(os.environ, GIT_TERMINAL_PROMPT='0', GIT_PAGER='cat')
+        else:
+            # Replacement environment. Do not copy the caller's variables.
+            environment = dict(env)
         environment.update(extra_env or {})
         if lock_fd is not None:
             environment['GROUNDWORK_OMARCHY_LOCK_FD'] = str(lock_fd)
-        process = subprocess.Popen(args, cwd=cwd, text=True, **group_options,
+        process = subprocess.Popen(args, cwd=cwd, text=True, stdin=stdin, **group_options,
                                    pass_fds=() if lock_fd is None else (lock_fd,),
                                    stdout=subprocess.PIPE if capture else None,
                                    stderr=subprocess.PIPE if capture else None,
@@ -346,11 +360,15 @@ def fetch(url, deadline=60):
             chunks.append(chunk)
 
 
-def t3_version():
-    reported = run(['t3', '--version']).split()
-    if not reported:
+def reported_t3_version(reported):
+    fields = (reported or '').split()
+    if not fields:
         raise UpdateError('t3 --version printed nothing.')
-    return reported[-1].removeprefix('v')
+    return fields[-1].removeprefix('v')
+
+
+def t3_version():
+    return reported_t3_version(run(['t3', '--version']))
 
 
 def t3_latest_nightly():
@@ -508,11 +526,143 @@ def page_size_reason(page):
     return f'newer linux-arm64 builds crash on {page // 1024} KiB pages ({T3_PAGE_SIZE_ISSUE})'
 
 
-def t3_candidate_check(installed, page):
+def t3_signal_number(error):
+    """Signal number when `error` is a signal death, else None.
+
+    `run` reports a killed process as a negative code (`exit -11`). bubblewrap
+    reports the same death as `128 + signal` (`exit 139`).
+    """
+    line = str(error).splitlines()[0] if str(error) else ''
+    marker = '(exit '
+    start = line.rfind(marker)
+    if start < 0:
+        return None
+    end = line.find(')', start)
+    if end < 0:
+        return None
+    try:
+        code = int(line[start + len(marker):end])
+    except ValueError:
+        return None
+    number = -code if code < 0 else code - 128 if code > 128 else None
+    if number is None:
+        return None
+    try:
+        signal.Signals(number)
+    except ValueError:
+        return None
+    return number
+
+
+def t3_candidate_rejected(error):
+    """True only when this build itself failed to start.
+
+    A deadline, a transport failure, or any other OS error can succeed on the
+    next run, so those must not be written to t3-rejected.json.
+    """
+    if 'PinnedRuntimeInstallError' in str(error):
+        return True
+    return t3_signal_number(error) is not None
+
+
+def t3_failure_reason(error):
+    """One line naming the actual reason a candidate was not installed."""
+    text = str(error).strip()
+    if 'PinnedRuntimeInstallError' in text:
+        return 'pinned runtime refused to start (PinnedRuntimeInstallError)'
+    number = t3_signal_number(error)
+    if number is not None:
+        return f'crashed ({signal.Signals(number).name})'
+    lines = [line.strip().rstrip('.') for line in text.splitlines() if line.strip()]
+    if not lines:
+        return 'exited unsuccessfully'
+    if len(lines) > 1 and '(exit ' in lines[0]:
+        return f'{lines[0]}: {lines[1]}'
+    return lines[0]
+
+
+def t3_smoke_environment(directory):
+    """Environment for a candidate smoke run. The caller's variables are not copied."""
+    root = Path(directory)
+    home = root / 'home'
+    tmp = root / 'tmp'
+    runtime = tmp / 'runtime'
+    for path in (home, tmp, home / '.cache', home / '.config', home / '.local/share',
+                 home / '.local/state', runtime):
+        path.mkdir(parents=True, exist_ok=True)
+    os.chmod(runtime, 0o700)
+    return {
+        'HOME': str(home),
+        'TMPDIR': str(tmp),
+        'PATH': '/usr/bin:/bin',
+        'XDG_CACHE_HOME': str(home / '.cache'),
+        'XDG_CONFIG_HOME': str(home / '.config'),
+        'XDG_DATA_HOME': str(home / '.local/share'),
+        'XDG_RUNTIME_DIR': str(runtime),
+        'XDG_STATE_HOME': str(home / '.local/state'),
+    }
+
+
+def t3_resolved_smoke_paths(binary, directory):
+    """Return one real download directory and the candidate inside it.
+
+    Bubblewrap binds that directory, then chdirs to the executable's parent.
+    TMPDIR or /tmp is often a symlink. Binding the real path and then naming
+    the symlink in --chdir, the executable, cwd, or HOME/TMPDIR/XDG_* makes
+    bwrap exit 1 with "Can't chdir", so every newer nightly is skipped.
+    """
+    directory = os.path.realpath(directory)
+    binary = Path(os.path.realpath(binary))
+    return binary, directory
+
+
+def t3_sandbox_command(binary, directory):
+    """Confined `t3 --version`, or None when bubblewrap is not installed.
+
+    `binary` and `directory` are the real paths from `t3_resolved_smoke_paths`.
+    System directories are read-only. The download directory is the only
+    writable path. The home directory is not mounted. `--unshare-pid` plus
+    `--die-with-parent` reaps a double-fork when bwrap exits.
+    """
+    bwrap = shutil.which('bwrap')
+    if not bwrap:
+        return None
+    binary = Path(binary)
+    directory = str(directory)
+    argv = [bwrap, '--die-with-parent', '--unshare-pid', '--unshare-net']
+    for path in ('/usr', '/etc'):
+        if Path(path).is_dir() and not Path(path).is_symlink():
+            argv.extend(['--ro-bind', path, path])
+    for path in ('/bin', '/lib', '/lib64', '/sbin'):
+        if Path(path).is_symlink():
+            argv.extend(['--symlink', os.readlink(path), path])
+        elif Path(path).is_dir():
+            argv.extend(['--ro-bind', path, path])
+    argv.extend(['--proc', '/proc', '--dev', '/dev'])
+    # Parents are empty directories in the new root, so host /tmp is not visible.
+    acc = Path('/')
+    for part in Path(directory).parts[1:]:
+        acc = acc / part
+        argv.extend(['--dir', str(acc)])
+    argv.extend(['--bind', directory, directory, '--chdir', str(binary.parent),
+                 '--', str(binary), '--version'])
+    return argv
+
+
+def t3_remember_skip(warnings, reason):
+    if warnings is not None:
+        warnings.append(reason)
+    return reason
+
+
+def t3_candidate_check(installed, page, warnings=None):
     """Return (reason the newest nightly must not be installed or None, candidate).
 
     An executable or shared object whose LOAD segment is aligned below the
-    kernel page size cannot be mapped there (pingdotgg/t3code#23433).
+    kernel page size cannot be mapped there (pingdotgg/t3code#23433). An
+    aligned build is smoke-tested with `--version` from its own directory.
+    Only a signal death is remembered. A timeout or an OS error skips this
+    run; the same version is checked again on the next update-all.
     """
     candidate = t3_latest_nightly()
     if candidate == installed:
@@ -521,10 +671,30 @@ def t3_candidate_check(installed, page):
         return page_size_reason(page), candidate
     if not shutil.which('readelf'):
         return 'readelf is missing, so the newest build cannot be checked (install binutils)', candidate
+    if shutil.which('bwrap') is None:
+        return t3_remember_skip(warnings, T3_NO_BWRAP), candidate
     with tempfile.TemporaryDirectory(prefix='groundwork-t3-') as directory:
-        if misaligned_elf_files(t3_download(candidate, directory), page):
+        root = t3_download(candidate, directory)
+        if misaligned_elf_files(root, page):
             reject_t3(page, candidate)
             return page_size_reason(page), candidate
+        binary = next(path for path in root.glob('*/t3') if path.is_file())
+        binary, directory = t3_resolved_smoke_paths(binary, directory)
+        try:
+            reported = run(t3_sandbox_command(binary, directory), cwd=str(binary.parent),
+                           deadline=T3_CANDIDATE_SMOKE_SECONDS, stdin=subprocess.DEVNULL,
+                           env=t3_smoke_environment(directory))
+            got = reported_t3_version(reported)
+        except (UpdateError, OSError, ValueError) as error:
+            if t3_candidate_rejected(error):
+                reject_t3(page, candidate)
+                return (f'the newest linux-arm64 build does not start on {page // 1024} KiB pages '
+                        f'({t3_failure_reason(error)}; {T3_PAGE_SIZE_ISSUE})'), candidate
+            return t3_remember_skip(
+                warnings, f'the newest linux-arm64 build was not smoke-tested ({t3_failure_reason(error)})'), candidate
+        if got != candidate:
+            return t3_remember_skip(
+                warnings, f'the newest linux-arm64 build reported {got}, not {candidate}'), candidate
     return None, candidate
 
 
@@ -572,7 +742,7 @@ def update_t3(completed, warnings):
     except (UpdateError, OSError) as error:
         installed, broken = None, error
     try:
-        reason, candidate = t3_candidate_check(installed, page)
+        reason, candidate = t3_candidate_check(installed, page, warnings)
     except T3_CHECK_ERRORS as error:
         reason, candidate = f'the newest linux-arm64 build could not be checked for {page // 1024} KiB pages ({error})', None
     if installed is None:
@@ -589,7 +759,28 @@ def update_t3(completed, warnings):
         return
     # Install exactly the build that was checked, never a newer unchecked one.
     print(f'Updating T3 Code Nightly to {candidate} (its background service may restart)…', flush=True)
-    run(['t3', 'update', '--channel', 'nightly', '--yes', candidate], deadline=300, capture=False)
+    try:
+        run(['t3', 'update', '--channel', 'nightly', '--yes', candidate], deadline=300, capture=False)
+    except (UpdateError, OSError) as error:
+        try:
+            kept = t3_version()
+        except (UpdateError, OSError):
+            repair_t3(completed, warnings, [installed, T3_KNOWN_GOOD_LARGE_PAGE],
+                      f'T3 Code {candidate} does not start after updating ({T3_PAGE_SIZE_ISSUE}).')
+            return
+        # The installed build still starts. Remember the candidate only when
+        # that build itself failed (signal exit or PinnedRuntimeInstallError).
+        # A 300s deadline, a transport error, or any other OSError is retried
+        # on the next update-all and is not written to t3-rejected.json.
+        if kept != installed:
+            raise
+        detail = t3_failure_reason(error)
+        if t3_candidate_rejected(error):
+            reject_t3(page, candidate)
+        print(f'T3 Code {candidate} was not installed ({detail}). Keeping {installed}.', flush=True)
+        warnings.append(f'T3 Code {candidate} was not installed ({detail}); kept {installed}.')
+        completed.append(f'T3 Code update skipped on {page // 1024} KiB pages; kept {installed}')
+        return
     try:
         updated = t3_version()
     except (UpdateError, OSError):
