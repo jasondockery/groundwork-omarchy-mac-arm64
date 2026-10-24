@@ -4,12 +4,16 @@ Reference machine: Apple Mac mini (M1, 2020). Details are in `docs/machines/mac-
 
 | Item | State |
 |---|---|
-| Omarchy installed | Live package `omarchy-dev 4.0.0.r7080.g60f5b49-1`, observed 2026-10-18. The older record was `4.0.2-2` stable; installer provenance and the current channel were not verified during this setup. |
-| Migration track | Newest upstream Omarchy Mac Installer prerelease plus signed `edge` catalog. As of 2026-10-16, catalog enables `apple,j274`, requires installer `2.2.0`, and selects image [`omarchy-mac-edge-2026.10.14-79f8e36b977f`](https://github.com/omacom/omarchy-mac-installer/releases/tag/omarchy-mac-edge-2026.10.14-79f8e36b977f). Intentional bleeding-edge install; use current catalog, not a pinned dated image. |
-| Kernel | Running `7.1.12-7-2-ARCH`; package `linux-aurora 7.1.12.aurora7-2`. |
-| Blank Super+K / Super+Space menu | Upstream [omarchy-mac#707](https://github.com/omacom/omarchy-mac/issues/707). Selected beta image is a reinstall target; verify both shortcuts after boot. No local patch. |
-| Microphone unit error | Upstream [omarchy-mac#728](https://github.com/omacom/omarchy-mac/issues/728). No workaround applied. |
-| Wi-Fi drops while awake | Upstream [omarchy-mac#729](https://github.com/omacom/omarchy-mac/issues/729). No workaround applied. |
+| Install | Migrated 2026-10-17 with Omarchy Mac Installer **2.2.0** and image [`omarchy-mac-edge-2026.10.14-79f8e36b977f`](https://github.com/omacom/omarchy-mac-installer/releases/tag/omarchy-mac-edge-2026.10.14-79f8e36b977f). Desktop is `omarchy-dev` / `omarchy-settings-dev` `4.0.0.r7235.g967bbdd-1` from `omacom/omarchy` `quattro` via `pkgs.omarchy.org/edge`. `omarchy-mac 0.1.4-1`, `omarchy-mac-boot 20261023-1`. `OMARCHY_PATH=/usr/share/omarchy`; no `~/.local/share/omarchy` checkout. `/var/lib/omarchy/image/target` is absent (the 10.14 image predates it). Observed 2026-10-23. |
+| Channel | `omarchy-channel-current`: `edge`; `omarchy-version`: `4.0.0.r7235.g967bbdd-1`. Apple Silicon has no stable or rc channel. pacman order: `[omarchy]` `https://pkgs.omarchy.org/edge/$arch`, then `[asahi-alarm]`, then `core`, `extra`, `alarm`, and `aur`. |
+| Boot chain | m1n1-aurora → U-Boot → Limine → `linux-aurora`. Packages: `linux-aurora 7.2.11.aurora1-1` (running `7.2.11` after reboot), `m1n1-aurora 1.6.1.aurora20-3`, `limine 12.9.4-1`. `grub` and `linux-asahi` are not installed. New installer images ship `linux-aurora` only. |
+| Encryption / disk | LUKS-encrypted btrfs root 384.5G, 2G ext4 `/boot`, 500M vfat `/boot/efi`. macOS APFS (71.1G) and RecoveryOS kept. Not an `asahi-root` volume. |
+| Super+Space / Super+K | Both work. Shell logs 0 palette `Cannot read property` errors. Fix on this path is [omarchy#14553](https://github.com/omacom/omarchy/pull/14553) in `quattro` (`omarchy-dev` r7235). [omarchy-mac#707](https://github.com/omacom/omarchy-mac/issues/707) / [PR #710](https://github.com/omacom/omarchy-mac/pull/710) cover only the omarchy-mac `quattro` path. No local patch. |
+| Microphone unit error | Upstream [omarchy-mac#728](https://github.com/omacom/omarchy-mac/issues/728). Recheck on Aurora; do not treat the older Asahi result as current. No workaround applied. |
+| Wi-Fi drops while awake | Upstream [omarchy-mac#729](https://github.com/omacom/omarchy-mac/issues/729). Recheck on Aurora; do not treat the older Asahi result as current. No workaround applied. |
+| Units | No failed system or user units. Observed 2026-10-23. |
+| Catalog (not this install) | As of 2026-10-23, [catalog-edge](https://github.com/omacom/omarchy-mac-installer/releases/tag/catalog-edge) enables `apple,j274`, requires installer [`2.3.8`](https://github.com/omacom/omarchy-mac-installer/releases/tag/v2.3.8) (DMG SHA-256 `61d15a55adb084824d007160fe7a4af07d5603432b32ce68e02c53b3637abc34`), and selects [`omarchy-mac-edge-2026.10.23-bdc3a487ab14-a3b3c6f5e77c`](https://github.com/omacom/omarchy-mac-installer/releases/tag/omarchy-mac-edge-2026.10.23-bdc3a487ab14-a3b3c6f5e77c). |
+| Desktop packages | `hyprland 0.56.2-7`, `quickshell 0.3.2.r7`, `qt6-base 6.12.0-3`, `qt6-declarative 6.12.0-2`. |
 | Trackpad | Personal override linked; Hyprland reload succeeded with no configuration errors. Bluetooth pairing works and was confirmed by the user. |
 | Caps Lock | keyd enabled and active; installed config matches the repo's tap-Escape/hold-Control default. Physical tap/hold acceptance remains to be checked by the user. |
 | Remote access | Tailscale installed, enrolled and online; daemon enabled and active. Two-way SSH acceptance remains pending. Decision is `docs/decisions/0004-remote-access.md`. |
@@ -17,4 +21,4 @@ Reference machine: Apple Mac mini (M1, 2020). Details are in `docs/machines/mac-
 | Apps | T3 Code Nightly, Cursor, Herdr, Obsidian, Bitwarden CLI and user Flatpak installed. Existing Obsidian settings preserved. Account sign-in, browser-extension approval/autofill, and note sync remain user acceptance. A new desktop session may be needed for the Flatpak launcher entry. |
 | Live setup findings | [Chromium registration directory permissions](https://github.com/jasondockery/groundwork-omarchy-mac-arm64/issues/4) and [missing provider behind a mise shim](https://github.com/jasondockery/groundwork-omarchy-mac-arm64/issues/5). Package/configuration checks do not prove authenticated app use. |
 
-Last observed locally: 2026-10-18. This records setup checks, not full desktop or cross-machine acceptance.
+Last observed locally: 2026-10-23 (read-only OS, channel, boot, disk, shell, and unit checks). Trackpad, Caps Lock, Tailscale, WayVNC, and app-acceptance rows are earlier setup notes, not a 2026-10-23 recheck. Package presence is not live desktop or cross-machine acceptance.

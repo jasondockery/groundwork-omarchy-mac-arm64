@@ -1,7 +1,1 @@
-# 0002. Migrate through the latest Omarchy Mac edge installer
-
-When this decision was made, the reference Apple Mac mini (M1, 2020) was recorded as running Omarchy `4.0.2-2` stable with a blank Super+Space menu. The current observed package state is in [status](../status.md); a later package version alone does not prove installer provenance. The chosen reinstall path is the newest upstream Omarchy Mac Installer prerelease and signed `edge` catalog. As of 2026-10-16, that catalog enables `apple,j274`, requires installer `2.2.0`, and selects edge image `omarchy-mac-edge-2026.10.14-79f8e36b977f`. This deliberately favors the newest fixes over a stable release.
-
-This is a reinstall/recovery path that replaces the current OS installation, not a package-channel switch or a `groundwork-mac` setup. Start from the running Omarchy system, boot macOS once, and run the installer there. The `com.omarchy.mx` cleanup uses macOS `launchctl` and `defaults`. Those commands do not run inside Omarchy. Use the current signed edge catalog so the installer selects its newest compatible image; the dated image in the README records today's catalog selection, not a permanent pin. Back up required data first and use the upstream release instructions. Keep the recorded installed version unchanged until migration has actually happened.
-
-After first boot, verify Super+Space and Super+K. The blank-menu report remains tracked in [omarchy-mac#707](https://github.com/omacom/omarchy-mac/issues/707); update this decision and `docs/status.md` with the installed version and observed result after qualification.
+Superseded by [0002. Edge via the Omarchy Mac Installer](0002-edge-via-omarchy-mac-installer.md).
