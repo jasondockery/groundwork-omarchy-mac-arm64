@@ -21,7 +21,7 @@ class InputOverrideTests(unittest.TestCase):
         self.assertIn('tap_to_click = true', self.text)
         self.assertIn('drag_3fg = 1', self.text)
         self.assertIn('scroll_factor = 0.2', self.text)
-        self.assertIn('natural_scroll = false', self.text)
+        self.assertNotIn('natural_scroll', self.text)
         self.assertNotIn('clickfinger_behavior', self.text)
         for keyboard in ('repeat_rate', 'repeat_delay', 'numlock_by_default',
                          'kb_layout', 'kb_options'):

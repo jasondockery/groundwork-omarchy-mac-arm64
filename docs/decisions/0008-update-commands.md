@@ -3,6 +3,9 @@
 Use `update-all` for routine maintenance and `groundwork-update` for configuration
 only. Omarchy continues to own the OS through `omarchy update`; Groundwork owns
 its personal settings, T3 Nightly, and its installed Bitwarden user Flatpak.
+`update-all` also updates listed Omarchy shell-plugin checkouts. `groundwork-update`
+installs or retires those plugins and leaves their revisions unchanged. See
+[decision 0010](0010-omarchy-plugins-from-shared-list.md).
 
 The stable installed Python coordinator fetches a unique candidate ref, verifies
 a fast-forward from the clean tracked source, and displays its change summary

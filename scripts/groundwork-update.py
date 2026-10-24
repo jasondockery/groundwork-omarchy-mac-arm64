@@ -748,8 +748,10 @@ def update(scope, check=False):
                                              previous_sha256=hashlib.sha256(KEYD_CONFIG.read_bytes()).hexdigest())
                 atomic_write(CONFIG, json.dumps(value, indent=2) + '\n')
             print('Applying Groundwork settings using saved setup choices…', flush=True)
-            run(['bash', str(source / 'scripts/apply-layer.sh'), '--update'],
-                deadline=900, capture=False, lock_fd=lock.fileno())
+            apply_args = ['bash', str(source / 'scripts/apply-layer.sh'), '--update']
+            if scope == 'all':
+                apply_args.append('--update-plugins')
+            run(apply_args, deadline=900, capture=False, lock_fd=lock.fileno())
             value = settings()
             if value['keyd']:
                 value['keyd_sha256'] = hashlib.sha256((source / 'keyd/default.conf').read_bytes()).hexdigest()
@@ -881,8 +883,10 @@ def main(args):
         print(f'Usage: {"update-all" if scope == "all" else "groundwork-update"} [--check]')
         print('Synchronize and apply this Groundwork layer using saved setup choices.')
         if scope == 'all':
-            print('Also run omarchy update, update T3 Nightly (including its background service), and update the installed Bitwarden user Flatpak.')
+            print('Also run omarchy update, update listed Omarchy shell plugins, update T3 Nightly (including its background service), and update the installed Bitwarden user Flatpak.')
             print(f'When Blip is opted in, update {BLIP_ID} only in an interactive terminal, without --yes, so its diff can be reviewed.')
+        else:
+            print('Listed shell plugins are installed or retired. Existing plugin checkouts stay at their current revisions.')
         print('--check fetches and displays repository changes without advancing the checkout or applying settings.')
         return 0
     if options not in ([], ['--check']):

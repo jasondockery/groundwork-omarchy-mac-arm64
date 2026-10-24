@@ -65,8 +65,9 @@ update-all
 ```
 
 It checks this repo, runs the supported `omarchy update`, fast-forwards and
-applies your personal settings, updates T3 Code Nightly, and updates the installed
-Bitwarden user Flatpak. T3's background service may restart. Other Flatpaks and
+applies your personal settings, updates listed Omarchy shell plugins, updates
+T3 Code Nightly, and updates the installed Bitwarden user Flatpak. `omarchy update`
+does not update those plugin checkouts. T3's background service may restart. Other Flatpaks and
 application sign-in remain outside this command. Omarchy owns the OS, Arch
 packages, default tools, and desktop; no second system updater is installed.
 
@@ -92,7 +93,8 @@ not run the wizard. `groundwork-update` does not update the plugin.
 
 For only repository configuration, run `groundwork-update`. It preserves saved
 keyd, screen-sharing, Blip, and Obsidian vault choices and does not request routine
-system or app upgrades. It can install a newly declared missing tool needed by
+system or app upgrades. It installs and retires listed shell plugins and leaves
+existing plugin checkouts at their current revisions. It can install a newly declared missing tool needed by
 the settings. Use `./install.sh` with explicit `--with-keyd`, `--without-keyd`,
 `--with-screen-sharing`, `--without-screen-sharing`, `--with-blip`, or
 `--without-blip` when changing those preferences. Skipping an existing feature
@@ -246,10 +248,12 @@ Omarchy keeps its own desktop, tmux file, shell, and Super keybindings. Practice
 
 | Path | Why it is not already in Omarchy |
 |---|---|
-| `packages/hypr/.config/hypr/input.lua` | Trackpad choices that differ from Omarchy's defaults: traditional scrolling, tap-to-click, three-finger drag, faster pointer, slower page scrolling |
+| `packages/hypr/.config/hypr/input.lua` | Trackpad choices that differ from Omarchy's defaults: tap-to-click, three-finger drag, faster pointer, slower page scrolling |
 | `keyd/default.conf` | Default Caps Lock behavior: tap = Escape, hold = Control, via keyd |
 | `packages.txt` | Optional aarch64 packages that are not part of the Omarchy install |
 | `git/config.local.example` | Placeholder for a name and email. Not applied |
+| `scripts/omarchy-plugins.py` | Applies the shared Omarchy shell-plugin list through `omarchy plugin` |
+| `omarchy-plugins.exclude.json` | Plugin ids this layer skips, each with a reason |
 
 ## Learn Omarchy's defaults
 
@@ -264,6 +268,14 @@ Useful starting points from the [Omarchy hotkey guide](https://github.com/omacom
 
 These are Omarchy's documented defaults and intended workflow, not a claim that every AI developer uses the same setup. Omarchy's first-party manuals are the clearest current reference for the conventions the project ships.
 
+## Shell plugins
+
+Shared default shell plugins live in [groundwork-core `omarchy/plugins.json`](https://github.com/jasondockery/groundwork-core/blob/main/omarchy/plugins.json). This repo applies that list and does not name plugin ids. Setup and both update commands run `scripts/omarchy-plugins.py` once, after the Hyprland reload. `GROUNDWORK_PLUGIN_LIST` may point at a local file or an https URL. Otherwise the helper downloads `https://raw.githubusercontent.com/jasondockery/groundwork-core/main/omarchy/plugins.json` over https, rejects a non-https redirect or a redirect to any host other than the starting host, `raw.githubusercontent.com`, `objects.githubusercontent.com`, or `github.com`, and bounds each read by the time left on its deadline. The last valid copy is kept in `$XDG_STATE_HOME/groundwork/omarchy-plugins.json` (default `~/.local/state/groundwork/omarchy-plugins.json`). A missing list, a rejected list, or a network or HTTP failure uses that copy. With no list and no saved copy, apply prints one line and continues.
+
+An entry is skipped when its `arch` does not include `uname -m`, or when its id is listed in `omarchy-plugins.exclude.json` or `~/.config/groundwork/omarchy-plugins.exclude.json`. Each exclusion has an id and a reason. A plugin directory that already exists under `~/.config/omarchy/plugins/<id>` stays as it is, including a plugin you disabled. A plugin you removed stays uninstalled. Retired ids are removed only when this layer recorded the install. `update-all` updates listed checkouts that are already installed. `groundwork-update` leaves those revisions unchanged. New plugins are enabled while `omarchy-shell` is running; otherwise that install waits for the next run. Omarchy Mac accepts bar sections `left`, `center`, and `right`. Any other section skips that entry, and the rest of the list still applies. A setup command runs from a terminal after install, again after `update-all` moves that checkout, and again when an earlier run left it pending. A setup that needs sudo runs as the current user after sudo is primed. `~/.config/omarchy/shell.json` stays unstowed.
+
+If `~/.config/hypr/mouse.lua` or `~/.config/hypr/omacontrol.lua` sets `touchpad.natural_scroll` differently from the stowed `input.lua`, the file Hyprland loads later wins. If `hyprland.lua` does not load the differing file, apply says so and the stowed `input.lua` still applies. See `docs/decisions/0010-omarchy-plugins-from-shared-list.md`.
+
 ## Left out on purpose
 
 Omarchy already ships these, or owning them would freeze a file that `omarchy update` is supposed to change. Account material stays on the machine.
@@ -274,7 +286,7 @@ Omarchy already ships these, or owning them would freeze a file that `omarchy up
 - `~/.config/tmux/tmux.conf` (Omarchy's built-in config stays active)
 - zsh as the login shell, and Linuxbrew
 - Neovim, Ghostty, Karabiner, and macOS defaults
-- `~/.config/omarchy/shell.json`
+- `~/.config/omarchy/shell.json` and plugin checkouts under `~/.config/omarchy/plugins/`
 - SSH config, public keys, and private keys
 - Git remotes, `insteadOf` rules, and account emails
 - Wi-Fi names and Tailscale addresses
