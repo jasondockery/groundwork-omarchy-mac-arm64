@@ -48,6 +48,17 @@ for arg in "$@"; do
   esac
 done
 
+# GROUNDWORK_TEST_ROOT lets the isolated fixtures relocate system paths. It is
+# honoured only together with the harness's GROUNDWORK_TESTING=1.
+test_root=""
+if [[ -n ${GROUNDWORK_TEST_ROOT:-} ]]; then
+  if [[ ${GROUNDWORK_TESTING:-} != 1 ]]; then
+    echo "GROUNDWORK_TEST_ROOT is a test-only variable. Unset it and rerun; nothing was changed." >&2
+    exit 64
+  fi
+  test_root=$GROUNDWORK_TEST_ROOT
+fi
+
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 python3 "$root/scripts/groundwork-update.py" verify-lock
@@ -106,8 +117,82 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [[ "$EUID" -ne 0 ]]; then
-  if ! sudo -n true 2>/dev/null; then
+# Each privileged step has a check that needs no sudo. A routine update uses
+# them to ask for administrator permission only when something must change.
+chromium_dir=$test_root/usr/share/chromium
+keyd_config=$test_root/etc/keyd/default.conf
+extension_dir=$chromium_dir/extensions
+screen_share_rule=(allow in on tailscale0 to any port 5900 proto tcp comment 'Groundwork screen sharing')
+screen_share_rule_marker="${XDG_STATE_HOME:-$HOME/.local/state}/groundwork/ufw-screen-share-rule"
+service_ready() {
+  systemctl is-enabled --quiet "$1" 2>/dev/null && systemctl is-active --quiet "$1" 2>/dev/null
+}
+chromium_extension_current() {
+  [[ $(stat -c %a "$chromium_dir" 2>/dev/null) == 755 && $(stat -c %a "$extension_dir" 2>/dev/null) == 755 ]] &&
+    cmp -s "$extension_source" "$extension_dir/$bitwarden_extension" &&
+    [[ $(stat -c %a "$extension_dir/$bitwarden_extension" 2>/dev/null) == 644 ]]
+}
+# ufw cannot list rules without root, so remember the rule this layer added.
+screen_share_rule_current() {
+  [[ ! -L $screen_share_rule_marker && -f $screen_share_rule_marker &&
+    $(<"$screen_share_rule_marker") == "${screen_share_rule[*]}" ]]
+}
+keyd_current() {
+  cmp -s "$root/keyd/default.conf" "$keyd_config" && service_ready keyd
+}
+privileged_changes_needed() {
+  local executable
+  # Missing tools are installed through omarchy pkg add or Omarchy's installers.
+  # readelf (binutils) is what update-all uses to check T3 Code builds.
+  for executable in cursor herdr tailscale obsidian bw readelf; do
+    command -v "$executable" >/dev/null || return 0
+  done
+  if ! command -v bitwarden >/dev/null && ! command -v flatpak >/dev/null; then
+    return 0
+  fi
+  service_ready tailscaled || return 0
+  if command -v chromium >/dev/null; then
+    chromium_extension_current || return 0
+  fi
+  if [[ $with_screen_sharing -eq 1 ]]; then
+    command -v wayvnc >/dev/null || return 0
+    if command -v ufw >/dev/null; then
+      screen_share_rule_current || return 0
+    fi
+  fi
+  if [[ $with_keyd -eq 1 ]]; then
+    command -v keyd >/dev/null || return 0
+    keyd_current || return 0
+  fi
+  return 1
+}
+
+needs_privilege=1
+if [[ $updating -eq 1 ]] && ! privileged_changes_needed; then
+  needs_privilege=0
+  echo "No administrator changes are needed for this update; sudo was not used."
+fi
+
+if [[ "$EUID" -ne 0 && $needs_privilege -eq 1 && $updating -eq 1 ]]; then
+  # Prime sudo once in the foreground terminal before the first privileged step.
+  if [[ -r /dev/tty && -w /dev/tty ]] && : </dev/tty >/dev/null; then
+    echo "This update changes system settings and needs administrator permission."
+    sudo_status=0
+    # shellcheck disable=SC2024
+    sudo /usr/bin/true </dev/tty >/dev/tty 2>/dev/tty || sudo_status=$?
+    if [[ "$sudo_status" -ne 0 ]]; then
+      echo "Administrator permission was not granted, so nothing was changed." >&2
+      exit "$sudo_status"
+    fi
+  elif ! sudo -n /usr/bin/true 2>/dev/null; then
+    echo "This update needs administrator permission, and no terminal is available to ask for it." >&2
+    echo "Nothing was changed. Run update-all or groundwork-update from a terminal." >&2
+    exit 1
+  fi
+fi
+
+if [[ "$EUID" -ne 0 && $needs_privilege -eq 1 ]]; then
+  if [[ $updating -eq 0 ]] && ! sudo -n true 2>/dev/null; then
     if [[ -r /dev/tty && -w /dev/tty ]] && : </dev/tty >/dev/null; then
       echo "This install needs an administrator password for Tailscale, the browser extension, and keyd."
       echo "Enter your password when asked. This approval covers the privileged steps in this run."
@@ -298,7 +383,9 @@ install_cursor
 install_package binutils readelf
 install_package herdr
 install_package tailscale
-sudo systemctl enable --now tailscaled
+if [[ $updating -eq 0 ]] || ! service_ready tailscaled; then
+  sudo systemctl enable --now tailscaled
+fi
 
 # Omarchy owns Obsidian's package, theme, and launch shortcut. Bitwarden's
 # desktop package is absent from the current ARM feed; use its ARM64 Flathub
@@ -319,14 +406,15 @@ fi
 # Chromium fetches and updates the official Web Store extension per profile;
 # no account state or browser preference database is written here.
 if command -v chromium >/dev/null; then
-  extension_dir=/usr/share/chromium/extensions
-  # Chromium must traverse both directories even when setup uses umask 077.
-  # Explicit modes also repair directories created by an earlier setup run.
-  sudo install -d -m 755 /usr/share/chromium "$extension_dir"
-  if ! sudo cmp -s "$extension_source" "$extension_dir/$bitwarden_extension"; then
-    sudo cp --backup=numbered --remove-destination "$extension_source" "$extension_dir/$bitwarden_extension"
+  if [[ $updating -eq 0 ]] || ! chromium_extension_current; then
+    # Chromium must traverse both directories even when setup uses umask 077.
+    # Explicit modes also repair directories created by an earlier setup run.
+    sudo install -d -m 755 "$chromium_dir" "$extension_dir"
+    if ! sudo cmp -s "$extension_source" "$extension_dir/$bitwarden_extension"; then
+      sudo cp --backup=numbered --remove-destination "$extension_source" "$extension_dir/$bitwarden_extension"
+    fi
+    sudo chmod 644 "$extension_dir/$bitwarden_extension"
   fi
-  sudo chmod 644 "$extension_dir/$bitwarden_extension"
   echo "Bitwarden's official extension is registered. Restart Chromium, approve it if prompted, and sign in in each profile."
 else
   echo "Chromium is unavailable; skipped its Bitwarden extension. Rerun setup after installing Chromium."
@@ -386,9 +474,13 @@ python3 "$root/scripts/seed-obsidian.py" "${GROUNDWORK_OBSIDIAN_VAULT:-$HOME/Doc
 if [[ $with_screen_sharing -eq 1 ]]; then
   install_package wayvnc
   python3 "$root/scripts/groundwork-screen-share.py" configure
-  if command -v ufw >/dev/null; then
-    sudo ufw allow in on tailscale0 to any port 5900 proto tcp comment 'Groundwork screen sharing'
+  if command -v ufw >/dev/null && { [[ $updating -eq 0 ]] || ! screen_share_rule_current; }; then
+    sudo ufw "${screen_share_rule[@]}"
+    python3 "$root/scripts/groundwork-update.py" marker write ufw-screen-share-rule "${screen_share_rule[*]}"
   fi
+else
+  # The rule is left in place; forget it so re-enabling sharing re-adds it.
+  python3 "$root/scripts/groundwork-update.py" marker remove ufw-screen-share-rule
 fi
 
 # Stow will not replace a real file. Move conflicting files aside so this
@@ -429,13 +521,15 @@ fi
 
 if [[ $with_keyd -eq 1 ]]; then
   install_package keyd
-  sudo mkdir -p /etc/keyd
-  if ! sudo cmp -s "$root/keyd/default.conf" /etc/keyd/default.conf; then
-    # GNU cp keeps a numbered backup of an existing config, including on reruns.
-    sudo cp --backup=numbered --remove-destination "$root/keyd/default.conf" /etc/keyd/default.conf
+  if [[ $updating -eq 0 ]] || ! keyd_current; then
+    sudo mkdir -p "$(dirname "$keyd_config")"
+    if ! sudo cmp -s "$root/keyd/default.conf" "$keyd_config"; then
+      # GNU cp keeps a numbered backup of an existing config, including on reruns.
+      sudo cp --backup=numbered --remove-destination "$root/keyd/default.conf" "$keyd_config"
+    fi
+    sudo systemctl enable --now keyd
+    sudo keyd reload
   fi
-  sudo systemctl enable --now keyd
-  sudo keyd reload
   echo "keyd is running. A tap of Caps Lock is Escape. Holding it is Control."
 else
   echo "Skipped keyd setup; any existing keyd configuration and service were left alone."

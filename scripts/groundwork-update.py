@@ -30,6 +30,12 @@ T3_PAGE_SIZE_ISSUE = 'pingdotgg/t3code#23433'
 T3_INSTALLER = 'https://t3.codes/install.sh'
 # Last nightly whose ELF files all load on 16 KiB pages (pingdotgg/t3code#23433).
 T3_KNOWN_GOOD_LARGE_PAGE = '0.1.2-nightly.20261021.3499'
+# Captured stages print progress at this interval. Interactive stages own the
+# terminal and stay quiet so a prompt (for example sudo) is never interrupted.
+HEARTBEAT_SECONDS = 30
+# On a deadline or an interrupt, the stage gets SIGINT and this long to clean
+# up before SIGTERM and then SIGKILL.
+INTERRUPT_GRACE_SECONDS = 10
 
 
 class UpdateError(Exception):
@@ -138,24 +144,82 @@ def register(source, keyd, screen_sharing, vault):
         atomic_write(Path.home() / '.local/bin' / command, launcher, 0o755, owned=True)
 
 
-def stop(process):
+MARKERS = {'ufw-screen-share-rule'}
+STOP_SIGNALS = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
+
+
+def signal_group(process, signum):
+    """Signal the stage's process group; False once the group is gone."""
+    try:
+        os.killpg(process.pid, signum)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # A child that became root (sudo, pkexec) cannot be signalled by us.
+        print(f'Could not send {signal.Signals(signum).name} to every process started by {process.args[0]}; '
+              'a privileged child may still be running.', file=sys.stderr, flush=True)
+    return True
+
+
+def group_alive(process):
+    try:
+        os.killpg(process.pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        print(f'Could not check the remaining processes started by {process.args[0]}; continuing.',
+              file=sys.stderr, flush=True)
+        return False
+    return True
+
+
+def reap(process):
+    try:
+        process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        print(f'{process.args[0]} (process {process.pid}) is still running after SIGKILL.', file=sys.stderr, flush=True)
+
+
+def stop(process, grace=0):
+    # Hold Ctrl+C, SIGTERM, and SIGHUP until the stage is cleaned up, so a
+    # repeated interrupt cannot escape halfway and leave the child running.
+    # A held signal is delivered, and raises as usual, when the mask returns.
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
+    try:
+        stop_group(process, grace)
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
+def stop_group(process, grace):
+    # On a deadline or an interrupt, forward SIGINT first so interactive tools
+    # (omarchy update, pacman, sudo) can clean up, as if Ctrl+C was pressed.
+    if grace:
+        if not signal_group(process, signal.SIGINT):
+            reap(process)
+            return
+        ends = time.monotonic() + grace
+        while time.monotonic() < ends:
+            if process.poll() is not None and not group_alive(process):
+                return
+            if STOP_SIGNALS & signal.sigpending():
+                # A second interrupt asks to stop now: skip the rest of the grace.
+                signal_group(process, signal.SIGKILL)
+                reap(process)
+                return
+            time.sleep(0.05)
     # A completed wrapper can leave a child in its session. Drain that owned
     # group before releasing the updater lock, even after the leader exited.
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        process.wait()
+    if not signal_group(process, signal.SIGTERM):
+        reap(process)
         return
     try:
         process.wait(timeout=3)
     except subprocess.TimeoutExpired:
         pass
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    signal_group(process, signal.SIGKILL)
     if process.poll() is None:
-        process.wait(timeout=3)
+        reap(process)
 
 
 def foreground(fd, group):
@@ -181,6 +245,7 @@ def run(args, cwd=None, deadline=20, capture=True, lock_fd=None, extra_env=None)
         # group. Hand terminal input and Ctrl+C to it, then restore the caller.
         group_options = dict(process_group=0)
     started = time.monotonic()
+    interrupted = False
     try:
         environment = dict(os.environ, GIT_TERMINAL_PROMPT='0', GIT_PAGER='cat')
         environment.update(extra_env or {})
@@ -198,34 +263,48 @@ def run(args, cwd=None, deadline=20, capture=True, lock_fd=None, extra_env=None)
             except ProcessLookupError:
                 if process.poll() is None:
                     raise
-        while True:
-            remaining = deadline - (time.monotonic() - started)
-            if remaining <= 0:
-                raise UpdateError(f'{args[0]} exceeded its {deadline}-second deadline. Retry after repairing that stage.')
-            try:
-                stdout, stderr = process.communicate(timeout=min(remaining, 30))
-                break
-            except subprocess.TimeoutExpired:
-                print(f'Still running {args[0]}; elapsed {int(time.monotonic() - started)} seconds.', flush=True)
+        try:
+            while True:
+                remaining = deadline - (time.monotonic() - started)
+                if remaining <= 0:
+                    interrupted = True
+                    raise UpdateError(f'{args[0]} exceeded its {deadline}-second deadline. Retry after repairing that stage.')
+                try:
+                    stdout, stderr = process.communicate(timeout=min(remaining, HEARTBEAT_SECONDS))
+                    break
+                except subprocess.TimeoutExpired:
+                    # A child that owns the terminal may be waiting at a prompt,
+                    # so only captured or terminal-less (cron) stages report.
+                    if (capture or terminal is None) and time.monotonic() - started < deadline:
+                        print(f'Still running {args[0]}; elapsed {int(time.monotonic() - started)} seconds.', flush=True)
+        except KeyboardInterrupt:
+            interrupted = True
+            raise
         if process.returncode in (-signal.SIGINT, -signal.SIGTERM, -signal.SIGHUP, 130, 143, 129):
             raise KeyboardInterrupt(abs(process.returncode) if process.returncode < 0 else process.returncode - 128)
         if process.returncode:
             raise UpdateError(f'{args[0]} failed (exit {process.returncode}).\n{stderr or "See the stage output above."}')
         return (stdout or '').strip()
     finally:
+        # Hold interrupts from the first cleanup instruction, so none can land
+        # between the stage ending and stop() taking over.
+        held = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
         try:
-            if process:
-                stop(process)
+            try:
+                if process:
+                    stop(process, INTERRUPT_GRACE_SECONDS if interrupted else 0)
+            finally:
+                if terminal is not None:
+                    try:
+                        foreground(terminal, original_group)
+                    finally:
+                        os.close(terminal)
+                if process:
+                    for stream in (process.stdout, process.stderr):
+                        if stream:
+                            stream.close()
         finally:
-            if terminal is not None:
-                try:
-                    foreground(terminal, original_group)
-                finally:
-                    os.close(terminal)
-            if process:
-                for stream in (process.stdout, process.stderr):
-                    if stream:
-                        stream.close()
+            signal.pthread_sigmask(signal.SIG_SETMASK, held)
 
 
 def page_size():
@@ -600,6 +679,17 @@ def main(args):
             run(['bash', str(Path(source) / 'scripts/apply-layer.sh'), *options],
                 deadline=900, capture=False, lock_fd=lock.fileno())
         return 0
+    if args and args[0] == 'marker' and len(args) >= 3 and args[2] in MARKERS:
+        # Setup records state it cannot read back without root, using the same
+        # atomic, symlink-refusing writes as the rest of the updater state.
+        path = STATE / args[2]
+        if args[1] == 'write' and len(args) == 4:
+            atomic_write(path, args[3] + '\n')
+            return 0
+        if args[1] == 'remove' and len(args) == 3:
+            check_path(path)
+            path.unlink(missing_ok=True)
+            return 0
     if args and args[0] == 'validate' and len(args) == 2:
         validate_registration(args[1])
         return 0
