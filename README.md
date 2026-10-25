@@ -30,6 +30,8 @@ WayVNC screen sharing is also configured automatically. It starts with the logge
 
 Blip, an iMessage client, stays off unless you pass `--with-blip`. It installs `nixfred.blip` from git through Omarchy's plugin manager and does not run the bridge wizard. A separate Mac on macOS is the gateway. `--without-blip` leaves an existing Blip install unchanged. Follow [iMessage setup](docs/imessage.md).
 
+Local inference stays off unless you pass `--with-local-inference`. That installs Omarchy's `ollama` and `ollama-vulkan` packages and downloads no model. A package install is not a GPU result. Follow [local inference](docs/local-inference.md) and run `scripts/verify-local-inference.py` on the Mac. `--without-local-inference` records the preference as off.
+
 Finish [Tailscale setup](docs/remote-access.md), including the tailnet policy review, interactive sign-in, and device approval. The local commands are:
 
 ```bash
@@ -54,6 +56,7 @@ Only enable SSH after reviewing that guide and your effective tailnet policy. No
 - From another approved computer in the same tailnet, run `ssh LOCAL_USER@MACHINE` using this machine's local login and MagicDNS name. Confirm the hostname and attach to tmux or Herdr. Test the reverse direction too using the destination's supported SSH setup.
 - From a Mac, connect to `vnc://MACHINE` with the generated local VNC password. Verify the screen and input, including after logout/login or reboot. Command+1 selects a workspace, and Option+1 selects a multiplexer window. Tailscale visibility alone does not prove a desktop server is running or permitted by policy.
 - If you passed `--with-blip`, finish on the desktop with the printed `blip-setup` command and the checks in [iMessage setup](docs/imessage.md). Send the first test message only to your own number.
+- If you passed `--with-local-inference`, the packages are installed and the GPU is still unproven. Run the three commands in [local inference](docs/local-inference.md) on this Mac and keep the report they write.
 
 If a step fails, keep its error and fix it before treating the setup as accepted. The automated fixtures test installer behavior; they cannot prove your physical input devices, desktop, accounts, or a second machine's connection.
 
@@ -108,8 +111,9 @@ keyd, screen-sharing, Blip, and Obsidian vault choices and does not request rout
 system or app upgrades. It installs and retires listed shell plugins and leaves
 existing plugin checkouts at their current revisions. It can install a newly declared missing tool needed by
 the settings. Use `./install.sh` with explicit `--with-keyd`, `--without-keyd`,
-`--with-screen-sharing`, `--without-screen-sharing`, `--with-blip`, or
-`--without-blip` when changing those preferences. Skipping an existing feature
+`--with-screen-sharing`, `--without-screen-sharing`, `--with-blip`,
+`--without-blip`, `--with-local-inference`, or `--without-local-inference`
+when changing those preferences. Skipping an existing feature
 does not disable its service or remove Blip.
 
 Routine updates ask for your password only when a system change is needed, for
@@ -312,7 +316,7 @@ omarchy pkg add stow
 ./install.sh
 ```
 
-That links the trackpad override, installs Herdr, Tailscale, keyd, Obsidian, Bitwarden, and FreeTube, enables `tailscaled` and `keyd`, and installs T3 Code's ARM64 CLI. Pass `--with-blip` only when you want the iMessage client; the default leaves it off. If `~/.config/hypr/input.lua` already exists, the script moves it to `input.lua.bak-omarchy-groundwork`, preserving numbered predecessors if necessary, and then links the copy from this repo. It does not configure Git/SSH accounts. Complete the [Tailscale setup](docs/remote-access.md) and [desktop apps setup](docs/apps.md) after install.
+That links the trackpad override, installs Herdr, Tailscale, keyd, Obsidian, Bitwarden, and FreeTube, enables `tailscaled` and `keyd`, and installs T3 Code's ARM64 CLI. Pass `--with-blip` only when you want the iMessage client; the default leaves it off. Pass `--with-local-inference` only when you want the Ollama packages; the default leaves them off and downloads no model. See [local inference](docs/local-inference.md). If `~/.config/hypr/input.lua` already exists, the script moves it to `input.lua.bak-omarchy-groundwork`, preserving numbered predecessors if necessary, and then links the copy from this repo. It does not configure Git/SSH accounts. Complete the [Tailscale setup](docs/remote-access.md) and [desktop apps setup](docs/apps.md) after install.
 
 ### Caps Lock: Escape on tap, Control while held
 
