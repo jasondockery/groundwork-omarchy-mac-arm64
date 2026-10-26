@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Own the local WayVNC service; never listen outside the active Tailscale IP."""
 import argparse
+import errno
+import hashlib
 import ipaddress
 import json
 import os
@@ -18,14 +20,20 @@ import time
 
 UNIT = '''[Unit]
 Description=Groundwork screen sharing over Tailscale
+# Start after the graphical session so WayVNC has a Wayland display.
 After=graphical-session.target
+# Stop the listener when the graphical session ends.
 PartOf=graphical-session.target
 
 [Service]
 ExecStart="%h/.local/bin/groundwork-screen-share" serve
+# Bring the listener back after a crash.
 Restart=on-failure
+# Avoid a hot loop while bind_listener waits out TIME_WAIT.
 RestartSec=10
+# Match stop_child's two 5s waits so a stuck WayVNC cannot hold restart past configure's 20s timeout.
 TimeoutStopSec=10
+# Keep the control socket private.
 UMask=0077
 
 [Install]
@@ -41,12 +49,19 @@ def private_directory(path):
     path.chmod(0o700)
 
 
+def same_file_bytes(path, content):
+    # Match replace_file's decision without writing. A symlink is not the file.
+    if path.is_symlink() or not path.is_file():
+        return False
+    return path.read_bytes() == content
+
+
 def replace_file(path, content, mode):
     if path.is_symlink():
         raise RuntimeError('Refusing to replace a symlink: ' + str(path))
     if path.exists() and path.read_bytes() == content:
         path.chmod(mode)
-        return
+        return False
     if path.exists():
         number = 1
         while path.with_name(path.name + '.bak.' + str(number)).exists():
@@ -61,6 +76,7 @@ def replace_file(path, content, mode):
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+    return True
 
 
 def config_path():
@@ -74,40 +90,219 @@ def config_text(password):
             'password=' + password + '\n')
 
 
-def read_config(path):
+def read_config_bytes(path):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(fd) as source:
+    with os.fdopen(fd, 'rb') as source:
         info = os.fstat(source.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
             raise RuntimeError('Refusing unsafe screen-sharing credentials.')
         os.fchmod(source.fileno(), 0o600)
-        text = source.read(4096)
+        data = source.read(4096)
+    try:
+        text = data.decode()
+    except UnicodeDecodeError:
+        text = ''
     match = re.search(r'^password=([A-Za-z0-9_-]{8})$', text, re.MULTILINE)
     if not match or text != config_text(match[1]):
         raise RuntimeError('Preserved modified screen-sharing config; reconcile it locally before setup.')
+    return data
+
+
+def read_config(path):
+    match = re.search(r'^password=([A-Za-z0-9_-]{8})$', read_config_bytes(path).decode(), re.MULTILINE)
     return match[1]
+
+
+def user_runtime_root():
+    # The user manager sets XDG_RUNTIME_DIR to this path. SSH and cron often
+    # leave the variable unset while the desktop service still stores its stamp here.
+    return Path('/run/user') / str(os.getuid())
+
+
+def directory_writable(path):
+    # A missing directory is not this path. Walking to a writable ancestor
+    # would hide the runtime directory the desktop service actually uses.
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return (not stat.S_ISLNK(info.st_mode) and stat.S_ISDIR(info.st_mode)
+            and os.access(path, os.W_OK | os.X_OK))
+
+
+def runtime_state_dir():
+    # Prefer the variable this process inherited, then the directory the user
+    # service uses, so a stamp written at login is visible to a later apply.
+    candidates = []
+    root = os.environ.get('XDG_RUNTIME_DIR')
+    if root:
+        candidates.append(Path(root))
+    candidates.append(user_runtime_root())
+    for candidate in candidates:
+        if directory_writable(candidate):
+            return candidate / 'groundwork-screen-share'
+    return None
+
+
+def config_stamp_path():
+    directory = runtime_state_dir()
+    if directory is None:
+        return None
+    return directory / 'config.sha256'
+
+
+def remember_served_config(data):
+    # The running WayVNC keeps the password it was started with. Record the
+    # bytes this process actually read so a later edit can restart it.
+    stamp = config_stamp_path()
+    if stamp is None:
+        return
+    private_directory(stamp.parent)
+    replace_file(stamp, (hashlib.sha256(data).hexdigest() + '\n').encode(), 0o600)
+
+
+def served_config_changed(path):
+    stamp = config_stamp_path()
+    if stamp is None:
+        return False
+    try:
+        fd = os.open(stamp, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return False
+    with os.fdopen(fd, 'rb') as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            return False
+        recorded = source.read(80).decode().strip()
+    return recorded != hashlib.sha256(read_config_bytes(path)).hexdigest()
+
+
+def restart_marker_path():
+    # This file outlives the runtime directory. A record written before the
+    # user bus is up must still be visible after login.
+    return Path.home() / '.local/state/groundwork/screen-share-restart-needed'
+
+
+def restart_is_pending():
+    path = restart_marker_path()
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return False
+    with os.fdopen(fd, 'rb') as source:
+        info = os.fstat(source.fileno())
+        return stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+
+
+def mark_restart_needed():
+    path = restart_marker_path()
+    private_directory(path.parent)
+    replace_file(path, b'pending\n', 0o600)
+
+
+def clear_restart_marker():
+    path = restart_marker_path()
+    if path.is_symlink() or not path.is_file():
+        return
+    path.unlink()
+
+
+def finish_restart_record(path):
+    # Stamp before clearing so a process that has not bound yet does not look
+    # like a new edit. serve() replaces the stamp with the bytes it passes to WayVNC.
+    try:
+        remember_served_config(read_config_bytes(path))
+    except (OSError, RuntimeError):
+        pass
+    clear_restart_marker()
+
+
+def service_active_state():
+    # is-active exits 3 for inactive, failed, activating, and deactivating.
+    # ActiveState is the distinction. Any other result leaves the record.
+    try:
+        result = subprocess.run(
+            ['systemctl', 'show', '--user', '-p', 'ActiveState', '--value',
+             'groundwork-screen-share.service'],
+            check=False, capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return (result.stdout or '').strip()
 
 
 def configure():
     path = config_path()
     private_directory(path.parent)
+    # A failed restart leaves the new helper and unit in place. The marker
+    # is the only record that the running process still has the old ones.
+    changed = restart_is_pending()
     if path.exists() or path.is_symlink():
         read_config(path)
+        # A valid hand edit, such as a new password, is still the file WayVNC
+        # has not loaded. The serve stamp is the bytes the running process read.
+        if served_config_changed(path):
+            changed = True
     else:
         # DES uses only eight characters. Never reuse an account password here.
         replace_file(path, config_text(secrets.token_urlsafe(6)).encode(), 0o600)
+        changed = True
     binary = Path.home() / '.local/bin/groundwork-screen-share'
     binary.parent.mkdir(parents=True, exist_ok=True)
-    replace_file(binary, Path(__file__).read_bytes(), 0o755)
     unit = Path.home() / '.config/systemd/user/groundwork-screen-share.service'
     unit.parent.mkdir(parents=True, exist_ok=True)
-    replace_file(unit, UNIT.encode(), 0o644)
+    helper = Path(__file__).read_bytes()
+    unit_bytes = UNIT.encode()
+    # The record has to exist before these bytes change. Once they match, a
+    # later apply has no other signal that the running process is stale.
+    if not same_file_bytes(binary, helper) or not same_file_bytes(unit, unit_bytes):
+        mark_restart_needed()
+    if replace_file(binary, helper, 0o755):
+        changed = True
+    if replace_file(unit, unit_bytes, 0o644):
+        changed = True
+    # Persist this before daemon-reload. An SSH apply has no WAYLAND_DISPLAY,
+    # and a reload or interrupt must not leave the new files without a record.
+    if changed:
+        mark_restart_needed()
     subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True, timeout=20)
     subprocess.run(['systemctl', '--user', 'enable', 'groundwork-screen-share.service'], check=True, timeout=20)
-    if os.environ.get('WAYLAND_DISPLAY'):
-        subprocess.run(['systemctl', '--user', 'restart', 'groundwork-screen-share.service'], check=True, timeout=20)
+    # The running service keeps the session when its unit, helper, and
+    # WayVNC config are the same bytes. Restarting here is what drops it.
+    # With WAYLAND_DISPLAY set, including update-all from a desktop terminal,
+    # restart even when the unit is inactive. An inactive unit stays stopped
+    # and the record is cleared only when WAYLAND_DISPLAY is unset (SSH or cron).
+    if changed:
+        if os.environ.get('WAYLAND_DISPLAY'):
+            action = 'restart'
+        else:
+            state = service_active_state()
+            if state in ('active', 'reloading', 'failed'):
+                action = 'restart'
+            elif state == 'inactive':
+                action = 'clear'
+            else:
+                # activating, deactivating, or a systemctl error.
+                # WAYLAND_DISPLAY restarts above without reading ActiveState.
+                action = 'keep'
+        if action == 'restart':
+            restart_screen_share(path)
+        elif action == 'clear':
+            finish_restart_record(path)
+    elif service_active_state() == 'failed':
+        # Unchanged files leave an active or reloading unit alone. A failed
+        # unit is still down, so bring the listener back.
+        restart_screen_share(path)
     print('Screen sharing enabled for desktop login; it waits for Tailscale sign-in.')
     print('Show its password in a local terminal: groundwork-screen-share password')
+
+
+def restart_screen_share(path):
+    print('Restarting screen sharing; an active remote session will drop.')
+    subprocess.run(['systemctl', '--user', 'restart', 'groundwork-screen-share.service'],
+                   check=True, timeout=20)
+    finish_restart_record(path)
 
 
 def tailscale_address():
@@ -127,14 +322,25 @@ def tailscale_address():
     return None
 
 
-def stop_child(child):
-    if child and child.poll() is None:
+def stop_child(child, wait=5):
+    if not child or child.poll() is not None:
+        return
+    # WayVNC holds the listener until it exits. Block SIGTERM for the wait so
+    # a stop that arrives during an address change stays pending, then exit
+    # once the mask is restored.
+    signal.pthread_sigmask(signal.SIG_BLOCK, [signal.SIGTERM])
+    try:
         child.terminate()
         try:
-            child.wait(timeout=5)
+            child.wait(timeout=wait)
         except subprocess.TimeoutExpired:
             child.kill()
-            child.wait(timeout=2)
+            child.wait(timeout=wait)
+    finally:
+        pending = signal.SIGTERM in signal.sigpending()
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, [signal.SIGTERM])
+    if pending:
+        sys.exit(0)
 
 
 # Apple Screen Sharing sends Command as Alt and Option as Super so a Mac
@@ -233,14 +439,57 @@ def wayvnc_environment():
     return environment
 
 
+def bind_listener(listener, address, port=5900, device=b'tailscale0', wait=70, pause=0.25):
+    # An active client leaves this address in TIME_WAIT for about 60s after
+    # the old listener closes. SO_REUSEADDR lets the new socket bind during
+    # that window only when the old socket had the option too. A predecessor
+    # without it makes bind() return EADDRINUSE, and Restart= would exit and
+    # retry every 10s until the tuple expires. Wait in this process instead.
+    # The option still refuses a second live listener on this address.
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, device + b'\0')
+    deadline = time.monotonic() + wait
+    announced = False
+    retrying = False
+    while True:
+        # The address captured before this wait can move while the port is busy.
+        # False tells start_server to drop the socket and let serve() look again.
+        if retrying and tailscale_address() != address:
+            listener.close()
+            return False
+        try:
+            listener.bind((address, port))
+            break
+        except OSError as error:
+            if error.errno != errno.EADDRINUSE or time.monotonic() >= deadline:
+                raise
+            if tailscale_address() != address:
+                listener.close()
+                return False
+            retrying = True
+            if not announced:
+                print('Screen sharing is waiting for TCP ' + str(port) + ' to be released.',
+                      file=sys.stderr)
+                announced = True
+            time.sleep(pause)
+    listener.listen(16)
+    return True
+
+
 def start_server(address, runtime):
     # Linux has weak-host routing: binding a Tailscale IP alone does not reject
     # packets routed to it through a LAN interface. Pass an interface-bound
     # listening descriptor to WayVNC instead. Failure never falls back to TCP.
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'tailscale0\0')
-        listener.bind((address, 5900))
-        listener.listen(16)
+        if bind_listener(listener, address) is False:
+            return None
+        # Record the bytes WayVNC is about to load. The copy read when serve()
+        # started can be older than this file.
+        remember_served_config(read_config_bytes(config_path()))
+        # The address can change after the bind and before WayVNC inherits the fd.
+        if tailscale_address() != address:
+            listener.close()
+            return None
         return subprocess.Popen([
             'wayvnc', '--config=' + str(config_path()),
             '--socket=' + str(runtime / 'control'), '--log-level=error',
@@ -266,8 +515,10 @@ def serve():
                 stop_child(child)
                 child = None
             if address and child is None:
-                child = start_server(address, runtime)
-                active = address
+                started = start_server(address, runtime)
+                if started is not None:
+                    child = started
+                    active = address
             time.sleep(5)
     finally:
         stop_child(child)
