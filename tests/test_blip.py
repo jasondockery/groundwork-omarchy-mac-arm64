@@ -111,7 +111,7 @@ class BlipPreferenceTests(unittest.TestCase):
         output = io.StringIO()
         with redirect_stdout(output):
             self.assertEqual(updater.main(['preferences', 'setup']), 0)
-        self.assertEqual(output.getvalue().splitlines(), ['0', '1', 'Notes', '0'])
+        self.assertEqual(output.getvalue().splitlines(), ['0', '1', 'Notes', '0', '0'])
 
     def test_non_boolean_blip_choice_is_rejected(self):
         for bad in ('yes', 1, None):

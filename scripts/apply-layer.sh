@@ -5,21 +5,25 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip]"
+  echo "Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip] [--with-local-inference|--without-local-inference]"
   echo "Caps Lock defaults to Escape on tap and Control while held."
   echo "Saved setup choices are reused; explicit options change those choices."
   echo "--without-keyd leaves any existing keyd configuration and service unchanged."
   echo "--without-screen-sharing leaves any existing desktop-sharing service unchanged."
   echo "--with-blip installs the Blip iMessage client. It is off by default."
   echo "--without-blip leaves any existing Blip install unchanged."
+  echo "--with-local-inference installs ollama and ollama-vulkan. It is off by default."
+  echo "--without-local-inference records that preference as off. See docs/local-inference.md."
 }
 
 with_keyd=1
 with_screen_sharing=1
 with_blip=0
+with_local_inference=0
 keyd_choice=""
 sharing_choice=""
 blip_choice=""
+local_inference_choice=""
 updating=0
 update_plugins=0
 for arg in "$@"; do
@@ -51,6 +55,14 @@ for arg in "$@"; do
       fi
       blip_choice=$arg
       [[ $arg == --with-blip ]] && with_blip=1 || with_blip=0
+      ;;
+    --with-local-inference | --without-local-inference)
+      if [[ -n $local_inference_choice && $local_inference_choice != "$arg" ]]; then
+        echo "Choose only one of --with-local-inference and --without-local-inference." >&2
+        exit 64
+      fi
+      local_inference_choice=$arg
+      [[ $arg == --with-local-inference ]] && with_local_inference=1 || with_local_inference=0
       ;;
     --update) updating=1 ;;
     --update-plugins) update_plugins=1 ;;
@@ -107,6 +119,16 @@ if [[ -n $stored ]]; then
       0|1) with_blip=${preferences[3]} ;;
       *)
         echo "Saved Blip choice is invalid. Preserve ~/.config/groundwork/omarchy.json and repair it before rerunning." >&2
+        exit 1
+        ;;
+    esac
+  fi
+  if [[ -z $local_inference_choice ]]; then
+    case ${preferences[4]-} in
+      '') ;;
+      0|1) with_local_inference=${preferences[4]} ;;
+      *)
+        echo "Saved local inference choice is invalid. Preserve ~/.config/groundwork/omarchy.json and repair it before rerunning." >&2
         exit 1
         ;;
     esac
@@ -169,6 +191,22 @@ screen_share_rule_current() {
 keyd_current() {
   cmp -s "$root/keyd/default.conf" "$keyd_config" && service_ready keyd
 }
+# The desktop ICD is installed by Omarchy (vulkan-aurora provides vulkan-asahi).
+# A symlink is refused so a private ICD cannot satisfy this check.
+honeykrisp_icd_present() {
+  local icd
+  for icd in "$test_root"/usr/share/vulkan/icd.d/*asahi*.json; do
+    [[ -f $icd && ! -L $icd ]] && return 0
+  done
+  return 1
+}
+local_inference_ready() {
+  local vulkan_dir=$test_root/usr/lib/ollama/vulkan
+  command -v ollama >/dev/null || return 1
+  command -v vulkaninfo >/dev/null || return 1
+  [[ -d $vulkan_dir ]] || return 1
+  compgen -G "$vulkan_dir/*" >/dev/null
+}
 privileged_changes_needed() {
   local executable
   # Missing tools are installed through omarchy pkg add or Omarchy's installers.
@@ -200,6 +238,9 @@ privileged_changes_needed() {
     for executable in jq ssh notify-send wl-copy xdg-open socat; do
       command -v "$executable" >/dev/null || return 0
     done
+  fi
+  if [[ $with_local_inference -eq 1 ]] && ! local_inference_ready; then
+    return 0
   fi
   return 1
 }
@@ -811,10 +852,81 @@ if [[ $with_blip -eq 1 ]]; then
   install_blip
 fi
 
+check_elf_alignment() {
+  local elf=$1 status=0
+  python3 "$root/scripts/groundwork-update.py" check-elf-alignment "$elf" || status=$?
+  if [[ $status -eq 0 ]]; then
+    return 0
+  fi
+  if [[ $status -eq 2 ]]; then
+    return 2
+  fi
+  echo "Refusing to treat local inference as installed. ollama.service was not enabled." >&2
+  echo "Remove the packages with: sudo pacman -Rns ollama-vulkan ollama" >&2
+  exit 1
+}
+install_local_inference() {
+  local vulkan_dir=$test_root/usr/lib/ollama/vulkan elf bin status checked=0
+  echo "Local inference is opt-in. This repository has no completed M1 GPU run."
+  echo "See docs/local-inference.md. No model is downloaded and ollama.service is not enabled."
+  if [[ $updating -eq 1 ]] && local_inference_ready; then
+    return 0
+  fi
+  if ! honeykrisp_icd_present; then
+    echo "No Asahi Vulkan ICD in ${test_root}/usr/share/vulkan/icd.d." >&2
+    echo "Omarchy's desktop driver is vulkan-aurora. It provides vulkan-asahi and conflicts with the ALARM vulkan-asahi package." >&2
+    echo "This layer does not install a second Mesa. Local inference was not installed." >&2
+    exit 1
+  fi
+  omarchy pkg add ollama
+  omarchy pkg add ollama-vulkan
+  if ! command -v ollama >/dev/null; then
+    echo "ollama is still unavailable after omarchy pkg add. The helper may skip packages absent from the current feed." >&2
+    exit 1
+  fi
+  if [[ ! -d $vulkan_dir ]] || ! compgen -G "$vulkan_dir/*" >/dev/null; then
+    echo "ollama-vulkan did not install $vulkan_dir. The base ollama package strips its Vulkan libraries, so inference would use the CPU." >&2
+    echo "ollama.service was not enabled." >&2
+    exit 1
+  fi
+  while IFS= read -r -d '' elf; do
+    status=0
+    check_elf_alignment "$elf" || status=$?
+    if [[ $status -eq 0 ]]; then
+      checked=$((checked + 1))
+    fi
+  done < <(find "$vulkan_dir" -type f ! -type l -print0)
+  if [[ $checked -lt 1 ]]; then
+    echo "ollama-vulkan installed no ELF under $vulkan_dir, so the Vulkan backend is not present." >&2
+    exit 1
+  fi
+  bin=$(command -v ollama)
+  status=0
+  check_elf_alignment "$bin" || status=$?
+  if [[ $status -ne 0 ]]; then
+    echo "The ollama executable is not an ELF this kernel can map: $bin" >&2
+    exit 1
+  fi
+  if ! command -v vulkaninfo >/dev/null; then
+    omarchy pkg add vulkan-tools
+  fi
+  if ! command -v vulkaninfo >/dev/null; then
+    echo "vulkaninfo is still unavailable after omarchy pkg add vulkan-tools." >&2
+    exit 1
+  fi
+  echo "ollama and ollama-vulkan are installed. GPU use is unproven until you run, on this Mac:"
+  echo "  python3 scripts/verify-local-inference.py preflight"
+  echo "  python3 scripts/verify-local-inference.py download"
+  echo "  python3 scripts/verify-local-inference.py run"
+}
+if [[ $with_local_inference -eq 1 ]]; then
+  install_local_inference
+fi
+
 python3 "$root/scripts/groundwork-update.py" register "$root" "$with_keyd" "$with_screen_sharing" \
-  "${GROUNDWORK_OBSIDIAN_VAULT:-$HOME/Documents/Obsidian/my_obsidian_vault}" "$with_blip"
+  "${GROUNDWORK_OBSIDIAN_VAULT:-$HOME/Documents/Obsidian/my_obsidian_vault}" "$with_blip" "$with_local_inference"
 if [[ $updating -eq 1 ]]; then
-  echo "Groundwork settings applied. Saved keyd, screen-sharing, Blip, and vault choices were preserved."
+  echo "Groundwork settings applied. Saved keyd, screen-sharing, Blip, local inference, and vault choices were preserved."
   exit 0
 fi
 if [[ $freetube_ready -eq 1 ]]; then

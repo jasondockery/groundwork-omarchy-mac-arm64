@@ -29,6 +29,12 @@ bitwarden-cli
 
 # Desktop sharing is installed by default. See docs/remote-access.md.
 wayvnc
+
+# Local inference is not installed by a normal setup. Both packages are required
+# together; the base ollama package strips its Vulkan libraries. See docs/local-inference.md.
+#   ./install.sh --with-local-inference
+# ollama
+# ollama-vulkan
 # Remote desktop experiments. See docs/decisions/0004-remote-access.md.
 # Sunshine, the Moonlight server, is not in the aarch64 repos, so it is not listed.
 # moonlight-qt

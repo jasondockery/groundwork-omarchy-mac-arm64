@@ -126,7 +126,8 @@ def settings(required=True):
             or not isinstance(value.get('source'), str)
             or not isinstance(value.get('obsidian_vault'), str)
             or '\n' in value['obsidian_vault']
-            or ('blip' in value and type(value['blip']) is not bool)):
+            or ('blip' in value and type(value['blip']) is not bool)
+            or ('local_inference' in value and type(value['local_inference']) is not bool)):
         raise UpdateError(f'Invalid updater settings in {CONFIG}; preserve and repair that file before updating.')
     return value
 
@@ -136,6 +137,16 @@ def blip_enabled(value):
     if value is None or 'blip' not in value:
         return False
     flag = value['blip']
+    if type(flag) is not bool:
+        raise UpdateError(f'Invalid updater settings in {CONFIG}; preserve and repair that file before updating.')
+    return flag
+
+
+def local_inference_enabled(value):
+    """Saved local-inference choice. Setups written before the choice existed stay off."""
+    if value is None or 'local_inference' not in value:
+        return False
+    flag = value['local_inference']
     if type(flag) is not bool:
         raise UpdateError(f'Invalid updater settings in {CONFIG}; preserve and repair that file before updating.')
     return flag
@@ -154,13 +165,16 @@ def validate_registration(source):
     return previous
 
 
-def register(source, keyd, screen_sharing, vault, blip='0'):
+def register(source, keyd, screen_sharing, vault, blip='0', local_inference='0'):
     source = Path(source).resolve()
     previous = validate_registration(source)
     if blip not in ('0', '1'):
         raise UpdateError('Blip choice must be 0 or 1.')
+    if local_inference not in ('0', '1'):
+        raise UpdateError('Local inference choice must be 0 or 1.')
     value = dict(previous or {}, schema=1, source=str(source), keyd=keyd == '1',
-                 screen_sharing=screen_sharing == '1', obsidian_vault=vault, blip=blip == '1')
+                 screen_sharing=screen_sharing == '1', obsidian_vault=vault, blip=blip == '1',
+                 local_inference=local_inference == '1')
     if value['keyd']:
         value['keyd_sha256'] = hashlib.sha256((source / 'keyd/default.conf').read_bytes()).hexdigest()
     value.pop('pending_keyd', None)
@@ -453,6 +467,32 @@ def verified_bun_executable(directory):
             shutil.copyfileobj(source, output)
     os.chmod(destination, 0o755)
     return destination
+
+
+def elf_alignment_problem(binary):
+    """Reason an ELF cannot be mapped on this kernel, or None when it can.
+
+    A file whose header is not ELF returns the string 'not-elf' so callers can
+    skip data files. No LOAD segment is a refusal.
+    """
+    page = page_size()
+    path = Path(binary)
+    try:
+        header = path.open('rb').read(4)
+    except OSError as error:
+        return f'Could not read {binary} ({error}).'
+    if header != b'\x7fELF':
+        return 'not-elf'
+    if not shutil.which('readelf'):
+        return (f'readelf is missing, so {binary} cannot be checked for {page // 1024} KiB pages. '
+                'Install binutils.')
+    try:
+        alignments = load_alignments(binary)
+    except UpdateError as error:
+        return f'Could not read LOAD alignment for {binary} ({error}).'
+    if not alignments or any(alignment < page for alignment in alignments):
+        return f'{binary} is not aligned for {page // 1024} KiB pages and cannot start.'
+    return None
 
 
 def bun_alignment_problem(binary):
@@ -1019,6 +1059,14 @@ def main(args):
             print(problem, file=sys.stderr)
             return 1
         return 0
+    if args and args[0] == 'check-elf-alignment' and len(args) == 2:
+        problem = elf_alignment_problem(args[1])
+        if problem == 'not-elf':
+            return 2
+        if problem:
+            print(problem, file=sys.stderr)
+            return 1
+        return 0
     if args and args[0] == 'verify-bun-archive' and len(args) == 2:
         print(verified_bun_executable(args[1]))
         return 0
@@ -1032,19 +1080,22 @@ def main(args):
     if args and args[0] == 'setup' and len(args) >= 2:
         source, *options = args[1:]
         valid = {'--with-keyd', '--without-keyd', '--with-screen-sharing', '--without-screen-sharing',
-                 '--with-blip', '--without-blip', '--update', '--help', '-h'}
+                 '--with-blip', '--without-blip', '--with-local-inference', '--without-local-inference',
+                 '--update', '--help', '-h'}
         if any(option not in valid for option in options):
             print('Unknown setup argument; nothing changed.', file=sys.stderr)
             return 64
         if ({'--with-keyd', '--without-keyd'} <= set(options)
                 or {'--with-screen-sharing', '--without-screen-sharing'} <= set(options)
-                or {'--with-blip', '--without-blip'} <= set(options)):
+                or {'--with-blip', '--without-blip'} <= set(options)
+                or {'--with-local-inference', '--without-local-inference'} <= set(options)):
             print('Choose only one option for each setup preference; nothing changed.', file=sys.stderr)
             return 64
         if '--help' in options or '-h' in options:
-            print('Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip]')
+            print('Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip] [--with-local-inference|--without-local-inference]')
             print('Saved setup choices are reused. Explicit options change those choices.')
             print('Blip is off unless --with-blip is set. --without-blip leaves an existing Blip install unchanged.')
+            print('Local inference is off unless --with-local-inference is set. --without-local-inference records that preference as off. See docs/local-inference.md for package and model removal.')
             return 0
         if run(['uname', '-s']) != 'Linux' or run(['uname', '-m']) != 'aarch64' or not shutil.which('omarchy'):
             raise UpdateError('This layer requires Apple Silicon Omarchy.')
@@ -1071,11 +1122,14 @@ def main(args):
     if args and args[0] == 'preferences' and len(args) == 2 and args[1] in ('setup', 'update'):
         value = settings(args[1] == 'update')
         if value:
-            print(f"{int(value['keyd'])}\n{int(value['screen_sharing'])}\n{value['obsidian_vault']}\n{int(blip_enabled(value))}")
+            print(f"{int(value['keyd'])}\n{int(value['screen_sharing'])}\n{value['obsidian_vault']}\n{int(blip_enabled(value))}\n{int(local_inference_enabled(value))}")
         return 0
-    if args and args[0] == 'register' and len(args) in (5, 6) and args[2] in ('0', '1') and args[3] in ('0', '1'):
-        if len(args) == 6 and args[5] not in ('0', '1'):
+    if args and args[0] == 'register' and len(args) in (5, 6, 7) and args[2] in ('0', '1') and args[3] in ('0', '1'):
+        if len(args) >= 6 and args[5] not in ('0', '1'):
             print('Invalid Blip choice; nothing changed.', file=sys.stderr)
+            return 64
+        if len(args) == 7 and args[6] not in ('0', '1'):
+            print('Invalid local inference choice; nothing changed.', file=sys.stderr)
             return 64
         register(*args[1:])
         return 0

@@ -16,10 +16,11 @@ and explicitly reconciles T3 Nightly installation; routine apply reuses an
 existing Nightly CLI and omits onboarding. No updater hook is added: its outcome
 must be reported independently rather than swallowed by Omarchy's hook runner.
 
-Setup stores source path, keyd/screen-sharing/Blip choices, selected vault, and the
+Setup stores source path, keyd/screen-sharing/Blip/local-inference choices, selected vault, and the
 applied keyd digest locally. Bare reruns preserve them; explicit setup options
 change choices. A setup saved before the Blip choice existed stays off until
-`--with-blip`. Older installations repeat exclusions once during transition.
+`--with-blip`. A setup saved before the local-inference choice existed stays off until
+`--with-local-inference`. Older installations repeat exclusions once during transition.
 The optional Core reference remains pinned and is never a setup prerequisite.
 When screen sharing's unit, helper, or WayVNC config changed and `WAYLAND_DISPLAY`
 is unset (SSH or cron), an inactive unit stays stopped and the restart record is

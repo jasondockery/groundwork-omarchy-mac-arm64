@@ -226,6 +226,22 @@ elif name == 'omarchy-remove-dev-env':
         if path.is_symlink() or path.is_file():
             path.unlink()
 elif name == 'omarchy':
+    if args[:2] == ['pkg', 'add'] and len(args) > 2 and args[2] in ('ollama', 'ollama-vulkan', 'vulkan-tools'):
+        if args[2] == 'ollama':
+            target = root / 'bin' / 'ollama'
+            if not target.exists():
+                target.write_bytes(b'\\x7fELF' + bytes(16))
+                target.chmod(0o755)
+        elif args[2] == 'ollama-vulkan':
+            dest = root / 'usr/lib/ollama/vulkan'
+            dest.mkdir(parents=True, exist_ok=True)
+            lib = dest / 'libggml-vulkan.so'
+            if not lib.exists():
+                lib.write_bytes(b'\\x7fELF' + bytes(16))
+        else:
+            target = root / 'bin' / 'vulkaninfo'
+            if not target.exists():
+                target.symlink_to(root / 'bin' / 'stub')
     if args[:2] == ['pkg', 'add'] and os.environ.get('FIXTURE_MATERIALIZE_ADDED') == '1' and len(args) > 2:
         mapping = {'openssh': 'ssh', 'libnotify': 'notify-send', 'wl-clipboard': 'wl-copy', 'xdg-utils': 'xdg-open'}
         executable = mapping.get(args[2], args[2])
@@ -755,6 +771,7 @@ raise SystemExit(os.WEXITSTATUS(status))
                               (('--with-keyd', '--without-keyd'), False),
                               (('--without-keyd', '--with-keyd'), False),
                               (('--with-blip', '--without-blip'), False),
+                              (('--with-local-inference', '--without-local-inference'), False),
                               (('--help',), True)]:
             with self.subTest(args=args):
                 self.run_install(*args, success=success)
@@ -1279,6 +1296,68 @@ raise SystemExit(os.WEXITSTATUS(status))
         result = self.run_install('--help')
         self.assertIn('--with-blip', result.stdout)
         self.assertIn('--without-blip', result.stdout)
+        self.assertIn('--with-local-inference', result.stdout)
+        self.assertIn('--without-local-inference', result.stdout)
+
+    def seed_honeykrisp_icd(self):
+        icd = self.root / 'usr/share/vulkan/icd.d'
+        icd.mkdir(parents=True)
+        (icd / 'asahi_icd.json').write_text('{"ICD": {"library_path": "libvulkan_asahi.so"}}\n')
+
+    def test_default_install_does_not_add_ollama(self):
+        self.run_install()
+        self.assertFalse(any(call[:3] == ['omarchy', 'pkg', 'add'] and call[3] in ('ollama', 'ollama-vulkan', 'vulkan-tools')
+                             for call in self.calls()))
+        saved = json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())
+        self.assertFalse(saved['local_inference'])
+        self.assertNotIn(['systemctl', 'enable', 'ollama.service'], self.calls())
+
+    def test_local_inference_requires_a_regular_asahi_icd(self):
+        icd = self.root / 'usr/share/vulkan/icd.d'
+        icd.mkdir(parents=True)
+        link = icd / 'asahi_icd.json'
+        link.symlink_to('/tmp/private-icd.json')
+        result = self.run_install('--with-local-inference', success=False)
+        self.assertIn('No Asahi Vulkan ICD', result.stderr)
+        self.assertFalse(any(call[:4] == ['omarchy', 'pkg', 'add', 'ollama'] for call in self.calls()))
+        self.assertFalse((self.root / 'home/.config/groundwork/omarchy.json').exists())
+
+    def test_local_inference_installs_both_packages_and_skips_the_service(self):
+        self.seed_honeykrisp_icd()
+        self.env['FIXTURE_LOAD_ALIGN'] = '0x10000'
+        result = self.run_install('--with-local-inference')
+        self.assertIn('no completed M1 GPU run', result.stdout)
+        self.assertIn('verify-local-inference.py run', result.stdout)
+        calls = self.calls()
+        self.assertIn(['omarchy', 'pkg', 'add', 'ollama'], calls)
+        self.assertIn(['omarchy', 'pkg', 'add', 'ollama-vulkan'], calls)
+        self.assertIn(['omarchy', 'pkg', 'add', 'vulkan-tools'], calls)
+        self.assertLess(calls.index(['omarchy', 'pkg', 'add', 'ollama']),
+                        calls.index(['omarchy', 'pkg', 'add', 'ollama-vulkan']))
+        self.assertFalse(any(call[:1] == ['systemctl'] and 'ollama' in call for call in calls))
+        self.assertFalse(any('huggingface.co' in arg for call in calls for arg in call))
+        saved = json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())
+        self.assertTrue(saved['local_inference'])
+        (self.root / 'calls.jsonl').unlink()
+        update = self.run_update()
+        self.assertEqual(update.returncode, 0, update.stdout + update.stderr)
+        self.assertNotIn(['omarchy', 'pkg', 'add', 'ollama'], self.calls())
+        self.assertNotIn(['omarchy', 'pkg', 'add', 'ollama-vulkan'], self.calls())
+
+    def test_misaligned_ollama_does_not_save_the_preference(self):
+        self.seed_honeykrisp_icd()
+        result = self.run_install('--with-local-inference', success=False)
+        self.assertIn('not aligned', result.stderr)
+        self.assertIn(['omarchy', 'pkg', 'add', 'ollama-vulkan'], self.calls())
+        self.assertFalse((self.root / 'home/.config/groundwork/omarchy.json').exists())
+
+    def test_without_local_inference_records_off_and_adds_nothing(self):
+        self.seed_honeykrisp_icd()
+        self.run_install('--without-local-inference')
+        self.assertFalse(any(call[:3] == ['omarchy', 'pkg', 'add'] and call[3] in ('ollama', 'ollama-vulkan', 'vulkan-tools')
+                             for call in self.calls()))
+        saved = json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())
+        self.assertFalse(saved['local_inference'])
 
 
 if __name__ == '__main__':
