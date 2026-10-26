@@ -68,7 +68,11 @@ update-all
 It checks this repo, runs the supported `omarchy update`, fast-forwards and
 applies your personal settings, updates listed Omarchy shell plugins, updates
 T3 Code Nightly, and updates the installed Bitwarden and FreeTube user Flatpaks. `omarchy update`
-does not update those plugin checkouts. T3's background service may restart. Other Flatpaks and
+does not update those plugin checkouts. T3's background service may restart. When screen
+sharing's unit, helper, or WayVNC config changed and `WAYLAND_DISPLAY` is unset (SSH or cron),
+an inactive unit stays stopped and the restart record is cleared. When `WAYLAND_DISPLAY` is set,
+the unit restarts even if it is inactive. The drop warning prints only when a restart actually runs.
+See [desktop sharing](docs/remote-access.md#automatic-desktop-sharing). Other Flatpaks and
 application sign-in remain outside this command. Omarchy owns the OS, Arch
 packages, default tools, and desktop; no second system updater is installed.
 
