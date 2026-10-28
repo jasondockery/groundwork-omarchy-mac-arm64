@@ -8,7 +8,7 @@ This repo is a personal layer for Omarchy on Apple Silicon (aarch64). It is mean
 - `docs/decisions/` for choices that are already made.
 - `docs/keybindings.md` and `docs/remote-access.md` for first-run learning and private access.
 
-Shared engineering guidance belongs to [Compass](https://github.com/jasondockery/compass). Consult its current `COMPASS.md` and applicable skills for substantial engineering changes instead of inventing a competing local doctrine. This small repo currently links to that authority; it does not claim a receipt-verified Compass projection. Dependency policy extends the shared [renovate-config](https://github.com/jasondockery/renovate-config) preset; configuration alone does not prove central-runner coverage.
+Shared engineering guidance belongs to Compass, projected here under `.compass/` (read `.compass/COMPASS.md` and `.compass/TERMINOLOGY.md` for substantial engineering changes instead of inventing a competing local doctrine). Load `skills/reviewable-agent-workspaces/SKILL.md` for workspace ownership, `skills/concurrent-agent-runtimes/SKILL.md` before starting or inspecting concurrent processes, and `skills/repeatable-agent-execution/SKILL.md` before the first edit in a checkout and before final proof. The optional skills this repository selected are listed in `compass.skills.json` and live under `skills/`; load the one that matches the work. GitHub writes follow `repo-contribution-etiquette`. Dependency policy extends the shared [renovate-config](https://github.com/jasondockery/renovate-config) preset; configuration alone does not prove central-runner coverage.
 
 ## Rules
 
