@@ -530,9 +530,12 @@ def load_record():
         if replaced is not None and (type(replaced) is not list or any(not valid_plugin_id(other) for other in replaced)):
             raise ListError('Omarchy plugin install record is invalid; plugin changes were skipped.')
         if entry.get('builtIn'):
-            if not valid_plugin_id(plugin_id) or set(entry) - {'builtIn', 'replaced'}:
+            here = entry.get('enabledHere', False)
+            if not valid_plugin_id(plugin_id) or set(entry) - {'builtIn', 'replaced', 'enabledHere'} or type(here) is not bool:
                 raise ListError('Omarchy plugin install record is invalid; plugin changes were skipped.')
             clean[plugin_id] = {'builtIn': True}
+            if here:
+                clean[plugin_id]['enabledHere'] = True
             if replaced:
                 clean[plugin_id]['replaced'] = sorted(set(replaced))
             continue
@@ -952,34 +955,46 @@ def apply_plugins(updating):
         return shell_state['value']
 
     deferred = []
+    listing = {'value': None}
+
+    def states():
+        if listing['value'] is None and shell_up():
+            listing['value'] = plugin_states()
+        return listing['value']
+
     installed_by_groundwork = set(record['plugins'])
     for item in document['retired']:
         plugin_id = item['id']
         recorded = record['plugins'].get(plugin_id)
         if recorded is None:
             continue
-        if recorded.get('builtIn'):
-            if not shell_up():
-                deferred.append(plugin_id)
-                continue
-            outcome = run_omarchy(['plugin', 'disable', plugin_id], 60)
-            if command_failed(outcome):
-                say(f'Omarchy plugin {plugin_id} disable failed: {failure_text(outcome)}.')
-                continue
-            record['plugins'].pop(plugin_id, None)
-            save_record(record)
-            continue
-        directory = plugin_path(plugin_id)
-        if not path_exists(directory):
-            record['plugins'].pop(plugin_id, None)
-            save_record(record)
-            continue
-        if not shell_up():
+        needs_shell = bool(recorded.get('replaced')) or bool(recorded.get('builtIn') and recorded.get('enabledHere')) \
+            or (not recorded.get('builtIn') and path_exists(plugin_path(plugin_id)))
+        if needs_shell and not shell_up():
             deferred.append(plugin_id)
             continue
-        outcome = run_omarchy(['plugin', 'remove', plugin_id, '--yes'], 60)
-        if command_failed(outcome):
-            say(f'Omarchy plugin {plugin_id} remove failed: {failure_text(outcome)}.')
+        if recorded.get('replaced') and states() is None:
+            deferred.append(plugin_id)
+            continue
+        if recorded.get('builtIn'):
+            if recorded.get('enabledHere'):
+                known = states()
+                if known is None:
+                    deferred.append(plugin_id)
+                    continue
+                if known.get(plugin_id, (False, False))[0]:
+                    outcome = run_omarchy(['plugin', 'disable', plugin_id], 60)
+                    listing['value'] = None
+                    if command_failed(outcome):
+                        say(f'Omarchy plugin {plugin_id} disable failed: {failure_text(outcome)}.')
+                        continue
+        elif path_exists(plugin_path(plugin_id)):
+            outcome = run_omarchy(['plugin', 'remove', plugin_id, '--yes'], 60)
+            listing['value'] = None
+            if command_failed(outcome):
+                say(f'Omarchy plugin {plugin_id} remove failed: {failure_text(outcome)}.')
+                continue
+        if not restore_replaced(recorded, states, listing):
             continue
         record['plugins'].pop(plugin_id, None)
         save_record(record)
@@ -996,13 +1011,6 @@ def apply_plugins(updating):
         say('Omarchy plugins retired in the shared list were not installed by this layer and were left in place: ' + ', '.join(pending_notice) + '.')
         record['noticedRetired'] = [*already_noticed, *pending_notice]
         save_record(record)
-
-    listing = {'value': None}
-
-    def states():
-        if listing['value'] is None and shell_up():
-            listing['value'] = plugin_states()
-        return listing['value']
 
     sudo_state = {'ready': None}
     for item in selected:
@@ -1021,7 +1029,7 @@ def apply_plugins(updating):
         listing['value'] = None
     for item in selected:
         if item.get('replaces') and item['id'] not in retired_ids:
-            apply_replacements(record, item, states)
+            apply_replacements(record, item, states, exclusions)
     if deferred:
         say('Omarchy shell is not running; deferred plugin changes: ' + ', '.join(deferred) + '.')
 
@@ -1048,11 +1056,38 @@ def apply_builtin(record, item, states):
             return False
         enabled = True
     record['plugins'][plugin_id] = {'builtIn': True}
+    if enabled:
+        record['plugins'][plugin_id]['enabledHere'] = True
     save_record(record)
     return enabled
 
 
-def apply_replacements(record, item, states):
+def restore_replaced(recorded, states, listing):
+    """Turn a retired plugin's replaced ids back on when the shell lists them off.
+
+    True when nothing is left to restore. Needs a listing; the caller defers
+    when there is none.
+    """
+    replaced = recorded.get('replaced')
+    if not replaced:
+        return True
+    known = states()
+    if known is None:
+        return False
+    ok = True
+    for other in replaced:
+        if other in known and not known[other][0]:
+            outcome = run_omarchy(['plugin', 'enable', other], 60)
+            listing['value'] = None
+            if command_failed(outcome):
+                say(f'Omarchy plugin {other} enable failed: {failure_text(outcome)}.')
+                ok = False
+                continue
+            say(f'Omarchy plugin {other} was enabled again; its replacement was retired.')
+    return ok
+
+
+def apply_replacements(record, item, states, exclusions):
     """Disable each plugin this entry replaces, once, after this layer enabled it."""
     recorded = record['plugins'].get(item['id'])
     if recorded is None or recorded.get('enablePending'):
@@ -1066,6 +1101,8 @@ def apply_replacements(record, item, states):
     if known is None or not known.get(item['id'], (False, False))[0]:
         return
     for other in due:
+        if other in exclusions:
+            continue
         if known.get(other, (False, False))[0]:
             outcome = run_omarchy(['plugin', 'disable', other], 60)
             if command_failed(outcome):
