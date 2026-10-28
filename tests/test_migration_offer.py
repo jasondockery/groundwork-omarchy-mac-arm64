@@ -170,6 +170,14 @@ class MigrationOfferTests(unittest.TestCase):
         self.assertNotIn('Bitwarden desktop is installed as', result.stdout)
         self.assertNotIn(FLATPAK_UNINSTALL, calls)
 
+    def test_package_without_elf_files_is_dropped_for_the_flatpak(self):
+        self.feed_has_native_bitwarden()
+        self.env['FIXTURE_BITWARDEN_NO_ELF'] = '1'
+        result = self.run_install()
+        self.assertIn(NATIVE_DROP, self.calls())
+        self.assertIn(FLATPAK_INSTALL, self.calls())
+        self.assertIn('installed no ELF file', result.stderr)
+
     def test_failed_package_add_falls_back_without_a_drop(self):
         self.feed_has_native_bitwarden()
         self.env['FIXTURE_BITWARDEN_ADD_STATUS'] = '1'

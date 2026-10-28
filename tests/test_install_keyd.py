@@ -271,7 +271,8 @@ elif name == 'omarchy' and args[1:3] == ['add', 'bitwarden'] and args[:1] == ['p
         sys.exit(status)
     app = root / 'opt/Bitwarden'
     app.mkdir(parents=True, exist_ok=True)
-    (app / 'bitwarden').write_bytes(b'\\x7fELF' + bytes(16))
+    elf = b'#!/bin/sh\\n' if os.environ.get('FIXTURE_BITWARDEN_NO_ELF') == '1' else b'\\x7fELF' + bytes(16)
+    (app / 'bitwarden').write_bytes(elf)
     (app / 'resources.pak').write_bytes(b'fixture data')
     files = [str(app) + '/', str(app / 'bitwarden'), str(app / 'resources.pak')]
     command = root / 'bin' / 'bitwarden'
