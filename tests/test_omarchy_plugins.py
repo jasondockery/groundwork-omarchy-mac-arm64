@@ -25,7 +25,7 @@ plugins = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(plugins)
 
 STUB = r'''#!/usr/bin/env python3
-import json, os, pathlib, shutil, subprocess, sys
+import json, os, pathlib, shutil, subprocess, sys, time
 name = pathlib.Path(sys.argv[0]).name
 args = sys.argv[1:]
 fixture = pathlib.Path(os.environ['PLUGIN_FIXTURE'])
@@ -92,6 +92,29 @@ def shell_states():
 def save_states(states):
     (fixture / 'shell-states.json').write_text(json.dumps(states) + '\n')
 
+def edit_layout(change):
+    """Mirror Omarchy's PluginRegistry on the fixture shell.json when asked."""
+    if not settings.get('sim_layout'):
+        return
+    path = pathlib.Path.home() / '.config/omarchy/shell.json'
+    data = json.loads(path.read_text())
+    change(data['bar']['layout'])
+    path.write_text(json.dumps(data) + '\n')
+
+def layout_remove(plugin_id):
+    def change(layout):
+        for entries in layout.values():
+            entries[:] = [entry for entry in entries if entry.get('id') != plugin_id]
+    edit_layout(change)
+
+def layout_insert(plugin_id, args):
+    section = args[args.index('--section') + 1] if '--section' in args else 'right'
+    requested = int(args[args.index('--index') + 1]) if '--index' in args else None
+    def change(layout):
+        entries = layout.setdefault(section, [])
+        entries.insert(len(entries) if requested is None else min(requested, len(entries)), {'id': plugin_id})
+    edit_layout(change)
+
 if action == 'list' and args[2:] == ['--json']:
     if settings.get('fail_list'):
         sys.exit(1)
@@ -103,6 +126,9 @@ if action == 'list' and args[2:] == ['--json']:
     sys.exit(0)
 if action == 'disable' and len(args) == 3:
     plugin_id = args[2]
+    if plugin_id in settings.get('die_on_disable', []):
+        os.kill(os.getppid(), 9)
+        time.sleep(5)
     if plugin_id in settings.get('fail_disable', []):
         sys.stderr.write('fixture disable failed\n')
         sys.exit(1)
@@ -112,6 +138,7 @@ if action == 'disable' and len(args) == 3:
         sys.exit(1)
     states.setdefault(plugin_id, [False, False])[0] = False
     save_states(states)
+    layout_remove(plugin_id)
     print(f'Disabled {plugin_id}')
     sys.exit(0)
 if action == 'add' and args[3:] == ['--yes']:
@@ -160,6 +187,7 @@ if action == 'enable':
     states = shell_states()
     states.setdefault(plugin_id, [False, False])[0] = True
     save_states(states)
+    layout_insert(plugin_id, args)
     print(f'Enabled {plugin_id}')
     sys.exit(0)
 if action == 'remove' and args[3:] == ['--yes']:
@@ -570,39 +598,143 @@ class PluginApplyTests(unittest.TestCase):
         self.invoke()
         self.assertNotIn(['plugin', 'disable', 'omarchy.workspaces'], self.omarchy_calls())
 
-    def write_shell_layout(self, layout):
+    def write_shell_layout(self, layout, **top):
         shell = self.home / '.config/omarchy/shell.json'
         shell.parent.mkdir(parents=True, exist_ok=True)
-        shell.write_text(json.dumps({'version': 1, 'bar': {'layout': layout}}) + '\n')
+        shell.write_text(json.dumps({'version': 1, **top, 'bar': {'layout': layout}}) + '\n')
+
+    def layout(self):
+        return json.loads((self.home / '.config/omarchy/shell.json').read_text())['bar']['layout']
+
+    def ids(self, section):
+        return [entry['id'] for entry in self.layout()[section]]
+
+    def spaces_record(self, **extra):
+        entry = {'repo': 'https://github.com/example/spaces.git', 'replaced': ['omarchy.workspaces'], **extra}
+        self.seed_directory('example.spaces')
+        self.write_record({'example.spaces': entry})
 
     def test_restored_replaced_widget_returns_to_its_old_slot(self):
         self.write_shell_layout({'left': [{'id': 'omarchy.menu'}], 'right': [{'id': 'omarchy.tray'}, {'id': 'omarchy.workspaces'}]})
-        self.set_control(listed={'omarchy.workspaces': [True, True]})
+        self.set_control(listed={'omarchy.workspaces': [True, True]}, sim_layout=True)
         self.write_list([plugin('example.spaces', replaces=['omarchy.workspaces'])], version=2)
         self.invoke()
         self.assertEqual(self.record()['plugins']['example.spaces']['replacedAt'],
-                         {'omarchy.workspaces': {'section': 'right', 'index': 1}})
+                         [{'id': 'omarchy.workspaces', 'section': 'right', 'index': 1}])
         self.clear_calls()
         self.retire('example.spaces')
         self.invoke()
         self.assertIn(['plugin', 'enable', 'omarchy.workspaces', '--section', 'right', '--index', '1'], self.omarchy_calls())
+        self.assertEqual(self.ids('right')[:2], ['omarchy.tray', 'omarchy.workspaces'])
         self.assertFalse(self.record()['plugins'])
+
+    def prepare_two_widgets(self):
+        self.write_shell_layout({'left': [{'id': 'omarchy.menu'}, {'id': 'omarchy.alpha'}, {'id': 'omarchy.beta'}]})
+        self.set_control(listed={'omarchy.alpha': [True, True], 'omarchy.beta': [True, True]}, sim_layout=True)
+
+    def test_two_runs_restore_widgets_in_their_original_order(self):
+        self.prepare_two_widgets()
+        self.write_list([plugin('example.spaces', replaces=['omarchy.alpha'])], version=2)
+        self.invoke()
+        self.assertEqual(self.ids('left'), ['omarchy.menu', 'omarchy.beta'])
+        self.write_list([plugin('example.spaces', replaces=['omarchy.alpha', 'omarchy.beta'])], version=2)
+        self.invoke()
+        self.assertEqual(self.ids('left'), ['omarchy.menu'])
+        self.retire('example.spaces')
+        self.invoke()
+        self.assertEqual(self.ids('left'), ['omarchy.menu', 'omarchy.alpha', 'omarchy.beta'])
+
+    def test_one_run_restores_widgets_in_their_original_order(self):
+        self.prepare_two_widgets()
+        self.write_list([plugin('example.spaces', replaces=['omarchy.alpha', 'omarchy.beta'])], version=2)
+        self.invoke()
+        self.assertEqual(self.ids('left'), ['omarchy.menu'])
+        self.retire('example.spaces')
+        self.invoke()
+        self.assertEqual(self.ids('left'), ['omarchy.menu', 'omarchy.alpha', 'omarchy.beta'])
+
+    def test_slot_is_saved_before_the_next_widget_is_disabled(self):
+        self.prepare_two_widgets()
+        # The applier is killed while disabling the second widget.
+        self.set_control(listed={'omarchy.alpha': [True, True], 'omarchy.beta': [True, True]}, sim_layout=True,
+                         die_on_disable=['omarchy.beta'])
+        self.write_list([plugin('example.spaces', replaces=['omarchy.alpha', 'omarchy.beta'])], version=2)
+        self.invoke()
+        entry = self.record()['plugins']['example.spaces']
+        self.assertEqual(entry['replaced'], ['omarchy.alpha'])
+        self.assertEqual(entry['replacedAt'], [{'id': 'omarchy.alpha', 'section': 'left', 'index': 1}])
 
     def test_restore_without_a_remembered_slot_uses_the_default_placement(self):
         self.set_control(listed={'example.spaces': [True, False], 'omarchy.workspaces': [False, True]})
-        self.seed_directory('example.spaces')
-        self.write_record({'example.spaces': {'repo': 'https://github.com/example/spaces.git', 'replaced': ['omarchy.workspaces']}})
+        self.spaces_record()
         self.retire('example.spaces')
         self.invoke()
         self.assertIn(['plugin', 'enable', 'omarchy.workspaces'], self.omarchy_calls())
 
-    def test_replaced_slot_in_the_record_must_be_well_formed(self):
-        self.seed_directory('example.spaces')
-        self.write_record({'example.spaces': {'repo': 'https://github.com/example/spaces.git', 'replaced': ['omarchy.workspaces'],
-                                              'replacedAt': {'omarchy.workspaces': {'section': 'nowhere', 'index': 0}}}})
-        self.write_list([plugin('example.spaces')], version=2)
+    def test_builtin_record_may_hold_replaced_slots(self):
+        self.write_record({'omarchy.agents': {'builtIn': True, 'replaced': ['omarchy.workspaces'],
+                                              'replacedAt': [{'id': 'omarchy.workspaces', 'section': 'left', 'index': 0}]}})
+        self.write_list([self.builtin()], version=2)
         result = self.invoke()
-        self.assertIn('install record is invalid', result.stdout)
+        self.assertNotIn('install record is invalid', result.stdout)
+
+    def test_malformed_replaced_slots_invalidate_the_record(self):
+        good = {'id': 'omarchy.workspaces', 'section': 'left', 'index': 0}
+        bad = {
+            'not a list': {'omarchy.workspaces': {'section': 'left', 'index': 0}},
+            'slot not a dict': ['omarchy.workspaces'],
+            'bad id': [dict(good, id='bad id!')],
+            'unknown section': [dict(good, section='nowhere')],
+            'extra key': [dict(good, extra=1)],
+            'missing key': [{'id': 'omarchy.workspaces', 'section': 'left'}],
+            'float index': [dict(good, index=1.5)],
+            'bool index': [dict(good, index=True)],
+            'negative index': [dict(good, index=-1)],
+            'duplicate id': [good, good],
+            'id not replaced': [dict(good, id='omarchy.other')],
+        }
+        for label, value in bad.items():
+            with self.subTest(label):
+                self.clear_calls()
+                self.spaces_record(replacedAt=value)
+                self.write_list([plugin('example.spaces')], version=2)
+                result = self.invoke()
+                self.assertIn('install record is invalid', result.stdout)
+                self.assertFalse([call for call in self.omarchy_calls() if call[1] in ('enable', 'disable', 'add', 'remove')])
+                shutil.rmtree(self.plugin_dir('example.spaces'))
+
+    def test_unusable_shell_json_falls_back_to_the_default_placement(self):
+        shell = self.home / '.config/omarchy/shell.json'
+        shell.parent.mkdir(parents=True, exist_ok=True)
+        entry = {'id': 'omarchy.workspaces'}
+        bodies = {
+            'invalid json': '{not json',
+            'list': json.dumps([entry]),
+            'version missing': json.dumps({'bar': {'layout': {'left': [entry]}}}),
+            'version 2': json.dumps({'version': 2, 'bar': {'layout': {'left': [entry]}}}),
+            'bar not a dict': json.dumps({'version': 1, 'bar': []}),
+            'layout not a dict': json.dumps({'version': 1, 'bar': {'layout': []}}),
+            'section not a list': json.dumps({'version': 1, 'bar': {'layout': {'left': 'omarchy.workspaces'}}}),
+            'widget absent': json.dumps({'version': 1, 'bar': {'layout': {'left': [{'id': 'omarchy.menu'}]}}}),
+        }
+        for label, body in bodies.items():
+            with self.subTest(label):
+                shutil.rmtree(self.state, ignore_errors=True)
+                shell.write_text(body)
+                self.set_control(listed={'omarchy.workspaces': [True, True]})
+                self.write_list([plugin('example.spaces', replaces=['omarchy.workspaces'])], version=2)
+                self.invoke()
+                self.assertNotIn('replacedAt', self.record()['plugins']['example.spaces'])
+                shutil.rmtree(self.plugin_dir('example.spaces'), ignore_errors=True)
+                (self.fixture / 'shell-states.json').unlink(missing_ok=True)
+
+    def test_string_layout_entries_are_found(self):
+        self.write_shell_layout({'left': ['omarchy.menu', 'omarchy.workspaces']})
+        self.set_control(listed={'omarchy.workspaces': [True, True]})
+        self.write_list([plugin('example.spaces', replaces=['omarchy.workspaces'])], version=2)
+        self.invoke()
+        self.assertEqual(self.record()['plugins']['example.spaces']['replacedAt'],
+                         [{'id': 'omarchy.workspaces', 'section': 'left', 'index': 1}])
 
     def test_excluded_replaced_id_is_not_listed_in_any_run(self):
         exclusions = self.home / '.config/groundwork/omarchy-plugins.exclude.json'
@@ -613,6 +745,9 @@ class PluginApplyTests(unittest.TestCase):
         for _ in range(3):
             result = self.invoke()
             self.assertNotIn('omarchy.workspaces', result.stdout)
+            # Precondition: the replacing plugin was applied, and the excluded id was left alone.
+            entry = self.record()['plugins']['example.spaces']
+            self.assertNotIn('omarchy.workspaces', entry.get('replaced', []))
         self.assertNotIn(['plugin', 'disable', 'omarchy.workspaces'], self.omarchy_calls())
 
     def test_builtin_record_with_a_repo_is_invalid(self):

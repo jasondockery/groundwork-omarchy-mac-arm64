@@ -20,7 +20,9 @@ LIST_DEADLINE_SECONDS = 20
 MAX_BYTES = 1_048_576
 MAX_REDIRECTS = 5
 SCHEMA_VERSIONS = {1, 2}
-SECTIONS = {'left', 'centerBegin', 'center', 'centerEnd', 'tray', 'right'}
+# Omarchy's Util.barSections order, which decides what a scan finds first.
+BAR_SECTIONS = ('left', 'centerBegin', 'center', 'centerEnd', 'right', 'tray')
+SECTIONS = set(BAR_SECTIONS)
 ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]*$')
 ARCH_RE = re.compile(r'^[A-Za-z0-9_]+$')
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -508,31 +510,45 @@ def load_exclusions():
     return found
 
 
-def clean_placements(value):
-    """Validate the bar slots stored for replaced ids; raises ListError when malformed."""
+def clean_placements(value, replaced):
+    """Validate the bar slots stored for replaced ids, in capture order.
+
+    Raises ListError when malformed, or when a slot names an id that is not in
+    `replaced`.
+    """
     if value is None:
-        return {}
-    if type(value) is not dict:
+        return []
+    if type(value) is not list:
         raise ListError('Omarchy plugin install record is invalid; plugin changes were skipped.')
-    clean = {}
-    for plugin_id, slot in value.items():
-        if (not valid_plugin_id(plugin_id) or type(slot) is not dict or set(slot) != {'section', 'index'}
+    clean = []
+    seen = set()
+    for slot in value:
+        if (type(slot) is not dict or set(slot) != {'id', 'section', 'index'} or not valid_plugin_id(slot['id'])
+                or slot['id'] in seen or slot['id'] not in (replaced or [])
                 or slot['section'] not in SECTIONS or type(slot['index']) is not int or slot['index'] < 0):
             raise ListError('Omarchy plugin install record is invalid; plugin changes were skipped.')
-        clean[plugin_id] = {'section': slot['section'], 'index': slot['index']}
+        seen.add(slot['id'])
+        clean.append({'id': slot['id'], 'section': slot['section'], 'index': slot['index']})
     return clean
 
 
 def bar_slot(plugin_id):
-    """The (section, index) a widget holds in the user's bar layout, or None."""
+    """The {section, index} a widget holds in the user's bar layout, or None.
+
+    The shell only uses shell.json when it parses to an object with
+    `version: 1`; otherwise it runs on defaults and the file says nothing about
+    where the widget sits.
+    """
     try:
         data = json.loads((Path.home() / '.config/omarchy/shell.json').read_text(encoding='utf-8'))
-        layout = data['bar']['layout']
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError):
         return None
+    if type(data) is not dict or data.get('version') != 1 or type(data.get('bar')) is not dict:
+        return None
+    layout = data['bar'].get('layout')
     if type(layout) is not dict:
         return None
-    for section in SECTIONS:
+    for section in BAR_SECTIONS:
         entries = layout.get(section)
         if type(entries) is not list:
             continue
@@ -540,6 +556,13 @@ def bar_slot(plugin_id):
             if entry == plugin_id or (type(entry) is dict and entry.get('id') == plugin_id):
                 return {'section': section, 'index': index}
     return None
+
+
+def wait_until_off_the_bar(plugin_id):
+    """Give the shell a moment to write the layout that no longer holds the widget."""
+    deadline = time.monotonic() + 2
+    while bar_slot(plugin_id) is not None and time.monotonic() < deadline:
+        time.sleep(0.1)
 
 
 def load_record():
@@ -563,7 +586,7 @@ def load_record():
         replaced = entry.get('replaced')
         if replaced is not None and (type(replaced) is not list or any(not valid_plugin_id(other) for other in replaced)):
             raise ListError('Omarchy plugin install record is invalid; plugin changes were skipped.')
-        placed = clean_placements(entry.get('replacedAt'))
+        placed = clean_placements(entry.get('replacedAt'), replaced)
         if entry.get('builtIn'):
             here = entry.get('enabledHere', False)
             if not valid_plugin_id(plugin_id) or set(entry) - {'builtIn', 'replaced', 'replacedAt', 'enabledHere'} or type(here) is not bool:
@@ -1114,12 +1137,15 @@ def restore_replaced(recorded, states, listing):
     if known is None:
         return False
     ok = True
-    for other in replaced:
+    slots = {slot['id']: slot for slot in recorded.get('replacedAt', [])}
+    # Widgets without a slot first; slotted ones in reverse capture order, so
+    # each index meets the layout it was measured against.
+    order = [other for other in replaced if other not in slots] + [slot['id'] for slot in reversed(recorded.get('replacedAt', []))]
+    for other in order:
         if other in known and not known[other][0]:
             command = ['plugin', 'enable', other]
-            slot = recorded.get('replacedAt', {}).get(other)
-            if slot:
-                command.extend(['--section', slot['section'], '--index', str(slot['index'])])
+            if other in slots:
+                command.extend(['--section', slots[other]['section'], '--index', str(slots[other]['index'])])
             outcome = run_omarchy(command, 60)
             listing['value'] = None
             if command_failed(outcome):
@@ -1143,7 +1169,7 @@ def apply_replacements(record, item, states, exclusions):
     # A replacement the user turned off leaves the original in place.
     if known is None or not known.get(item['id'], (False, False))[0]:
         return
-    placed = dict(recorded.get('replacedAt', {}))
+    placed = list(recorded.get('replacedAt', []))
     for other in due:
         if other in exclusions:
             continue
@@ -1155,7 +1181,15 @@ def apply_replacements(record, item, states, exclusions):
                 continue
             say(f"Omarchy plugin {other} was disabled; {item['id']} replaces it.")
             if slot:
-                placed[other] = slot
+                wait_until_off_the_bar(other)
+                placed = [entry for entry in placed if entry['id'] != other] + [dict(slot, id=other)]
+            # Save per widget so an interruption keeps the slot just measured.
+            done.add(other)
+            recorded['replaced'] = sorted(done)
+            if placed:
+                recorded['replacedAt'] = placed
+            save_record(record)
+            continue
         done.add(other)
     if done:
         recorded['replaced'] = sorted(done)
