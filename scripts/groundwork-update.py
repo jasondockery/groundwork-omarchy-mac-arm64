@@ -376,6 +376,9 @@ def fetch(url, deadline=60):
     chunks = []
     try:
         with https_opener.open(request, timeout=min(deadline, 30)) as response:
+            # urllib exposes no public socket. If a later Python moves this
+            # private attribute, fall back to the opener's fixed timeout.
+            sock = getattr(getattr(getattr(response, 'fp', None), 'raw', None), '_sock', None)
             # The response closes itself on the last byte.
             while not response.isclosed():
                 # A socket timeout bounds one recv, not the transfer. Bound each
@@ -383,7 +386,8 @@ def fetch(url, deadline=60):
                 left = ends - time.monotonic()
                 if left <= 0:
                     raise UpdateError(f'Downloading {url} exceeded {deadline} seconds.')
-                response.fp.raw._sock.settimeout(left)
+                if sock is not None:
+                    sock.settimeout(left)
                 chunks.append(response.read1(1 << 20))
     except TimeoutError as error:
         raise UpdateError(f'Downloading {url} exceeded {deadline} seconds.') from error
