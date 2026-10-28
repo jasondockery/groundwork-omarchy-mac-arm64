@@ -19,7 +19,8 @@ DEFAULT_LIST_URL = 'https://raw.githubusercontent.com/jasondockery/groundwork-co
 LIST_DEADLINE_SECONDS = 20
 MAX_BYTES = 1_048_576
 MAX_REDIRECTS = 5
-SECTIONS = {'left', 'center', 'right'}
+SCHEMA_VERSIONS = {1, 2}
+SECTIONS = {'left', 'centerBegin', 'center', 'centerEnd', 'tray', 'right'}
 ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]*$')
 ARCH_RE = re.compile(r'^[A-Za-z0-9_]+$')
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -125,9 +126,14 @@ def read_private_json(path):
     return json.loads(path.read_text(encoding='utf-8'))
 
 
+def valid_plugin_id(value):
+    """Any plugin id, including one Omarchy ships."""
+    return type(value) is str and len(value) <= 200 and bool(ID_RE.fullmatch(value)) and '..' not in value
+
+
 def valid_id(value):
-    return (type(value) is str and len(value) <= 200 and bool(ID_RE.fullmatch(value))
-            and '..' not in value and not value.startswith('omarchy.'))
+    """A cloned plugin id. Omarchy reserves the omarchy. prefix for its own."""
+    return valid_plugin_id(value) and not value.startswith('omarchy.')
 
 
 def valid_reason(value):
@@ -176,14 +182,29 @@ def validate_setup(value):
     return {'command': command, 'needsSudo': needs_sudo}
 
 
-def validate_plugin(value):
-    if type(value) is not dict or not valid_id(value.get('id')):
+def validate_plugin(value, version):
+    if type(value) is not dict:
         raise ListError('invalid plugin id')
-    if not valid_repo(value.get('repo')):
+    built_in = value.get('builtIn', False)
+    if type(built_in) is not bool or (built_in and version < 2):
+        raise ListError('plugin builtIn needs schemaVersion 2')
+    if built_in:
+        # A built-in ships with Omarchy: no checkout to clone, update, or set up.
+        if not valid_plugin_id(value.get('id')):
+            raise ListError('invalid plugin id')
+        if 'repo' in value or 'setup' in value:
+            raise ListError('a built-in plugin has no repo or setup')
+    elif not valid_id(value.get('id')):
+        raise ListError('invalid plugin id')
+    elif not valid_repo(value.get('repo')):
         raise ListError('plugin repo must be an https GitHub URL')
     if not valid_reason(value.get('reason')):
         raise ListError('plugin reason is missing')
-    plugin = {'id': value['id'], 'repo': value['repo'], 'reason': value['reason']}
+    plugin = {'id': value['id'], 'reason': value['reason']}
+    if built_in:
+        plugin['builtIn'] = True
+    else:
+        plugin['repo'] = value['repo']
     if 'batch' in value:
         if type(value['batch']) is not int or value['batch'] < 0:
             raise ListError('plugin batch must be an integer')
@@ -199,11 +220,18 @@ def validate_plugin(value):
         plugin['section'] = value['section']
     if 'setup' in value:
         plugin['setup'] = validate_setup(value['setup'])
+    if version >= 2 and 'replaces' in value:
+        replaces = value['replaces']
+        if (type(replaces) is not list or not replaces or any(not valid_plugin_id(item) for item in replaces)
+                or len(replaces) != len(set(replaces)) or value['id'] in replaces):
+            raise ListError('plugin replaces is invalid')
+        plugin['replaces'] = list(replaces)
     return plugin
 
 
-def validate_retired(value):
-    if type(value) is not dict or not valid_id(value.get('id')):
+def validate_retired(value, version):
+    allowed = valid_plugin_id if version >= 2 else valid_id
+    if type(value) is not dict or not allowed(value.get('id')):
         raise ListError('invalid plugin id')
     if not valid_reason(value.get('reason')):
         raise ListError('plugin reason is missing')
@@ -211,8 +239,9 @@ def validate_retired(value):
 
 
 def validate_list(data):
-    if type(data) is not dict or type(data.get('schemaVersion')) is not int or data['schemaVersion'] != 1:
+    if type(data) is not dict or type(data.get('schemaVersion')) is not int or data['schemaVersion'] not in SCHEMA_VERSIONS:
         raise ListError('unsupported schemaVersion')
+    version = data['schemaVersion']
     plugins = data.get('plugins')
     retired = data.get('retired')
     if type(plugins) is not list:
@@ -224,20 +253,20 @@ def validate_list(data):
     seen = []
     for item in plugins:
         try:
-            plugin = validate_plugin(item)
+            plugin = validate_plugin(item, version)
         except UnsupportedSection as error:
             skipped_sections.append(error.plugin_id)
             seen.append(error.plugin_id)
             continue
         normalized_plugins.append(plugin)
         seen.append(plugin['id'])
-    normalized_retired = [validate_retired(item) for item in retired]
+    normalized_retired = [validate_retired(item, version) for item in retired]
     retired_ids = [item['id'] for item in normalized_retired]
     if len(seen) != len(set(seen)) or len(retired_ids) != len(set(retired_ids)):
         raise ListError('plugin id is duplicated')
     if set(seen) & set(retired_ids):
         raise ListError('plugin id is in both plugins and retired')
-    document = {'schemaVersion': 1, 'plugins': normalized_plugins, 'retired': normalized_retired}
+    document = {'schemaVersion': version, 'plugins': normalized_plugins, 'retired': normalized_retired}
     if skipped_sections:
         document['skippedSections'] = skipped_sections
     return document
@@ -427,7 +456,7 @@ def describe_changes(previous, document):
         old = old_plugins.get(item['id'])
         if not old:
             continue
-        if item['repo'] != old['repo']:
+        if item.get('repo') != old.get('repo'):
             repo_changed.append(item['id'])
         if item.get('section') != old.get('section'):
             section_changed.append(item['id'])
@@ -455,7 +484,7 @@ def parse_exclusions(data):
         raise ListError('exclusions must be a schemaVersion 1 object')
     found = {}
     for item in items:
-        if type(item) is not dict or set(item) != {'id', 'reason'} or not valid_id(item.get('id')) or not valid_reason(item.get('reason')):
+        if type(item) is not dict or set(item) != {'id', 'reason'} or not valid_plugin_id(item.get('id')) or not valid_reason(item.get('reason')):
             raise ListError('each exclusion needs an id and a reason')
         if item['id'] in found:
             raise ListError('plugin id is duplicated')
@@ -491,13 +520,27 @@ def load_record():
     if type(data) is not dict or type(data.get('schemaVersion')) is not int or data['schemaVersion'] != 1 or type(plugins) is not dict:
         raise ListError('Omarchy plugin install record is invalid; plugin changes were skipped.')
     noticed = data.get('noticedRetired', [])
-    if type(noticed) is not list or any(not valid_id(item) for item in noticed):
+    if type(noticed) is not list or any(not valid_plugin_id(item) for item in noticed):
         raise ListError('Omarchy plugin install record is invalid; plugin changes were skipped.')
     clean = {}
     for plugin_id, entry in plugins.items():
-        if not valid_id(plugin_id) or type(entry) is not dict or not valid_repo(entry.get('repo')):
+        if type(entry) is not dict or type(entry.get('builtIn', False)) is not bool:
+            raise ListError('Omarchy plugin install record is invalid; plugin changes were skipped.')
+        replaced = entry.get('replaced')
+        if replaced is not None and (type(replaced) is not list or any(not valid_plugin_id(other) for other in replaced)):
+            raise ListError('Omarchy plugin install record is invalid; plugin changes were skipped.')
+        if entry.get('builtIn'):
+            if not valid_plugin_id(plugin_id) or set(entry) - {'builtIn', 'replaced'}:
+                raise ListError('Omarchy plugin install record is invalid; plugin changes were skipped.')
+            clean[plugin_id] = {'builtIn': True}
+            if replaced:
+                clean[plugin_id]['replaced'] = sorted(set(replaced))
+            continue
+        if not valid_id(plugin_id) or not valid_repo(entry.get('repo')):
             raise ListError('Omarchy plugin install record is invalid; plugin changes were skipped.')
         item = {'repo': entry['repo']}
+        if replaced:
+            item['replaced'] = sorted(set(replaced))
         pending = entry.get('enablePending', False)
         if type(pending) is not bool:
             raise ListError('Omarchy plugin install record is invalid; plugin changes were skipped.')
@@ -549,6 +592,24 @@ def shell_is_running():
     except (OSError, subprocess.TimeoutExpired):
         return False
     return result.returncode == 0 and result.stdout.strip() == 'ok'
+
+
+def plugin_states():
+    """Map each plugin the running shell knows to (enabled, firstParty), or None."""
+    outcome = run_omarchy(['plugin', 'list', '--json'], 30)
+    if command_failed(outcome):
+        return None
+    try:
+        data = json.loads(outcome.stdout)
+    except json.JSONDecodeError:
+        return None
+    if type(data) is not list:
+        return None
+    states = {}
+    for item in data:
+        if type(item) is dict and valid_plugin_id(item.get('id')):
+            states[item['id']] = (item.get('enabled') is True, item.get('firstParty') is True)
+    return states
 
 
 def git_head(directory):
@@ -844,13 +905,13 @@ def apply_plugins(updating):
     if document is None:
         return
     for plugin_id in document.get('skippedSections', []):
-        say(f'Omarchy plugin {plugin_id} was skipped; section must be left, center, or right.')
+        say(f'Omarchy plugin {plugin_id} was skipped; section must be left, centerBegin, center, centerEnd, tray, or right.')
     if fresh:
         changes = describe_changes(load_cache(), document)
         if changes:
             say(f'Omarchy plugin list changes: {changes}.')
         cached = {
-            'schemaVersion': 1,
+            'schemaVersion': document['schemaVersion'],
             'plugins': document['plugins'],
             'retired': document['retired'],
         }
@@ -897,6 +958,17 @@ def apply_plugins(updating):
         recorded = record['plugins'].get(plugin_id)
         if recorded is None:
             continue
+        if recorded.get('builtIn'):
+            if not shell_up():
+                deferred.append(plugin_id)
+                continue
+            outcome = run_omarchy(['plugin', 'disable', plugin_id], 60)
+            if command_failed(outcome):
+                say(f'Omarchy plugin {plugin_id} disable failed: {failure_text(outcome)}.')
+                continue
+            record['plugins'].pop(plugin_id, None)
+            save_record(record)
+            continue
         directory = plugin_path(plugin_id)
         if not path_exists(directory):
             record['plugins'].pop(plugin_id, None)
@@ -925,69 +997,146 @@ def apply_plugins(updating):
         record['noticedRetired'] = [*already_noticed, *pending_notice]
         save_record(record)
 
+    listing = {'value': None}
+
+    def states():
+        if listing['value'] is None and shell_up():
+            listing['value'] = plugin_states()
+        return listing['value']
+
     sudo_state = {'ready': None}
     for item in selected:
         if item['id'] in retired_ids:
             continue
-        plugin_id = item['id']
-        directory = plugin_path(plugin_id)
-        recorded = record['plugins'].get(plugin_id)
-        head_moved = False
-        if directory.is_symlink():
-            say(f'Omarchy plugin {plugin_id} was not changed; its path is a symbolic link.')
-            continue
-        if path_exists(directory):
-            pending = bool(recorded and recorded.get('enablePending'))
-            if updating or pending:
-                if not shell_up():
-                    deferred.append(plugin_id)
-                else:
-                    if updating:
-                        before = git_head(directory)
-                        outcome = run_omarchy(['plugin', 'update', plugin_id, '--yes'], 180)
-                        after = git_head(directory)
-                        head_moved = before is not None and after is not None and before != after
-                        if command_failed(outcome):
-                            say(f'Omarchy plugin {plugin_id} update failed: {failure_text(outcome)}.')
-                    if pending:
-                        outcome = run_omarchy(enable_command(item), 60)
-                        if command_failed(outcome):
-                            say(f'Omarchy plugin {plugin_id} enable failed: {failure_text(outcome)}.')
-                        else:
-                            recorded.pop('enablePending', None)
-                            save_record(record)
-            if recorded is not None and not recorded.get('enablePending') and item.get('setup'):
-                current_head = git_head(directory)
-                if setup_due(item, recorded, head_moved, current_head):
-                    perform_setup(item, directory, recorded, sudo_state)
-                    save_record(record)
-            continue
-        if recorded is not None and recorded.get('enablePending'):
-            drop_record(record, plugin_id)
-            recorded = None
-        elif recorded is not None:
-            say(f'Omarchy plugin {plugin_id} was removed locally; leaving it uninstalled.')
-            continue
-        if not shell_up():
-            deferred.append(plugin_id)
-            continue
-        existed = path_exists(directory)
-        outcome = run_omarchy(['plugin', 'add', item['repo'], '--yes'], 180)
-        created = (not existed) and directory.is_dir() and not directory.is_symlink()
-        if command_failed(outcome):
-            say(f'Omarchy plugin {plugin_id} add failed: {failure_text(outcome)}.')
-            if reject_mismatch(plugin_id, outcome, directory, created) or not created:
+        if item.get('builtIn'):
+            if item['id'] in record['plugins']:
                 continue
-            install_checked_out(record, item, directory, sudo_state, pending_first=True)
+            if not shell_up():
+                deferred.append(item['id'])
+                continue
+            if apply_builtin(record, item, states):
+                listing['value'] = None
             continue
-        if reject_mismatch(plugin_id, outcome, directory, created):
-            continue
-        if directory.is_symlink() or not directory.is_dir():
-            say(f'Omarchy plugin {plugin_id} add failed: the plugin directory is missing.')
-            continue
-        install_checked_out(record, item, directory, sudo_state, pending_first=False)
+        install_plugin(record, item, updating, shell_up, deferred, sudo_state)
+        listing['value'] = None
+    for item in selected:
+        if item.get('replaces') and item['id'] not in retired_ids:
+            apply_replacements(record, item, states)
     if deferred:
         say('Omarchy shell is not running; deferred plugin changes: ' + ', '.join(deferred) + '.')
+
+
+def apply_builtin(record, item, states):
+    """Enable an unrecorded built-in once. True when this run enabled it.
+
+    A recorded built-in is never enabled again, so a widget the user turned
+    off stays off. One that is already on keeps its placement.
+    """
+    plugin_id = item['id']
+    known = states()
+    if known is None:
+        say(f'Omarchy plugin {plugin_id} was skipped; the shell did not list its plugins.')
+        return False
+    if plugin_id not in known or not known[plugin_id][1]:
+        say(f'Omarchy plugin {plugin_id} is not built into this Omarchy; skipped.')
+        return False
+    enabled = False
+    if not known[plugin_id][0]:
+        outcome = run_omarchy(enable_command(item), 60)
+        if command_failed(outcome):
+            say(f'Omarchy plugin {plugin_id} enable failed: {failure_text(outcome)}.')
+            return False
+        enabled = True
+    record['plugins'][plugin_id] = {'builtIn': True}
+    save_record(record)
+    return enabled
+
+
+def apply_replacements(record, item, states):
+    """Disable each plugin this entry replaces, once, after this layer enabled it."""
+    recorded = record['plugins'].get(item['id'])
+    if recorded is None or recorded.get('enablePending'):
+        return
+    done = set(recorded.get('replaced', []))
+    due = [other for other in item['replaces'] if other not in done]
+    if not due:
+        return
+    known = states()
+    # A replacement the user turned off leaves the original in place.
+    if known is None or not known.get(item['id'], (False, False))[0]:
+        return
+    for other in due:
+        if known.get(other, (False, False))[0]:
+            outcome = run_omarchy(['plugin', 'disable', other], 60)
+            if command_failed(outcome):
+                say(f'Omarchy plugin {other} disable failed: {failure_text(outcome)}.')
+                continue
+            say(f"Omarchy plugin {other} was disabled; {item['id']} replaces it.")
+        done.add(other)
+    if done:
+        recorded['replaced'] = sorted(done)
+        save_record(record)
+
+
+def install_plugin(record, item, updating, shell_up, deferred, sudo_state):
+    """Install, update, and set up one cloned plugin."""
+    plugin_id = item['id']
+    directory = plugin_path(plugin_id)
+    recorded = record['plugins'].get(plugin_id)
+    head_moved = False
+    if directory.is_symlink():
+        say(f'Omarchy plugin {plugin_id} was not changed; its path is a symbolic link.')
+        return
+    if path_exists(directory):
+        pending = bool(recorded and recorded.get('enablePending'))
+        if updating or pending:
+            if not shell_up():
+                deferred.append(plugin_id)
+            else:
+                if updating:
+                    before = git_head(directory)
+                    outcome = run_omarchy(['plugin', 'update', plugin_id, '--yes'], 180)
+                    after = git_head(directory)
+                    head_moved = before is not None and after is not None and before != after
+                    if command_failed(outcome):
+                        say(f'Omarchy plugin {plugin_id} update failed: {failure_text(outcome)}.')
+                if pending:
+                    outcome = run_omarchy(enable_command(item), 60)
+                    if command_failed(outcome):
+                        say(f'Omarchy plugin {plugin_id} enable failed: {failure_text(outcome)}.')
+                    else:
+                        recorded.pop('enablePending', None)
+                        save_record(record)
+        if recorded is not None and not recorded.get('enablePending') and item.get('setup'):
+            current_head = git_head(directory)
+            if setup_due(item, recorded, head_moved, current_head):
+                perform_setup(item, directory, recorded, sudo_state)
+                save_record(record)
+        return
+    if recorded is not None and recorded.get('enablePending'):
+        drop_record(record, plugin_id)
+        recorded = None
+    elif recorded is not None:
+        say(f'Omarchy plugin {plugin_id} was removed locally; leaving it uninstalled.')
+        return
+    if not shell_up():
+        deferred.append(plugin_id)
+        return
+    existed = path_exists(directory)
+    outcome = run_omarchy(['plugin', 'add', item['repo'], '--yes'], 180)
+    created = (not existed) and directory.is_dir() and not directory.is_symlink()
+    if command_failed(outcome):
+        say(f'Omarchy plugin {plugin_id} add failed: {failure_text(outcome)}.')
+        if reject_mismatch(plugin_id, outcome, directory, created) or not created:
+            return
+        install_checked_out(record, item, directory, sudo_state, pending_first=True)
+        return
+    if reject_mismatch(plugin_id, outcome, directory, created):
+        return
+    if directory.is_symlink() or not directory.is_dir():
+        say(f'Omarchy plugin {plugin_id} add failed: the plugin directory is missing.')
+        return
+    install_checked_out(record, item, directory, sudo_state, pending_first=False)
 
 
 def strip_lua_comments(text):

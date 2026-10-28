@@ -82,6 +82,35 @@ if name != 'omarchy' or args[:1] != ['plugin']:
 
 settings = control()
 action = args[1]
+
+def shell_states():
+    path = fixture / 'shell-states.json'
+    if path.is_file():
+        return json.loads(path.read_text())
+    return {key: list(value) for key, value in settings.get('listed', {}).items()}
+
+def save_states(states):
+    (fixture / 'shell-states.json').write_text(json.dumps(states) + '\n')
+
+if action == 'list' and args[2:] == ['--json']:
+    if settings.get('fail_list'):
+        sys.exit(1)
+    states = shell_states()
+    if plugins_root().is_dir():
+        for directory in plugins_root().iterdir():
+            states.setdefault(directory.name, [False, False])
+    print(json.dumps([{'id': key, 'enabled': value[0], 'firstParty': value[1]} for key, value in sorted(states.items())]))
+    sys.exit(0)
+if action == 'disable' and len(args) == 3:
+    plugin_id = args[2]
+    if plugin_id in settings.get('fail_disable', []):
+        sys.stderr.write('fixture disable failed\n')
+        sys.exit(1)
+    states = shell_states()
+    states.setdefault(plugin_id, [False, False])[0] = False
+    save_states(states)
+    print(f'Disabled {plugin_id}')
+    sys.exit(0)
 if action == 'add' and args[3:] == ['--yes']:
     repo = args[2]
     expected = expected_id(repo)
@@ -125,6 +154,9 @@ if action == 'enable':
     if plugin_id in settings.get('fail_enable', []):
         sys.stderr.write('fixture enable failed\n')
         sys.exit(1)
+    states = shell_states()
+    states.setdefault(plugin_id, [False, False])[0] = True
+    save_states(states)
     print(f'Enabled {plugin_id}')
     sys.exit(0)
 if action == 'remove' and args[3:] == ['--yes']:
@@ -216,9 +248,9 @@ class PluginApplyTests(unittest.TestCase):
             'GIT_TERMINAL_PROMPT': '0',
         })
 
-    def write_list(self, entries, retired=None):
+    def write_list(self, entries, retired=None, version=1):
         self.list_path.write_text(json.dumps({
-            'schemaVersion': 1,
+            'schemaVersion': version,
             'plugins': entries,
             'retired': [] if retired is None else retired,
         }) + '\n')
@@ -315,6 +347,172 @@ class PluginApplyTests(unittest.TestCase):
         original = path.read_bytes()
         self.addCleanup(path.write_bytes, original)
         path.write_text(text)
+
+    def builtin(self, plugin_id='omarchy.agents', **extra):
+        entry = {'id': plugin_id, 'builtIn': True, 'reason': 'Fixture'}
+        entry.update(extra)
+        return entry
+
+    def test_version_2_list_with_only_cloned_plugins_matches_version_1(self):
+        self.write_list([plugin(section='right')], version=2)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.omarchy_calls(), [
+            ['plugin', 'add', 'https://github.com/example/widget.git', '--yes'],
+            ['plugin', 'enable', 'example.widget', '--section', 'right'],
+        ])
+        self.assertEqual(json.loads(self.cache_path().read_text())['schemaVersion'], 2)
+
+    def test_version_2_rules_reject_the_list(self):
+        samples = [
+            json.dumps({'schemaVersion': 1, 'plugins': [self.builtin()], 'retired': []}),
+            json.dumps({'schemaVersion': 2, 'plugins': [self.builtin(repo='https://github.com/example/agents.git')], 'retired': []}),
+            json.dumps({'schemaVersion': 2, 'plugins': [self.builtin(setup={'command': 'setup', 'needsSudo': False})], 'retired': []}),
+            json.dumps({'schemaVersion': 2, 'plugins': [self.builtin(builtIn='yes')], 'retired': []}),
+            json.dumps({'schemaVersion': 2, 'plugins': [self.builtin('omarchy..agents')], 'retired': []}),
+            json.dumps({'schemaVersion': 2, 'plugins': [plugin('omarchy.widget')], 'retired': []}),
+            json.dumps({'schemaVersion': 2, 'plugins': [plugin(replaces=[])], 'retired': []}),
+            json.dumps({'schemaVersion': 2, 'plugins': [plugin(replaces=['example.widget'])], 'retired': []}),
+            json.dumps({'schemaVersion': 3, 'plugins': [], 'retired': []}),
+        ]
+        for sample in samples:
+            self.list_path.write_text(sample)
+            result = self.invoke()
+            self.assertEqual(result.returncode, 0, sample + result.stdout + result.stderr)
+            self.assertIn('invalid', result.stdout, sample)
+            self.assertFalse(self.omarchy_calls(), sample)
+            self.clear_calls()
+
+    def test_enabled_builtin_is_recorded_once_and_left_in_place(self):
+        self.set_control(listed={'omarchy.agents': [True, True]})
+        self.write_list([self.builtin(section='right')], version=2)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.omarchy_calls(), [['plugin', 'list', '--json']])
+        self.assertEqual(self.record()['plugins']['omarchy.agents'], {'builtIn': True})
+        self.clear_calls()
+        again = self.invoke('--update')
+        self.assertEqual(again.stdout + again.stderr, '')
+        self.assertFalse(self.omarchy_calls())
+
+    def test_disabled_builtin_is_enabled_once_then_left_off(self):
+        self.set_control(listed={'omarchy.agents': [False, True]})
+        self.write_list([self.builtin(section='left')], version=2)
+        self.invoke()
+        self.assertEqual(self.omarchy_calls(), [
+            ['plugin', 'list', '--json'],
+            ['plugin', 'enable', 'omarchy.agents', '--section', 'left'],
+        ])
+        self.assertEqual(self.record()['plugins']['omarchy.agents'], {'builtIn': True})
+        # The user turns it off again; later runs keep it off.
+        self.set_control(listed={'omarchy.agents': [False, True]})
+        (self.fixture / 'shell-states.json').unlink()
+        self.clear_calls()
+        self.invoke('--update')
+        self.assertFalse(self.omarchy_calls())
+
+    def test_builtin_missing_or_third_party_is_skipped_unrecorded(self):
+        for listed in ({}, {'omarchy.agents': [False, False]}):
+            self.set_control(listed=listed)
+            self.write_list([self.builtin()], version=2)
+            result = self.invoke()
+            self.assertIn('Omarchy plugin omarchy.agents is not built into this Omarchy; skipped.', result.stdout)
+            self.assertNotIn(['plugin', 'enable', 'omarchy.agents'], self.omarchy_calls())
+            self.assertFalse(self.record_path().exists())
+            self.clear_calls()
+
+    def test_builtin_waits_for_a_shell(self):
+        self.write_list([self.builtin()], version=2)
+        result = self.invoke(extra={'FIXTURE_SHELL': '0'})
+        self.assertIn('deferred plugin changes: omarchy.agents', result.stdout)
+        self.assertFalse(self.omarchy_calls())
+
+    def test_unlisted_shell_skips_the_builtin_without_recording(self):
+        self.set_control(fail_list=True)
+        self.write_list([self.builtin()], version=2)
+        result = self.invoke()
+        self.assertIn('the shell did not list its plugins', result.stdout)
+        self.assertFalse(self.record_path().exists())
+
+    def test_builtin_enable_failure_is_retried_on_the_next_run(self):
+        self.set_control(listed={'omarchy.agents': [False, True]}, fail_enable=['omarchy.agents'])
+        self.write_list([self.builtin()], version=2)
+        result = self.invoke()
+        self.assertIn('Omarchy plugin omarchy.agents enable failed', result.stdout)
+        self.assertFalse(self.record_path().exists())
+
+    def test_replacement_disables_the_original_once(self):
+        self.set_control(listed={'omarchy.workspaces': [True, True]})
+        self.write_list([plugin('example.spaces', replaces=['omarchy.workspaces'])], version=2)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Omarchy plugin omarchy.workspaces was disabled; example.spaces replaces it.', result.stdout)
+        self.assertEqual(self.omarchy_calls()[-1], ['plugin', 'disable', 'omarchy.workspaces'])
+        self.assertEqual(self.record()['plugins']['example.spaces']['replaced'], ['omarchy.workspaces'])
+        # The user turns Workspaces back on; the swap does not repeat.
+        states = json.loads((self.fixture / 'shell-states.json').read_text())
+        states['omarchy.workspaces'][0] = True
+        (self.fixture / 'shell-states.json').write_text(json.dumps(states))
+        self.clear_calls()
+        again = self.invoke('--update')
+        self.assertNotIn('disable', str(self.omarchy_calls()))
+        self.assertNotIn('disabled', again.stdout)
+
+    def test_replacement_added_later_runs_for_a_recorded_plugin(self):
+        self.seed_directory('example.spaces')
+        self.write_record({'example.spaces': {'repo': 'https://github.com/example/spaces.git'}})
+        self.set_control(listed={'example.spaces': [True, False], 'omarchy.workspaces': [True, True]})
+        self.write_list([plugin('example.spaces', replaces=['omarchy.workspaces'])], version=2)
+        self.invoke()
+        self.assertEqual(self.omarchy_calls(), [['plugin', 'list', '--json'], ['plugin', 'disable', 'omarchy.workspaces']])
+        self.assertEqual(self.record()['plugins']['example.spaces']['replaced'], ['omarchy.workspaces'])
+
+    def test_replacement_the_user_turned_off_keeps_the_original(self):
+        self.seed_directory('example.spaces')
+        self.write_record({'example.spaces': {'repo': 'https://github.com/example/spaces.git'}})
+        self.set_control(listed={'example.spaces': [False, False], 'omarchy.workspaces': [True, True]})
+        self.write_list([plugin('example.spaces', replaces=['omarchy.workspaces'])], version=2)
+        self.invoke()
+        self.assertNotIn(['plugin', 'disable', 'omarchy.workspaces'], self.omarchy_calls())
+        self.assertNotIn('replaced', self.record()['plugins']['example.spaces'])
+
+    def test_failed_disable_is_retried_on_the_next_run(self):
+        self.set_control(listed={'omarchy.workspaces': [True, True]}, fail_disable=['omarchy.workspaces'])
+        self.write_list([plugin('example.spaces', replaces=['omarchy.workspaces'])], version=2)
+        result = self.invoke()
+        self.assertIn('Omarchy plugin omarchy.workspaces disable failed', result.stdout)
+        self.assertNotIn('replaced', self.record()['plugins']['example.spaces'])
+
+    def test_retired_recorded_builtin_is_disabled(self):
+        self.write_record({'omarchy.agents': {'builtIn': True}})
+        self.set_control(listed={'omarchy.agents': [True, True]})
+        self.write_list([], retired=[{'id': 'omarchy.agents', 'reason': 'Fixture'}], version=2)
+        self.invoke()
+        self.assertEqual(self.omarchy_calls(), [['plugin', 'disable', 'omarchy.agents']])
+        self.assertNotIn('omarchy.agents', self.record()['plugins'])
+
+    def test_builtin_record_with_a_repo_is_invalid(self):
+        self.write_record({'omarchy.agents': {'builtIn': True, 'repo': 'https://github.com/example/agents.git'}})
+        self.write_list([self.builtin()], version=2)
+        result = self.invoke()
+        self.assertIn('install record is invalid', result.stdout)
+        self.assertFalse(self.omarchy_calls())
+
+    def test_exclusion_may_name_a_builtin(self):
+        exclusions = self.home / '.config/groundwork/omarchy-plugins.exclude.json'
+        exclusions.parent.mkdir(parents=True)
+        exclusions.write_text(json.dumps({'schemaVersion': 1, 'exclusions': [{'id': 'omarchy.agents', 'reason': 'Fixture'}]}))
+        self.write_list([self.builtin()], version=2)
+        result = self.invoke()
+        self.assertIn('Skipped Omarchy plugins: excluded omarchy.agents.', result.stdout)
+        self.assertFalse(self.omarchy_calls())
+
+    def test_shared_core_list_is_accepted(self):
+        core = REPO.parent / 'groundwork-core/omarchy/plugins.json'
+        if not core.is_file():
+            self.skipTest('groundwork-core is not checked out beside this repo')
+        document = plugins.parse_list(core.read_text())
+        self.assertIn(document['schemaVersion'], plugins.SCHEMA_VERSIONS)
 
     def test_fresh_install_is_idempotent(self):
         self.write_list([plugin(section='right', arch=['aarch64'])])
@@ -580,7 +778,7 @@ class PluginApplyTests(unittest.TestCase):
         self.assertIn('https', result.stdout)
         self.assertFalse(self.omarchy_calls())
 
-    def test_mac_sections_are_forwarded_and_other_sections_are_invalid(self):
+    def test_omarchy_sections_are_forwarded_and_other_sections_are_invalid(self):
         self.write_list([
             plugin('example.left', section='left'),
             plugin('example.center', section='center'),
@@ -588,6 +786,8 @@ class PluginApplyTests(unittest.TestCase):
             plugin('example.tray', section='tray'),
             plugin('example.begin', section='centerBegin'),
             plugin('example.end', section='centerEnd'),
+            plugin('example.top', section='top'),
+            plugin('example.lower', section='Left'),
             plugin('example.plain'),
         ])
         result = self.invoke()
@@ -596,15 +796,18 @@ class PluginApplyTests(unittest.TestCase):
         self.assertIn(['plugin', 'enable', 'example.left', '--section', 'left'], self.omarchy_calls())
         self.assertIn(['plugin', 'enable', 'example.center', '--section', 'center'], self.omarchy_calls())
         self.assertIn(['plugin', 'enable', 'example.right', '--section', 'right'], self.omarchy_calls())
+        self.assertIn(['plugin', 'enable', 'example.tray', '--section', 'tray'], self.omarchy_calls())
+        self.assertIn(['plugin', 'enable', 'example.begin', '--section', 'centerBegin'], self.omarchy_calls())
+        self.assertIn(['plugin', 'enable', 'example.end', '--section', 'centerEnd'], self.omarchy_calls())
         self.assertIn(['plugin', 'enable', 'example.plain'], self.omarchy_calls())
         cached = json.loads(self.cache_path().read_text())
         self.assertEqual(
             [item['id'] for item in cached['plugins']],
-            ['example.left', 'example.center', 'example.right', 'example.plain'],
+            ['example.left', 'example.center', 'example.right', 'example.tray', 'example.begin', 'example.end', 'example.plain'],
         )
         self.assertNotIn('skippedSections', cached)
-        for plugin_id in ('example.tray', 'example.begin', 'example.end'):
-            self.assertIn(f'Omarchy plugin {plugin_id} was skipped; section must be left, center, or right.', result.stdout)
+        for plugin_id in ('example.top', 'example.lower'):
+            self.assertIn(f'Omarchy plugin {plugin_id} was skipped; section must be left, centerBegin, center, centerEnd, tray, or right.', result.stdout)
             self.assertFalse(self.plugin_dir(plugin_id).exists())
             self.assertNotIn(plugin_id, [item['id'] for item in cached['plugins']])
 
