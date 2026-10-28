@@ -93,6 +93,11 @@ class FakeSyncthing:
         self.version = 'v2.1.7'
         self.listener_errors = {}
         self.status_override = None
+        self.start_time = 'boot-1'
+        self.reset_refused = False
+        self.on_reset = None
+        self.on_folder_post = None
+        self.redirect_to = None
         self.writes = []
         self.requests = []
         fake = self
@@ -104,6 +109,8 @@ class FakeSyncthing:
             def respond(self, status, body=None):
                 data = json.dumps(body).encode() if body is not None else b''
                 self.send_response(status)
+                if status == 302:
+                    self.send_header('Location', fake.redirect_to)
                 self.send_header('Content-Length', str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
@@ -154,7 +161,9 @@ class FakeSyncthing:
         if path == '/rest/system/status':
             listeners = self.status_override if self.status_override is not None else {
                 url: {'error': self.listener_errors.get(url)} for url in self.options['listenAddresses']}
-            return 200, {'myID': ME, 'connectionServiceStatus': listeners}
+            return 200, {'myID': ME, 'startTime': self.start_time, 'connectionServiceStatus': listeners}
+        if path == '/rest/redirect':
+            return 302, None
         if path == '/rest/config/defaults/folder':
             return 200, {'id': '', 'label': '', 'path': '~', 'type': 'sendreceive', 'paused': False, 'devices': [],
                          'versioning': {'type': '', 'params': {}, 'cleanupIntervalS': 3600, 'fsPath': '', 'fsType': 'basic'}}
@@ -172,13 +181,23 @@ class FakeSyncthing:
                 return 200, None
             return 200, self.gui
         if path.startswith('/rest/db/browse'):
-            return 200, self.browse
+            # Real Syncthing answers an error, not an empty list, for a folder it does not have.
+            if 'folder=groundwork-shared' not in path or 'groundwork-shared' not in self.folders:
+                return 500, None
+            return 200, self.browse if 'prefix=FreeTube' in path else []
         if path.startswith('/rest/system/reset'):
+            if self.reset_refused:
+                return 500, None
+            if self.on_reset:
+                self.on_reset()
             self.browse = []
+            self.start_time = 'boot-2'
             return 200, None
         for kind, store, key in (('folders', self.folders, 'id'), ('devices', self.devices, 'deviceID')):
             base = '/rest/config/' + kind
             if path == base and method == 'POST':
+                if kind == 'folders' and self.on_folder_post:
+                    self.on_folder_post(body)
                 store[body[key]] = body
                 return 200, None
             if path.startswith(base + '/'):
@@ -570,33 +589,85 @@ class ReviewRepairTests(SyncthingCase):
         self.assertFalse(self.real_listening())
 
     def test_the_api_key_never_follows_a_redirect(self):
-        api = gs.Api(API_KEY)
-        self.assertTrue(any(isinstance(handler, gs.NoRedirect) for handler in api.opener.handlers))
+        other = FakeSyncthing()
+        self.addCleanup(other.close)
+        self.server.redirect_to = f'http://{other.address}/rest/system/status'
+        with self.assertRaises(gs.ApiError) as caught:
+            gs.Api(API_KEY, 'http://' + self.server.address).get('/rest/redirect')
+        self.assertEqual(caught.exception.status, 302)
+        self.assertEqual(other.requests, [])
 
     def test_pair_add_writes_the_ignore_files_before_it_creates_missing_folders(self):
         self.seed_config()
         self.mark_active()
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
+        seen = []
+        self.server.on_folder_post = lambda body: seen.append(
+            ((self.home / 'Shared/.stignore').read_text(), (self.home / 'Shared/FreeTube/.stignore').read_text()))
+        with contextlib.redirect_stdout(io.StringIO()):
             gs.pair_add(PEER, 'macbook', 'macbook.tailnet.example')
-        self.assertTrue((self.home / 'Shared/.stignore').read_text().startswith('/FreeTube\n'))
-        self.assertEqual((self.home / 'Shared/FreeTube/.stignore').read_text(), '*~\n')
+        self.assertEqual(len(seen), 2)
+        self.assertTrue(all(first.startswith('/FreeTube\n') and second == '*~\n' for first, second in seen))
         self.assertEqual(sorted(self.server.folders), ['groundwork-freetube', 'groundwork-shared'])
 
-    def test_reset_waits_for_the_rescan_and_announces_the_removal_first(self):
+    def test_reset_waits_for_the_restart_and_announces_the_removal_first(self):
         self.seed_config()
         self.mark_active()
         self.run_apply()
         self.server.browse = [{'name': 'history.db'}]
         self.server.requests.clear()
         out = io.StringIO()
+        announced = []
+        self.server.on_reset = lambda: announced.append('Pair again' in out.getvalue())
         with contextlib.redirect_stdout(out):
             gs.apply()
+        self.assertEqual(announced, [True])
         paths = [path.split('?')[0] for _, path, _ in self.server.requests]
-        self.assertIn('/rest/db/status', paths)
-        self.assertLess(paths.index('/rest/system/reset'), len(paths) - paths[::-1].index('/rest/db/status') - 1)
-        self.assertIn('Pair again', out.getvalue())
-        self.assertLess(out.getvalue().index('Pair again'), len(out.getvalue()))
+        last_status = len(paths) - 1 - paths[::-1].index('/rest/db/status')
+        self.assertGreater(last_status, paths.index('/rest/system/reset'))
+        self.assertEqual(self.server.start_time, 'boot-2')
+
+    def test_a_refused_reset_names_the_manual_step_and_leaves_no_peers(self):
+        self.seed_config()
+        self.mark_active()
+        self.run_apply()
+        self.server.folders['groundwork-shared']['devices'].append({'deviceID': PEER})
+        self.server.browse = [{'name': 'history.db'}]
+        self.server.reset_refused = True
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(gs.SyncthingError) as caught:
+                gs.apply()
+        self.assertIn('Pause Shared in the GUI', str(caught.exception))
+        self.assertEqual([d['deviceID'] for d in self.server.folders['groundwork-shared']['devices']], [ME])
+
+    def test_a_missing_parent_folder_is_not_browsed(self):
+        self.seed_config()
+        self.mark_active()
+        gs.separate_freetube_from_parent(gs.Api(API_KEY))
+        self.assertEqual([path for _, path, _ in self.server.requests if 'browse' in path], [])
+
+    def test_the_key_is_not_sent_to_a_socket_another_user_owns(self):
+        self.seed_config()
+        patch.object(gs, 'listening_on_gui', lambda: False).start()
+        with self.assertRaises(gs.SyncthingError):
+            gs.wait_for_api(gs.Api(API_KEY))
+        self.assertEqual(self.server.requests, [])
+
+    def test_a_unit_that_pins_its_own_state_directory_is_refused_before_start(self):
+        (self.state / 'unit-show').write_text('Environment=STHOME=/somewhere/else\n')
+        with self.assertRaises(gs.SyncthingError) as caught:
+            gs.apply()
+        self.assertIn('own state directory', str(caught.exception))
+        self.assertEqual([line for line in self.systemctl_log() if 'enable' in line], [])
+
+    def test_a_commented_override_in_an_environment_file_is_not_an_override(self):
+        override = self.root / 'syncthing.env'
+        override.write_text('# STGUIADDRESS=0.0.0.0:8384\nOTHER=1\n')
+        (self.state / 'unit-show').write_text(f'EnvironmentFiles={override} (ignore_errors=no)\n')
+        self.assertIsNone(gs.gui_override())
+
+    def test_show_reads_the_id_from_the_services_state_directory(self):
+        (self.state / 'manager-env').write_text(f'XDG_STATE_HOME={self.root / "manager-state"}\n')
+        self.assertEqual(gs.device_id_from_binary(), ME)
 
 
 class PairTests(SyncthingCase):

@@ -208,11 +208,19 @@ local_inference_ready() {
   compgen -G "$vulkan_dir/*" >/dev/null
 }
 # Lingering lets the user service start at boot without a graphical login. Only
-# a machine with no battery (Mac mini, iMac, Studio) is the always-on peer; a
-# MacBook starts Syncthing at login like every other machine.
+# a machine with no system battery (Mac mini, iMac, Studio) is the always-on
+# peer; a MacBook (the Asahi SMC registers macsmc-battery) starts Syncthing at
+# login like every other machine.
 syncthing_user=$(id -un)
 syncthing_always_on() {
-  ! compgen -G "$test_root/sys/class/power_supply/BAT*" >/dev/null
+  local supply
+  for supply in "$test_root"/sys/class/power_supply/*; do
+    [[ -r $supply/type && $(<"$supply/type") == Battery ]] || continue
+    # A Bluetooth keyboard or mouse is a Battery with device scope, not this machine's.
+    [[ -r $supply/scope && $(<"$supply/scope") == Device ]] && continue
+    return 1
+  done
+  return 0
 }
 syncthing_linger_enabled() {
   [[ -e $test_root/var/lib/systemd/linger/$syncthing_user ]]
@@ -948,8 +956,10 @@ fi
 # folders, and groundwork syncthing-pair. It waits, rather than failing setup,
 # when Tailscale has no address yet.
 syncthing_problem=""
+syncthing_pending_note=""
 install_syncthing() {
   local bin status=0 apply_status=0 pending=""
+  syncthing_pending_note=""
   install_package syncthing
   bin=$(command -v syncthing)
   # Apple Silicon kernels use 16 KiB pages. A non-ELF wrapper is skipped here;
@@ -979,6 +989,7 @@ install_syncthing() {
       pending="${pending:+$pending }$syncthing_problem"
       ;;
   esac
+  syncthing_pending_note=$pending
   # An update reads this to report a warning instead of a clean success.
   if [[ -n $pending ]]; then
     python3 "$root/scripts/groundwork-update.py" marker write syncthing-pending "$pending"
@@ -993,6 +1004,9 @@ python3 "$root/scripts/groundwork-update.py" register "$root" "$with_keyd" "$wit
 if [[ -n $syncthing_problem ]]; then
   echo "$syncthing_problem" >&2
   exit 1
+fi
+if [[ $updating -eq 0 && -n $syncthing_pending_note ]]; then
+  echo "Not finished: $syncthing_pending_note" >&2
 fi
 if [[ $updating -eq 1 ]]; then
   echo "Groundwork settings applied. Saved keyd, screen-sharing, Blip, local inference, and vault choices were preserved."

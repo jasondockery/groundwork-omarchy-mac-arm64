@@ -967,7 +967,7 @@ def syncthing_pending():
         check_path(path)
         return path.read_text().strip() or None if path.is_file() else None
     except (UpdateError, OSError):
-        return None
+        return f'Syncthing may be unfinished: {path} cannot be read. Inspect it, then rerun.'
 
 
 def update(scope, check=False):

@@ -1432,18 +1432,37 @@ raise SystemExit(os.WEXITSTATUS(status))
         marker = self.root / 'home/.local/state/groundwork/syncthing-pending'
         self.assertIn('waiting for Tailscale', marker.read_text())
 
-    def test_a_machine_with_a_battery_does_not_linger(self):
-        battery = self.root / 'sys/class/power_supply/BAT0'
-        battery.mkdir(parents=True)
+    def power_supply(self, name, kind, scope=None):
+        supply = self.root / 'sys/class/power_supply' / name
+        supply.mkdir(parents=True)
+        (supply / 'type').write_text(kind + '\n')
+        if scope:
+            (supply / 'scope').write_text(scope + '\n')
+
+    def test_a_machine_with_a_system_battery_does_not_linger(self):
+        # The Asahi SMC registers macsmc-battery, not BAT0.
+        for name in ('macsmc-battery', 'BAT0'):
+            self.power_supply(name, 'Battery', 'System')
+            self.power_supply('ac', 'Mains')
+            self.run_install()
+            self.assertFalse(any(call[1:3] == ['loginctl', 'enable-linger'] for call in self.calls()), name)
+            self.assertFalse((self.root / 'var/lib/systemd/linger').exists())
+            # And a routine update does not need sudo for lingering.
+            (self.root / 'calls.jsonl').unlink()
+            self.env['FIXTURE_SUDO_CACHED'] = '0'
+            result = self.run_update()
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(self.privileged_calls(), [])
+            shutil.rmtree(self.root / 'sys')
+            (self.root / 'calls.jsonl').unlink(missing_ok=True)
+            self.env['FIXTURE_SUDO_CACHED'] = '1'
+
+    def test_a_peripheral_battery_does_not_stop_a_desktop_from_lingering(self):
+        # A Bluetooth keyboard registers a Battery with device scope.
+        self.power_supply('hid-keyboard', 'Battery', 'Device')
+        self.power_supply('ac', 'Mains')
         self.run_install()
-        self.assertFalse(any(call[1:3] == ['loginctl', 'enable-linger'] for call in self.calls()))
-        self.assertFalse((self.root / 'var/lib/systemd/linger').exists())
-        # And a routine update does not need sudo for lingering.
-        (self.root / 'calls.jsonl').unlink()
-        self.env['FIXTURE_SUDO_CACHED'] = '0'
-        result = self.run_update()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.privileged_calls(), [])
+        self.assertTrue(any(call[1:3] == ['loginctl', 'enable-linger'] for call in self.privileged_calls()))
 
     def test_misaligned_syncthing_is_not_enabled(self):
         binary = self.bin / 'syncthing'

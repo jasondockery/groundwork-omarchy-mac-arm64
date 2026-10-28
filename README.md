@@ -278,14 +278,14 @@ Omarchy keeps its own desktop, tmux file, shell, and Super keybindings. Practice
 
 ## Syncthing shared folders
 
-Setup installs pacman `syncthing`, enables lingering so this always-on Mac starts it at boot, and runs `systemctl --user enable --now syncthing.service` once Tailscale has an address. Syncthing listens only on localhost and the tailnet, with relays, discovery and NAT mapping off, and its GUI stays on `127.0.0.1:8384`. The shared folder is `~/Shared`; pairing is one command on each machine:
+Setup installs pacman `syncthing`, enables lingering on a machine with no system battery (a Mac mini, iMac or Studio, the always-on peer; a MacBook starts it at login), and runs `systemctl --user enable --now syncthing.service` once Tailscale has an address. Syncthing listens only on localhost and the tailnet, with relays, discovery and NAT mapping off, and its GUI stays on `127.0.0.1:8384`. The shared folder is `~/Shared`; pairing is one command on each machine:
 
 ```bash
 groundwork syncthing-pair show
 groundwork syncthing-pair add --device-id DEVICE_ID --name NAME --magicdns MAGICDNS
 ```
 
-If Tailscale is not signed in yet, setup says Syncthing is waiting; rerun `groundwork-update` after `sudo tailscale up`. The contract is in [groundwork-core](https://github.com/jasondockery/groundwork-core/blob/main/docs/syncthing.md); the choices here and what is not done yet are in `docs/decisions/0013-syncthing-shared-folders.md`.
+If Tailscale is not signed in yet, setup says Syncthing is waiting; rerun `groundwork-update` after `sudo tailscale up`. Until then `groundwork-update` and `update-all` finish with a warning and exit 1. The contract is in [groundwork-core](https://github.com/jasondockery/groundwork-core/blob/main/docs/syncthing.md); the choices here and what is not done yet are in `docs/decisions/0013-syncthing-shared-folders.md`.
 
 ## Learn Omarchy's defaults
 

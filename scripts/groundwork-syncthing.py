@@ -155,11 +155,20 @@ def gui_override():
         if line.startswith('EnvironmentFiles='):
             path = line.split('=', 1)[1].split()[0] if line.split('=', 1)[1].split() else ''
             try:
-                if path and 'STGUIADDRESS' in Path(path.lstrip('-')).read_text(errors='replace'):
+                text = Path(path.lstrip('-')).read_text(errors='replace') if path else ''
+                if any(line.lstrip().startswith('STGUIADDRESS') for line in text.splitlines()
+                       if not line.lstrip().startswith(('#', ';'))):
                     return path
             except OSError:
                 pass
     return None
+
+
+def state_pinned():
+    """Where the unit itself chooses the state directory, or None. Groundwork follows the user manager's."""
+    unit = systemctl('show', SERVICE, '-p', 'Environment', '-p', 'ExecStart', check=False, capture=True)
+    found = re.search(r'XDG_STATE_HOME=|STHOME=|STCONFDIR=|--home\b|--config\b|-home\b', unit.stdout or '')
+    return found.group(0) if found else None
 
 
 def dropin_path():
@@ -400,6 +409,9 @@ def wait_for(check, seconds, pause=0.5):
 
 def wait_for_api(api, seconds=60):
     def ready():
+        # Only send the key to a socket this user owns.
+        if not listening_on_gui():
+            return None
         try:
             return api.get('/rest/system/status')
         except SyncthingError:
@@ -488,20 +500,31 @@ def ensure_folders(api, device_id):
 
 def separate_freetube_from_parent(api):
     """groundwork-shared must not have indexed FreeTube's databases."""
+    current = api.get('/rest/config/folders/' + SHARED['id'], allow_missing=True)
+    if current is None:
+        return
     listing = api.get('/rest/db/browse?folder=%s&prefix=FreeTube' % SHARED['id'], allow_missing=True)
     if not listing:
         return
-    current = api.get('/rest/config/folders/' + SHARED['id'])
     me = api.get('/rest/system/status')['myID']
     # Un-share first so the rebuilt index is never announced as deletions.
-    # Say so before the reset: a rerun after an interruption finds nothing to rebuild.
+    # Say so before the reset: a rerun after an interruption finds the devices already gone.
     print('Removing other devices from the Shared folder and rebuilding its index without FreeTube. '
           'Pair again with groundwork syncthing-pair add.')
     current['devices'] = [entry for entry in current.get('devices', []) if entry.get('deviceID') == me]
     api.put('/rest/config/folders/' + SHARED['id'], current)
     ensure_stignore(Path(shared_path()) / '.stignore', '/FreeTube', first=True)
-    api.post('/rest/system/reset?folder=' + SHARED['id'])
+    started = (api.get('/rest/system/status') or {}).get('startTime')
+    try:
+        api.post('/rest/system/reset?folder=' + SHARED['id'])
+    except ApiError as error:
+        # Syncthing may refuse to reset a folder that is not paused. The contract has
+        # the apply never pause groundwork-shared, so a person does it once.
+        raise SyncthingError(f'Syncthing refused to reset groundwork-shared ({error.status}). Other devices are already removed '
+                             'from it, so nothing leaks. Pause Shared in the GUI (127.0.0.1:8384), rerun groundwork-update, '
+                             'then resume it.') from None
     # The reset restarts Syncthing and rescans. An empty browse before then proves nothing.
+    wait_for(lambda: restarted_since(api, started), 30, pause=1)
     wait_for_api(api)
     if not wait_for(lambda: folder_idle(api), 180, pause=1):
         raise SyncthingError('groundwork-shared did not finish rescanning after the reset. Rerun apply to check it again.')
@@ -509,6 +532,14 @@ def separate_freetube_from_parent(api):
         raise SyncthingError('groundwork-shared still lists FreeTube files after the reset. Other devices were removed from '
                              'that folder; fix the ignore file at ' + str(Path(shared_path()) / '.stignore') + ' and rerun.')
     print('Rebuilt the Shared index without FreeTube.')
+
+
+def restarted_since(api, started):
+    try:
+        return (api.get('/rest/system/status') or {}).get('startTime') != started
+    except SyncthingError:
+        # Down mid-restart counts: it is not the old process.
+        return True
 
 
 def folder_idle(api):
@@ -568,6 +599,10 @@ def apply():
     where = gui_override()
     if where:
         raise SyncthingError(f'STGUIADDRESS or --gui-address is set in {where}. Remove it; Syncthing was not started.')
+    pinned = state_pinned()
+    if pinned:
+        raise SyncthingError(f'{SERVICE} sets its own state directory ({pinned}). Groundwork edits the user manager\'s; '
+                             'remove the setting or adopt it here first. Syncthing was not started.')
     if ensure_dropin():
         systemctl('daemon-reload')
     config_path = config_dir() / 'config.xml'
@@ -672,9 +707,10 @@ def confirm(api, addresses):
 
 def device_id_from_binary():
     binary = syncthing_command()
+    env = dict(os.environ, XDG_STATE_HOME=str(state_home()))
     for command in ([binary, 'device-id'], [binary, '--device-id']):
         try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=20)
+            result = subprocess.run(command, capture_output=True, text=True, timeout=20, env=env)
         except (OSError, subprocess.SubprocessError):
             continue
         found = result.stdout.strip()
@@ -793,6 +829,9 @@ if __name__ == '__main__':
         sys.exit(main(sys.argv[1:]))
     except Waiting:
         sys.exit(EXIT_WAITING)
-    except (SyncthingError, OSError, subprocess.SubprocessError, ValueError, KeyError, AttributeError, TypeError) as error:
+    except (KeyError, AttributeError, TypeError) as error:
+        print(f'Groundwork Syncthing: Syncthing returned a response this helper did not expect ({error!r}).', file=sys.stderr)
+        sys.exit(1)
+    except (SyncthingError, OSError, subprocess.SubprocessError, ValueError) as error:
         print(f'Groundwork Syncthing: {error}', file=sys.stderr)
         sys.exit(1)

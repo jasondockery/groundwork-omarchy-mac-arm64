@@ -361,6 +361,13 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
         target = self.state / 'elsewhere'
         target.write_text('not a marker')
         (self.state / 'syncthing-pending').symlink_to(target)
+        # An unreadable marker is reported, not treated as absent.
+        self.assertIn('cannot be read', updater.syncthing_pending())
+
+    def test_the_syncthing_marker_is_written_and_removed_by_the_setup_adapter(self):
+        self.assertEqual(updater.main(['marker', 'write', 'syncthing-pending', 'waiting']), 0)
+        self.assertEqual(updater.syncthing_pending(), 'waiting')
+        self.assertEqual(updater.main(['marker', 'remove', 'syncthing-pending']), 0)
         self.assertIsNone(updater.syncthing_pending())
 
     def test_t3_or_flatpak_failure_cannot_mark_full_success(self):
