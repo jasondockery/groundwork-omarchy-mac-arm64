@@ -20,7 +20,9 @@ LIST_DEADLINE_SECONDS = 20
 MAX_BYTES = 1_048_576
 MAX_REDIRECTS = 5
 SCHEMA_VERSIONS = {1, 2}
-SECTIONS = {'left', 'centerBegin', 'center', 'centerEnd', 'tray', 'right'}
+# Omarchy's Util.barSections order, which decides what a scan finds first.
+BAR_SECTIONS = ('left', 'centerBegin', 'center', 'centerEnd', 'right', 'tray')
+SECTIONS = set(BAR_SECTIONS)
 ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]*$')
 ARCH_RE = re.compile(r'^[A-Za-z0-9_]+$')
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -508,6 +510,61 @@ def load_exclusions():
     return found
 
 
+def clean_placements(value, replaced):
+    """Validate the bar slots stored for replaced ids, in capture order.
+
+    Raises ListError when malformed, or when a slot names an id that is not in
+    `replaced`.
+    """
+    if value is None:
+        return []
+    if type(value) is not list:
+        raise ListError('Omarchy plugin install record is invalid; plugin changes were skipped.')
+    clean = []
+    seen = set()
+    for slot in value:
+        if (type(slot) is not dict or set(slot) != {'id', 'section', 'index'} or not valid_plugin_id(slot['id'])
+                or slot['id'] in seen or slot['id'] not in (replaced or [])
+                or slot['section'] not in SECTIONS or type(slot['index']) is not int or slot['index'] < 0):
+            raise ListError('Omarchy plugin install record is invalid; plugin changes were skipped.')
+        seen.add(slot['id'])
+        clean.append({'id': slot['id'], 'section': slot['section'], 'index': slot['index']})
+    return clean
+
+
+def bar_slot(plugin_id):
+    """The {section, index} a widget holds in the user's bar layout, or None.
+
+    The shell only uses shell.json when it parses to an object with
+    `version: 1`; otherwise it runs on defaults and the file says nothing about
+    where the widget sits.
+    """
+    try:
+        data = json.loads((Path.home() / '.config/omarchy/shell.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+    if type(data) is not dict or data.get('version') != 1 or type(data.get('bar')) is not dict:
+        return None
+    layout = data['bar'].get('layout')
+    if type(layout) is not dict:
+        return None
+    for section in BAR_SECTIONS:
+        entries = layout.get(section)
+        if type(entries) is not list:
+            continue
+        for index, entry in enumerate(entries):
+            if entry == plugin_id or (type(entry) is dict and entry.get('id') == plugin_id):
+                return {'section': section, 'index': index}
+    return None
+
+
+def wait_until_off_the_bar(plugin_id):
+    """Give the shell a moment to write the layout that no longer holds the widget."""
+    deadline = time.monotonic() + 2
+    while bar_slot(plugin_id) is not None and time.monotonic() < deadline:
+        time.sleep(0.1)
+
+
 def load_record():
     path = record_path()
     try:
@@ -529,21 +586,26 @@ def load_record():
         replaced = entry.get('replaced')
         if replaced is not None and (type(replaced) is not list or any(not valid_plugin_id(other) for other in replaced)):
             raise ListError('Omarchy plugin install record is invalid; plugin changes were skipped.')
+        placed = clean_placements(entry.get('replacedAt'), replaced)
         if entry.get('builtIn'):
             here = entry.get('enabledHere', False)
-            if not valid_plugin_id(plugin_id) or set(entry) - {'builtIn', 'replaced', 'enabledHere'} or type(here) is not bool:
+            if not valid_plugin_id(plugin_id) or set(entry) - {'builtIn', 'replaced', 'replacedAt', 'enabledHere'} or type(here) is not bool:
                 raise ListError('Omarchy plugin install record is invalid; plugin changes were skipped.')
             clean[plugin_id] = {'builtIn': True}
             if here:
                 clean[plugin_id]['enabledHere'] = True
             if replaced:
                 clean[plugin_id]['replaced'] = sorted(set(replaced))
+            if placed:
+                clean[plugin_id]['replacedAt'] = placed
             continue
         if not valid_id(plugin_id) or not valid_repo(entry.get('repo')):
             raise ListError('Omarchy plugin install record is invalid; plugin changes were skipped.')
         item = {'repo': entry['repo']}
         if replaced:
             item['replaced'] = sorted(set(replaced))
+        if placed:
+            item['replacedAt'] = placed
         pending = entry.get('enablePending', False)
         if type(pending) is not bool:
             raise ListError('Omarchy plugin install record is invalid; plugin changes were skipped.')
@@ -800,7 +862,14 @@ def enable_command(item):
 
 
 def drop_record(record, plugin_id):
-    if plugin_id not in record['plugins']:
+    """Forget a checkout this layer added, unless its record holds replaced ids.
+
+    This layer never gives replaced ids to a record that still waits for
+    enable, but an earlier applier could. Such a record stays until
+    restore_dropped restores or hands over its ids, so no widget loses its owner.
+    """
+    current = record['plugins'].get(plugin_id)
+    if current is None or current.get('replaced'):
         return
     record['plugins'].pop(plugin_id, None)
     save_record(record)
@@ -923,6 +992,7 @@ def apply_plugins(updating):
         except OSError as error:
             say(f'Omarchy plugin list cache was not written: {flat(error)}.')
     arch_skipped = []
+    unknown_arch = []
     excluded = []
     selected = []
     needs_machine = any('arch' in item for item in document['plugins'])
@@ -936,6 +1006,8 @@ def apply_plugins(updating):
         allowed = item.get('arch')
         if allowed is not None and machine not in allowed:
             arch_skipped.append(item['id'])
+            if machine is None:
+                unknown_arch.append(item)
             continue
         selected.append(item)
     parts = []
@@ -962,6 +1034,13 @@ def apply_plugins(updating):
             listing['value'] = plugin_states()
         return listing['value']
 
+    # Which listed entries still replace each id. An arch-limited entry counts
+    # when this machine's architecture could not be read, so that gap never undoes a swap.
+    claims = {}
+    for item in [*selected, *unknown_arch]:
+        if item['id'] not in retired_ids:
+            for other in item.get('replaces', []):
+                claims.setdefault(other, []).append(item['id'])
     installed_by_groundwork = set(record['plugins'])
     for item in document['retired']:
         plugin_id = item['id']
@@ -994,10 +1073,14 @@ def apply_plugins(updating):
             if command_failed(outcome):
                 say(f'Omarchy plugin {plugin_id} remove failed: {failure_text(outcome)}.')
                 continue
-        if not restore_replaced(recorded, states, listing):
+        outcome = restore_replaced(record, plugin_id, states, listing, claims, exclusions) if recorded.get('replaced') else DONE
+        if outcome != DONE:
+            if outcome == DEFERRED:
+                deferred.append(plugin_id)
             continue
         record['plugins'].pop(plugin_id, None)
         save_record(record)
+    restore_dropped(record, claims, retired_ids, exclusions, states, listing, deferred, shell_up)
     already_noticed = set(record.get('noticedRetired', []))
     pending_notice = []
     for item in document['retired']:
@@ -1062,36 +1145,148 @@ def apply_builtin(record, item, states):
     return enabled
 
 
-def restore_replaced(recorded, states, listing):
-    """Turn a retired plugin's replaced ids back on when the shell lists them off.
+DONE, FAILED, DEFERRED = 'done', 'failed', 'deferred'
 
-    True when nothing is left to restore. Needs a listing; the caller defers
-    when there is none.
+
+def listing_ready(known):
+    """True when the shell's plugin listing looks complete enough to prune against.
+
+    While the shell starts, its listing can be empty or partial. Omarchy always
+    ships first-party plugins, so a listing without any is not trusted.
     """
-    replaced = recorded.get('replaced')
+    return known is not None and any(first_party for _enabled, first_party in known.values())
+
+
+def applied(record, plugin_id):
+    """True when this layer recorded plugin_id and its enable finished."""
+    held = record['plugins'].get(plugin_id)
+    return held is not None and not held.get('enablePending')
+
+
+def takes_over(record, plugin_id, other, known, exclusions):
+    """True when plugin_id would disable `other` itself now, so it may hold that swap.
+
+    The same test apply_replacements makes: an applied record, listed on by the
+    shell, for an id the user has not excluded.
+    """
+    return applied(record, plugin_id) and other not in exclusions and known.get(plugin_id, (False, False))[0]
+
+
+def restore_order(record, owner_id, ids):
+    """(id, slot) pairs to undo, slotted ids first and then the rest.
+
+    A slot comes from the owner's record, else from another record that keeps
+    one (only a record an earlier applier wrote holds an id twice). Each
+    record's slots go in reverse capture order, so every index meets the layout
+    it was measured against, and default placements come last so they cannot
+    shift an exact slot.
+    """
+    order = []
+    seen = set()
+    for holder in [owner_id, *sorted(holder for holder in record['plugins'] if holder != owner_id)]:
+        for slot in reversed(record['plugins'][holder].get('replacedAt', [])):
+            if slot['id'] in ids and slot['id'] not in seen:
+                seen.add(slot['id'])
+                order.append((slot['id'], slot))
+    order += [(other, None) for other in ids if other not in seen]
+    return order
+
+
+def prune_replaced(record, plugin_id, keep=None):
+    """Drop an id and its slot from every record except `keep`."""
+    for holder_id, holder in record['plugins'].items():
+        if holder_id == keep:
+            continue
+        remaining = [other for other in holder.get('replaced', []) if other != plugin_id]
+        slots = [slot for slot in holder.get('replacedAt', []) if slot['id'] != plugin_id]
+        for key, value in (('replaced', remaining), ('replacedAt', slots)):
+            if value:
+                holder[key] = value
+            else:
+                holder.pop(key, None)
+    save_record(record)
+
+
+def hand_over(record, plugin_id, slot, target_id):
+    """Move an id, with its slot, to the record of an entry that still replaces it."""
+    target = record['plugins'][target_id]
+    target['replaced'] = sorted({*target.get('replaced', []), plugin_id})
+    if slot and not any(entry['id'] == plugin_id for entry in target.get('replacedAt', [])):
+        target['replacedAt'] = [*target.get('replacedAt', []), dict(slot)]
+    prune_replaced(record, plugin_id, keep=target_id)
+
+
+def restore_replaced(record, owner_id, states, listing, claims, exclusions, ids=None,
+                     reason='its replacement was retired'):
+    """Undo the swaps one record lets go of: DONE, FAILED (an enable failed) or DEFERRED.
+
+    An id moves, with its slot, to another listed entry that takes it over (see
+    takes_over). Every other id is turned on again in its stored slot when the
+    shell lists it off, then pruned from every record, even when a listed entry
+    that has not applied yet replaces it: that entry has done nothing, and when
+    it applies it disables the widget once and measures the slot again. So no
+    widget this layer turned off is left without a record that holds it. The
+    record is saved after each id, so an interruption keeps only what is left.
+    """
+    owner = record['plugins'][owner_id]
+    replaced = [other for other in owner.get('replaced', []) if ids is None or other in ids]
     if not replaced:
-        return True
+        return DONE
     known = states()
-    if known is None:
-        return False
-    ok = True
-    for other in replaced:
+    if not listing_ready(known):
+        return DEFERRED
+    status = DONE
+    for other, slot in restore_order(record, owner_id, replaced):
+        heirs = [claimant for claimant in claims.get(other, [])
+                 if claimant != owner_id and takes_over(record, claimant, other, known, exclusions)]
+        if heirs:
+            hand_over(record, other, slot, heirs[0])
+            continue
+        # A widget the user turned back on, or one the shell no longer lists, is only pruned.
         if other in known and not known[other][0]:
-            outcome = run_omarchy(['plugin', 'enable', other], 60)
+            command = ['plugin', 'enable', other]
+            if slot:
+                command.extend(['--section', slot['section'], '--index', str(slot['index'])])
+            outcome = run_omarchy(command, 60)
             listing['value'] = None
             if command_failed(outcome):
                 say(f'Omarchy plugin {other} enable failed: {failure_text(outcome)}.')
-                ok = False
+                status = FAILED
                 continue
-            say(f'Omarchy plugin {other} was enabled again; its replacement was retired.')
-    return ok
+            say(f'Omarchy plugin {other} was enabled again; {reason}.')
+        prune_replaced(record, other)
+    return status
+
+
+def restore_dropped(record, claims, retired_ids, exclusions, states, listing, deferred, shell_up):
+    """Undo swaps the current list no longer asks of the record that holds them.
+
+    Covers an entry that drops a replaced id, an entry that left the list
+    without being retired, a replacing plugin the user excluded, and one that
+    does not apply on this machine's architecture. A record still waiting for
+    enable never made a swap, so any id it holds (from an earlier applier) is
+    let go of too.
+    """
+    for plugin_id, recorded in list(record['plugins'].items()):
+        if plugin_id in retired_ids or not recorded.get('replaced'):
+            continue
+        stale = {other for other in recorded['replaced']
+                 if not applied(record, plugin_id) or plugin_id not in claims.get(other, [])}
+        if not stale:
+            continue
+        if not shell_up():
+            deferred.append(plugin_id)
+            continue
+        if restore_replaced(record, plugin_id, states, listing, claims, exclusions, stale,
+                            'the list no longer replaces it') == DEFERRED:
+            deferred.append(plugin_id)
 
 
 def apply_replacements(record, item, states, exclusions):
     """Disable each plugin this entry replaces, once, after this layer enabled it."""
-    recorded = record['plugins'].get(item['id'])
-    if recorded is None or recorded.get('enablePending'):
+    if not applied(record, item['id']):
         return
+    recorded = record['plugins'][item['id']]
     done = set(recorded.get('replaced', []))
     due = [other for other in item['replaces'] if other not in done]
     if not due:
@@ -1100,18 +1295,39 @@ def apply_replacements(record, item, states, exclusions):
     # A replacement the user turned off leaves the original in place.
     if known is None or not known.get(item['id'], (False, False))[0]:
         return
+    placed = list(recorded.get('replacedAt', []))
     for other in due:
         if other in exclusions:
             continue
+        # An id another record holds stays there, even after the user turned it
+        # back on, so each swap has one owner; it moves here only if that record lets go.
+        if any(other in holder.get('replaced', []) for holder_id, holder in record['plugins'].items()
+               if holder_id != item['id']):
+            continue
         if known.get(other, (False, False))[0]:
+            slot = bar_slot(other)
             outcome = run_omarchy(['plugin', 'disable', other], 60)
             if command_failed(outcome):
                 say(f'Omarchy plugin {other} disable failed: {failure_text(outcome)}.')
                 continue
             say(f"Omarchy plugin {other} was disabled; {item['id']} replaces it.")
+            if slot:
+                wait_until_off_the_bar(other)
+                placed = [entry for entry in placed if entry['id'] != other] + [dict(slot, id=other)]
+            # Save per widget so an interruption keeps the slot just measured.
+            done.add(other)
+            recorded['replaced'] = sorted(done)
+            if placed:
+                recorded['replacedAt'] = placed
+            save_record(record)
+            continue
+        # Off or unlisted, and held by no record: hold it, so the swap is not
+        # repeated and a widget disabled just before an interruption still has a holder.
         done.add(other)
     if done:
         recorded['replaced'] = sorted(done)
+        if placed:
+            recorded['replacedAt'] = placed
         save_record(record)
 
 
