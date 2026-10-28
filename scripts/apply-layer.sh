@@ -551,17 +551,50 @@ ensure_user_flatpak() {
   fi
   flatpak --user info "$app" >/dev/null
 }
+# The bitwarden on PATH must be the package's own file. A user wrapper, for
+# example one that runs the Flatpak, does not count as the native app.
+bitwarden_package_command() {
+  local executable
+  executable=$(command -v bitwarden) || return 1
+  pacman -Q bitwarden >/dev/null 2>&1 && pacman -Qo "$executable" >/dev/null 2>&1
+}
+# Keep Omarchy's bitwarden package only when it provides that command and every
+# ELF file it installed loads on this kernel's pages (the local-inference check).
+# A package this call added is dropped again when either check fails.
 install_native_bitwarden() {
-  omarchy pkg add bitwarden || return 1
+  local added=0
+  if ! pacman -Q bitwarden >/dev/null 2>&1; then
+    if ! omarchy pkg add bitwarden; then
+      echo "omarchy pkg add bitwarden failed." >&2
+      return 1
+    fi
+    added=1
+  fi
   hash -r
-  command -v bitwarden >/dev/null
+  if ! bitwarden_package_command; then
+    echo "Omarchy's bitwarden package did not put its bitwarden command first on PATH." >&2
+  elif python3 "$root/scripts/groundwork-update.py" check-package-alignment bitwarden; then
+    return 0
+  fi
+  if [[ $added -eq 1 ]]; then
+    if omarchy pkg drop bitwarden; then
+      echo "Removed the bitwarden package this run had added." >&2
+    else
+      echo "Could not remove the bitwarden package this run added. Remove it with: omarchy pkg drop bitwarden" >&2
+    fi
+    hash -r
+  fi
+  return 1
 }
 install_package obsidian
 install_package bitwarden-cli bw
+# Set when the package was tried and refused here, so this run does not offer it.
+bitwarden_native_failed=0
 if ! command -v bitwarden >/dev/null && ! bitwarden_flatpak_installed; then
   if bitwarden_native_available; then
     if ! install_native_bitwarden; then
-      echo "Omarchy's bitwarden package did not install; using the Bitwarden Flatpak instead." >&2
+      bitwarden_native_failed=1
+      echo "Omarchy's bitwarden package is not usable here; installing the Bitwarden Flatpak instead." >&2
       ensure_user_flatpak "$bitwarden_flatpak"
     fi
   else
@@ -1044,14 +1077,24 @@ install_syncthing() {
 }
 install_syncthing
 
+# Save this run's choices before any offer, so an unanswered or interrupted
+# prompt cannot lose them. Offers below save again only when a decline changed.
+register_choices() {
+  python3 "$root/scripts/groundwork-update.py" register "$root" "$with_keyd" "$with_screen_sharing" \
+    "${GROUNDWORK_OBSIDIAN_VAULT:-$HOME/Documents/Obsidian/my_obsidian_vault}" "$with_blip" "$with_local_inference" \
+    "$declined_migrations"
+}
+register_choices
+saved_declines=$declined_migrations
+
 # Detect and offer, never force (decision 0014). An app installed another way
 # than Omarchy's own installer is reported. It moves only after consent: a yes
 # at the setup prompt, or --migrate-to-omarchy-installers. Updates and runs
 # without a terminal only print one line. A no is saved with the setup choices.
-# Offers run last so a failed migration never skips the rest of setup, and the
-# choices below are still saved. To add an app, detect it and call
-# offer_omarchy_migration with an id, the current and preferred methods, the
-# plan, and a function that returns nonzero, after printing why, on failure.
+# Offers run last so a failed migration never skips the rest of setup. To add
+# an app, detect it and call offer_omarchy_migration with an id, the current
+# and preferred methods, the plan, and a function that returns nonzero, after
+# printing why, on failure.
 migration_offered=0
 migration_failed=0
 migration_declined() {
@@ -1068,8 +1111,27 @@ forget_migration_decline() {
   done
   declined_migrations=$kept
 }
+print_migration_notice() {
+  local id=$1 app=$2 current=$3 preferred=$4 command
+  printf -v command 'cd %q && ./install.sh --migrate-to-omarchy-installers' "$root"
+  echo "$app is installed as $current; Omarchy's preferred method is $preferred (migration $id). To migrate, run: $command"
+}
+# Seconds the prompt may wait: at most 300, and two minutes inside the apply
+# deadline that setup passes in. Tests may shorten it.
+migration_prompt_seconds() {
+  local deadline=${GROUNDWORK_APPLY_DEADLINE_SECONDS:-900} budget
+  [[ $deadline =~ ^[0-9]+$ ]] || deadline=900
+  budget=$((deadline - SECONDS - 120))
+  if ((budget > 300)); then
+    budget=300
+  fi
+  if [[ ${GROUNDWORK_TESTING:-} == 1 && ${GROUNDWORK_MIGRATION_PROMPT_SECONDS:-} =~ ^[0-9]+$ ]]; then
+    budget=$GROUNDWORK_MIGRATION_PROMPT_SECONDS
+  fi
+  echo "$budget"
+}
 offer_omarchy_migration() {
-  local id=$1 app=$2 current=$3 preferred=$4 plan=$5 migrate=$6 answer command
+  local id=$1 app=$2 current=$3 preferred=$4 plan=$5 migrate=$6 answer command seconds status
   migration_offered=1
   printf -v command 'cd %q && ./install.sh --migrate-to-omarchy-installers' "$root"
   if [[ $migrate_requested -eq 0 ]]; then
@@ -1077,16 +1139,28 @@ offer_omarchy_migration() {
       [[ $updating -eq 1 ]] || echo "$app stays on $current, as you chose. To move it to $preferred, run: $command"
       return 0
     fi
-    # Same terminal test as the Blip update: stdin and stdout.
-    if [[ $updating -eq 1 || ! -t 0 || ! -t 1 ]]; then
-      echo "$app is installed as $current; Omarchy's preferred method is $preferred. To migrate, run: $command"
+    # read -p prompts on stderr, so all three must be the terminal.
+    if [[ $updating -eq 1 || ! -t 0 || ! -t 1 || ! -t 2 ]]; then
+      print_migration_notice "$id" "$app" "$current" "$preferred"
       return 0
     fi
     printf '%s\n' "$app is installed as $current. Omarchy's preferred method is $preferred." "$plan"
     while true; do
-      if ! read -r -p "Migrate $app now? [y/N] " answer; then
+      seconds=$(migration_prompt_seconds)
+      if ((seconds < 1)); then
+        print_migration_notice "$id" "$app" "$current" "$preferred"
+        return 0
+      fi
+      status=0
+      read -r -t "$seconds" -p "Migrate $app now? [y/N] " answer || status=$?
+      if [[ $status -ne 0 ]]; then
         echo
-        echo "No answer, so $app was left as it is. Setup asks again next time."
+        if ((status > 128)); then
+          echo "No answer within $seconds seconds, so $app was left as it is. Setup asks again next time."
+        else
+          echo "No answer, so $app was left as it is. Setup asks again next time."
+        fi
+        print_migration_notice "$id" "$app" "$current" "$preferred"
         return 0
       fi
       case ${answer,,} in
@@ -1109,14 +1183,21 @@ offer_omarchy_migration() {
 }
 
 migrate_bitwarden_to_native() {
-  local running
-  running=$(flatpak ps --columns=application 2>/dev/null) || running=""
+  local running executable
+  if ! running=$(flatpak ps --columns=application 2>/dev/null); then
+    echo "flatpak ps failed, so this run cannot tell whether Bitwarden is running. Nothing was changed." >&2
+    return 1
+  fi
   if [[ $'\n'$running$'\n' == *$'\n'"$bitwarden_flatpak"$'\n'* ]]; then
     echo "The Bitwarden Flatpak is running. Quit Bitwarden, then rerun ./install.sh --migrate-to-omarchy-installers. Nothing was changed." >&2
     return 1
   fi
-  if ! command -v bitwarden >/dev/null && ! install_native_bitwarden; then
-    echo "Omarchy's bitwarden package did not install, so the Bitwarden Flatpak was kept unchanged." >&2
+  if executable=$(command -v bitwarden) && ! bitwarden_package_command; then
+    echo "$executable is not from Omarchy's bitwarden package, so the Bitwarden Flatpak was kept. Move that command aside, then rerun ./install.sh --migrate-to-omarchy-installers. Nothing was changed." >&2
+    return 1
+  fi
+  if ! install_native_bitwarden; then
+    echo "Omarchy's bitwarden package is not usable here, so the Bitwarden Flatpak was kept unchanged." >&2
     return 1
   fi
   # No --delete-data: the Flatpak's ~/.var/app directory stays for recovery.
@@ -1126,19 +1207,26 @@ migrate_bitwarden_to_native() {
   fi
   echo "Bitwarden now uses Omarchy's bitwarden package. Sign in again in the app. The Flatpak's data in ~/.var/app/$bitwarden_flatpak was kept."
 }
-if bitwarden_flatpak_installed && bitwarden_native_available; then
+if [[ $bitwarden_native_failed -eq 0 ]] && bitwarden_flatpak_installed && bitwarden_native_available; then
   offer_omarchy_migration bitwarden-flatpak "Bitwarden desktop" "the user Flatpak $bitwarden_flatpak" \
     "Omarchy's bitwarden package" \
-    "Migrating installs bitwarden with omarchy pkg add, as Omarchy's Install > Service > Bitwarden does, unless it is already installed. Then it runs flatpak --user uninstall $bitwarden_flatpak. Your vault stays in your Bitwarden account; sign in again in the new app. The Flatpak's local data in ~/.var/app/$bitwarden_flatpak is kept. To undo, run flatpak --user install flathub $bitwarden_flatpak and omarchy pkg drop bitwarden. Quit Bitwarden first." \
+    "Migrating installs bitwarden with omarchy pkg add, as Omarchy's Install > Service > Bitwarden does, unless that package is already installed. It checks that the package's bitwarden command and ELF files work on this kernel, then runs flatpak --user uninstall $bitwarden_flatpak. Your vault stays in your Bitwarden account; sign in again in the new app. The Flatpak's local data in ~/.var/app/$bitwarden_flatpak is kept. To undo, run flatpak --user install flathub $bitwarden_flatpak and omarchy pkg drop bitwarden. Quit Bitwarden first." \
     migrate_bitwarden_to_native
 fi
+# Cursor is detect-only. On current Omarchy the cursor-bin package is Omarchy's
+# method; a cursor command that no package owns is reported and never removed.
+cursor_command=$(command -v cursor || true)
+if [[ -n $cursor_command ]] && ! command -v omarchy-install-cursor >/dev/null && command -v pacman >/dev/null &&
+  pacman -Si cursor-bin >/dev/null 2>&1 && ! pacman -Qo "$cursor_command" >/dev/null 2>&1; then
+  echo "Cursor is installed as $cursor_command, which no pacman package owns; Omarchy's preferred method is the cursor-bin package (omarchy pkg add cursor-bin). This move is manual and is not done for you; see Cursor in docs/apps.md."
+fi
 if [[ $migrate_requested -eq 1 && $migration_offered -eq 0 ]]; then
-  echo "Every app this layer manages already uses Omarchy's installer, or Omarchy has none for it. Nothing was migrated."
+  echo "No app has a migration this layer can run. Nothing was migrated."
 fi
 
-python3 "$root/scripts/groundwork-update.py" register "$root" "$with_keyd" "$with_screen_sharing" \
-  "${GROUNDWORK_OBSIDIAN_VAULT:-$HOME/Documents/Obsidian/my_obsidian_vault}" "$with_blip" "$with_local_inference" \
-  "$declined_migrations"
+if [[ $declined_migrations != "$saved_declines" ]]; then
+  register_choices
+fi
 if [[ $migration_failed -eq 1 ]]; then
   echo "A migration to Omarchy's installer did not finish. The rest of setup was applied and saved. Fix the error above, then rerun." >&2
   exit 1

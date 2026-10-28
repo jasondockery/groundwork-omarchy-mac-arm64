@@ -36,6 +36,8 @@ BUN_PAGE_SIZE_ISSUE = 'oven-sh/bun#17627'
 BUN_PAGE_SIZE_URL = 'https://github.com/oven-sh/bun/issues/17627'
 BUN_LINUX_ARCHIVE = 'bun-linux-aarch64.zip'
 BLIP_ID = 'nixfred.blip'
+# Setup's apply stage, including any migration prompt, must finish within this.
+SETUP_APPLY_SECONDS = 900
 # Ids in declined_migrations: lowercase letters, digits, and hyphens.
 MIGRATION_ID_CHARACTERS = frozenset('abcdefghijklmnopqrstuvwxyz0123456789-')
 # Last nightly whose ELF files all load on 16 KiB pages (pingdotgg/t3code#23433).
@@ -558,6 +560,33 @@ def elf_alignment_problem(binary):
     return None
 
 
+def package_alignment_problem(package):
+    """Reason an installed pacman package's ELF files cannot load here, or None.
+
+    Lists the package with `pacman -Qlq` and checks every ELF file with
+    `elf_alignment_problem`, the same readelf -lW check as local inference.
+    A package with no ELF file is a refusal: nothing was shown to load.
+    """
+    try:
+        listed = run(['pacman', '-Qlq', package], deadline=60)
+    except (UpdateError, OSError) as error:
+        return f'Could not list the files of {package} ({error}).'
+    checked = 0
+    for line in listed.splitlines():
+        path = Path(line)
+        if not line or line.endswith('/') or path.is_symlink() or not path.is_file():
+            continue
+        problem = elf_alignment_problem(path)
+        if problem == 'not-elf':
+            continue
+        if problem:
+            return problem
+        checked += 1
+    if not checked:
+        return f'{package} installed no ELF file, so it was not shown to start on this kernel.'
+    return None
+
+
 def bun_alignment_problem(binary):
     """Reason `binary` cannot be mapped on this kernel, or None.
 
@@ -1074,7 +1103,9 @@ def update(scope, check=False):
                         ('io.freetubeapp.FreeTube', 'FreeTube'),
                     ):
                         if app not in installed:
-                            completed.append(f'{label} user Flatpak not installed; skipped')
+                            # A native Bitwarden desktop is the expected state, not a skip.
+                            if app != 'com.bitwarden.desktop' or not shutil.which('bitwarden'):
+                                completed.append(f'{label} user Flatpak not installed; skipped')
                             continue
                         print(f'Updating the installed {label} user Flatpak…', flush=True)
                         try:
@@ -1135,6 +1166,12 @@ def main(args):
             print(problem, file=sys.stderr)
             return 1
         return 0
+    if args and args[0] == 'check-package-alignment' and len(args) == 2:
+        problem = package_alignment_problem(args[1])
+        if problem:
+            print(problem, file=sys.stderr)
+            return 1
+        return 0
     if args and args[0] == 'check-elf-alignment' and len(args) == 2:
         problem = elf_alignment_problem(args[1])
         if problem == 'not-elf':
@@ -1183,8 +1220,10 @@ def main(args):
         validate_registration(source)
         with transaction() as lock:
             validate_registration(source)
+            # The apply child bounds the migration prompt by this deadline.
             run(['bash', str(Path(source) / 'scripts/apply-layer.sh'), *options],
-                deadline=900, capture=False, lock_fd=lock.fileno())
+                deadline=SETUP_APPLY_SECONDS, capture=False, lock_fd=lock.fileno(),
+                extra_env=dict(GROUNDWORK_APPLY_DEADLINE_SECONDS=str(SETUP_APPLY_SECONDS)))
         return 0
     if args and args[0] == 'marker' and len(args) >= 3 and args[2] in MARKERS:
         # Setup records state it cannot read back without root, using the same

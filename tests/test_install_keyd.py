@@ -192,7 +192,7 @@ elif name == 'flatpak':
     }.get(app)
     if args[:1] == ['ps']:
         print(os.environ.get('FIXTURE_FLATPAK_RUNNING', ''))
-        sys.exit(0)
+        sys.exit(int(os.environ.get('FIXTURE_FLATPAK_PS_STATUS', '0')))
     if 'info' in args:
         sys.exit(0 if marker is not None and marker.exists() else 1)
     if 'uninstall' in args:
@@ -210,9 +210,22 @@ elif name == 'syncthing':
     if args == ['--version']:
         print(os.environ.get('FIXTURE_SYNCTHING_VERSION', 'syncthing v2.1.7 "Hafnium Hornet" (go1.25.1 linux-arm64) builder 2026-10-20'))
 elif name == 'pacman':
-    # Read-only sync database lookup: FIXTURE_FEED lists packages the feed has.
+    # Read-only queries. FIXTURE_FEED lists packages the sync database has.
+    # pacman-installed/<pkg> lists a fixture package's files; pacman-owned
+    # lists paths that package files own.
+    owned = root / 'pacman-owned'
     if args[:1] == ['-Si'] and len(args) == 2:
         sys.exit(0 if args[1] in os.environ.get('FIXTURE_FEED', '').split() else 1)
+    if args[:1] == ['-Q'] and len(args) == 2:
+        sys.exit(0 if (root / 'pacman-installed' / args[1]).exists() else 1)
+    if args[:1] == ['-Qo'] and len(args) == 2:
+        sys.exit(0 if owned.exists() and args[1] in owned.read_text().splitlines() else 1)
+    if args[:1] == ['-Qlq'] and len(args) == 2:
+        listing = root / 'pacman-installed' / args[1]
+        if not listing.exists():
+            sys.exit(1)
+        print(listing.read_text(), end='')
+        sys.exit(0)
     raise SystemExit('Unexpected pacman command: ' + repr(args))
 elif name == 'systemctl':
     if args[:1] == ['--user'] and args[-1:] == ['syncthing.service'] and 'is-active' in args:
@@ -251,6 +264,37 @@ elif name == 'omarchy-remove-dev-env':
     for path in (root / 'bin' / 'bun', root / 'mise-installed' / 'bun'):
         if path.is_symlink() or path.is_file():
             path.unlink()
+elif name == 'omarchy' and args[1:3] == ['add', 'bitwarden'] and args[:1] == ['pkg']:
+    # A package whose bundled Electron ELF and bitwarden command pacman owns.
+    status = int(os.environ.get('FIXTURE_BITWARDEN_ADD_STATUS', '0'))
+    if status or 'bitwarden' not in os.environ.get('FIXTURE_FEED', '').split():
+        sys.exit(status)
+    app = root / 'opt/Bitwarden'
+    app.mkdir(parents=True, exist_ok=True)
+    (app / 'bitwarden').write_bytes(b'\\x7fELF' + bytes(16))
+    (app / 'resources.pak').write_bytes(b'fixture data')
+    files = [str(app) + '/', str(app / 'bitwarden'), str(app / 'resources.pak')]
+    command = root / 'bin' / 'bitwarden'
+    if os.environ.get('FIXTURE_BITWARDEN_NO_COMMAND') != '1':
+        if not command.exists():
+            command.symlink_to(root / 'bin' / 'stub')
+        files.append(str(command))
+        with (root / 'pacman-owned').open('a') as owned:
+            owned.write(str(command) + '\\n')
+    (root / 'pacman-installed').mkdir(exist_ok=True)
+    (root / 'pacman-installed' / 'bitwarden').write_text('\\n'.join(files) + '\\n')
+elif name == 'omarchy' and args[:3] == ['pkg', 'drop', 'bitwarden']:
+    listing = root / 'pacman-installed' / 'bitwarden'
+    if listing.exists():
+        files = listing.read_text().splitlines()
+        for line in files:
+            path = pathlib.Path(line)
+            if path.is_symlink() or path.is_file():
+                path.unlink()
+        listing.unlink()
+        owned = root / 'pacman-owned'
+        if owned.exists():
+            owned.write_text(''.join(line + '\\n' for line in owned.read_text().splitlines() if line not in files))
 elif name == 'omarchy':
     if args[:2] == ['pkg', 'add'] and len(args) > 2 and args[2] in ('ollama', 'ollama-vulkan', 'vulkan-tools'):
         if args[2] == 'ollama':

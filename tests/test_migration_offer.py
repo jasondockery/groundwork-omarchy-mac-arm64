@@ -10,22 +10,32 @@ import subprocess
 import sys
 import unittest
 
+from contextlib import redirect_stdout
+import io
+from unittest.mock import patch
+
 import test_install_keyd as base
+import test_update as update_base
 
 
 REPO = base.REPO
 FLATPAK_UNINSTALL = ['flatpak', '--user', 'uninstall', '--noninteractive', 'com.bitwarden.desktop']
 FLATPAK_INSTALL = ['flatpak', '--user', 'install', '--noninteractive', 'flathub', 'com.bitwarden.desktop']
 NATIVE_ADD = ['omarchy', 'pkg', 'add', 'bitwarden']
+NATIVE_DROP = ['omarchy', 'pkg', 'drop', 'bitwarden']
 PROMPT = b'Migrate Bitwarden desktop now? [y/N] '
 
-# Answers each [y/N] prompt in turn. "EOF" sends Ctrl+D at an empty line; "INT" sends Ctrl+C.
+# Answers each [y/N] prompt in turn. "EOF" sends Ctrl+D at an empty line,
+# "INT" sends Ctrl+C, and "WAIT" sends nothing. PTY_STDERR_FILE sends the
+# child's stderr to a file, so only stdin and stdout are the terminal.
 PTY_HELPER = r"""
 import json, os, pty, select, sys, time
 answers = json.loads(sys.argv[1])
 command = sys.argv[2:]
 pid, master = pty.fork()
 if pid == 0:
+    if os.environ.get("PTY_STDERR_FILE"):
+        os.dup2(os.open(os.environ["PTY_STDERR_FILE"], os.O_WRONLY | os.O_CREAT, 0o600), 2)
     os.execvpe(command[0], command, os.environ)
 deadline = time.monotonic() + 25
 output = b""
@@ -46,7 +56,7 @@ while True:
         while output.count(b"[y/N] ") > seen:
             seen += 1
             answer = answers.pop(0) if answers else "EOF"
-            special = {"EOF": b"\x04", "INT": b"\x03"}
+            special = {"EOF": b"\x04", "INT": b"\x03", "WAIT": b""}
             os.write(master, special.get(answer, answer.encode() + b"\n"))
     waited, candidate = os.waitpid(pid, os.WNOHANG)
     if waited == pid:
@@ -87,6 +97,7 @@ class MigrationOfferTests(unittest.TestCase):
         result = subprocess.run([sys.executable, '-c', PTY_HELPER, json.dumps(answers), *command],
                                 env=self.env, capture_output=True, timeout=30)
         self.assertEqual(result.returncode == 0, success, result.stdout.decode(errors='replace') + result.stderr.decode(errors='replace'))
+        self.terminal_status = result.returncode
         return result.stdout.decode(errors='replace')
 
     def reset_calls(self):
@@ -102,10 +113,15 @@ class MigrationOfferTests(unittest.TestCase):
         (data / 'data.json').write_text('{"fixture": "local Flatpak data"}\n')
         return data / 'data.json'
 
-    def feed_has_native_bitwarden(self):
-        # pacman -Si bitwarden succeeds, and omarchy pkg add provides the command.
+    def feed_has_native_bitwarden(self, align='0x10000'):
+        # pacman -Si bitwarden succeeds, and omarchy pkg add installs a package
+        # whose ELF files report this LOAD alignment (0x10000 loads on 16 KiB pages).
         (self.bin / 'pacman').symlink_to(self.bin / 'stub')
-        self.env.update(FIXTURE_FEED='bitwarden', FIXTURE_MATERIALIZE_ADDED='1')
+        self.env.update(FIXTURE_FEED='bitwarden', FIXTURE_LOAD_ALIGN=align)
+
+    def seed_native_bitwarden_package(self):
+        subprocess.run([str(self.bin / 'omarchy'), 'pkg', 'add', 'bitwarden'], env=self.env, check=True, timeout=10)
+        self.reset_calls()
 
     def assert_not_migrated(self):
         calls = self.calls()
@@ -123,6 +139,8 @@ class MigrationOfferTests(unittest.TestCase):
         self.assertFalse(any(call[0] == 'flatpak' and '--delete-data' in call for call in calls))
         self.assertFalse((self.root / 'bitwarden-flatpak').exists())
         self.assertTrue((self.bin / 'bitwarden').exists())
+        self.assertIn(['pacman', '-Qlq', 'bitwarden'], calls)
+        self.assertLess(calls.index(['pacman', '-Qlq', 'bitwarden']), calls.index(FLATPAK_UNINSTALL))
         self.assertEqual(data.read_text(), '{"fixture": "local Flatpak data"}\n')
 
     # New installs.
@@ -138,15 +156,38 @@ class MigrationOfferTests(unittest.TestCase):
         self.assertIn(['flatpak', '--user', 'install', '--noninteractive', 'flathub', 'io.freetubeapp.FreeTube'], calls)
         self.assertNotIn('Migrate', result.stdout)
 
-    def test_new_install_falls_back_to_flatpak_when_the_package_does_not_install(self):
-        (self.bin / 'pacman').symlink_to(self.bin / 'stub')
-        self.env['FIXTURE_FEED'] = 'bitwarden'
+    def test_package_without_its_command_is_dropped_for_the_flatpak(self):
+        self.feed_has_native_bitwarden()
+        self.env['FIXTURE_BITWARDEN_NO_COMMAND'] = '1'
+        result = self.run_install()
+        calls = self.calls()
+        self.assertIn(NATIVE_ADD, calls)
+        self.assertIn(NATIVE_DROP, calls)
+        self.assertLess(calls.index(NATIVE_DROP), calls.index(FLATPAK_INSTALL))
+        self.assertFalse((self.root / 'pacman-installed/bitwarden').exists())
+        self.assertIn('installing the Bitwarden Flatpak instead', result.stderr)
+        # The package was just refused, so this run does not offer it back.
+        self.assertNotIn('Bitwarden desktop is installed as', result.stdout)
+        self.assertNotIn(FLATPAK_UNINSTALL, calls)
+
+    def test_failed_package_add_falls_back_without_a_drop(self):
+        self.feed_has_native_bitwarden()
+        self.env['FIXTURE_BITWARDEN_ADD_STATUS'] = '1'
         result = self.run_install()
         self.assertIn(NATIVE_ADD, self.calls())
+        self.assertNotIn(NATIVE_DROP, self.calls())
         self.assertIn(FLATPAK_INSTALL, self.calls())
-        self.assertIn('using the Bitwarden Flatpak instead', result.stderr)
-        # The fallback Flatpak is then a candidate, reported without a terminal.
-        self.assertIn("Omarchy's preferred method is Omarchy's bitwarden package", result.stdout)
+        self.assertNotIn('Bitwarden desktop is installed as', result.stdout)
+
+    def test_misaligned_package_is_dropped_for_the_flatpak(self):
+        self.feed_has_native_bitwarden(align='0x800')
+        result = self.run_install()
+        calls = self.calls()
+        self.assertIn(['pacman', '-Qlq', 'bitwarden'], calls)
+        self.assertIn(NATIVE_DROP, calls)
+        self.assertIn(FLATPAK_INSTALL, calls)
+        self.assertIn('is not aligned for', result.stderr)
+        self.assertFalse((self.bin / 'bitwarden').exists())
 
     def test_no_native_package_keeps_the_flatpak_and_offers_nothing(self):
         (self.bin / 'pacman').symlink_to(self.bin / 'stub')
@@ -177,7 +218,7 @@ class MigrationOfferTests(unittest.TestCase):
         notices = [line for line in result.stdout.splitlines() if line.startswith('Bitwarden desktop is installed as')]
         self.assertEqual(len(notices), 1, result.stdout)
         self.assertIn('the user Flatpak com.bitwarden.desktop', notices[0])
-        self.assertIn("Omarchy's preferred method is Omarchy's bitwarden package", notices[0])
+        self.assertIn("Omarchy's preferred method is Omarchy's bitwarden package (migration bitwarden-flatpak)", notices[0])
         self.assertIn('./install.sh --migrate-to-omarchy-installers', notices[0])
         self.assertNotIn('declined_migrations', self.saved())
 
@@ -247,14 +288,35 @@ class MigrationOfferTests(unittest.TestCase):
     def test_interrupt_at_the_prompt_stops_without_migrating_or_remembering(self):
         self.feed_has_native_bitwarden()
         self.seed_bitwarden_flatpak()
-        # Saved setup exists, so the interrupt cannot pass for a first-run failure.
-        self.run_install()
-        self.reset_calls()
-        output = self.run_in_terminal(['INT'], success=False)
+        # A first setup: its choices and update commands are saved before the prompt.
+        output = self.run_in_terminal(['INT'], '--without-keyd', success=False)
+        self.assertEqual(self.terminal_status, 130, output)
         self.assertIn('[y/N]', output)
         self.assertIn('Update cancelled', output)
         self.assert_not_migrated()
         self.assertNotIn('declined_migrations', self.saved())
+        self.assertFalse(self.saved()['keyd'])
+        self.assertTrue((self.root / 'home/.local/bin/groundwork-update').exists())
+
+    def test_unanswered_prompt_times_out_and_keeps_choices(self):
+        self.feed_has_native_bitwarden()
+        self.seed_bitwarden_flatpak()
+        self.env['GROUNDWORK_MIGRATION_PROMPT_SECONDS'] = '1'
+        output = self.run_in_terminal(['WAIT'], '--without-screen-sharing')
+        self.assertIn('No answer within 1 seconds', output)
+        self.assertIn('(migration bitwarden-flatpak). To migrate, run:', output)
+        self.assert_not_migrated()
+        self.assertNotIn('declined_migrations', self.saved())
+        self.assertFalse(self.saved()['screen_sharing'])
+
+    def test_prompt_needs_stderr_on_the_terminal_too(self):
+        self.feed_has_native_bitwarden()
+        self.seed_bitwarden_flatpak()
+        self.env['PTY_STDERR_FILE'] = str(self.root / 'stderr.log')
+        output = self.run_in_terminal(['y'])
+        self.assertNotIn('[y/N]', output)
+        self.assertIn('(migration bitwarden-flatpak)', output)
+        self.assert_not_migrated()
 
     def test_invalid_answer_is_asked_again(self):
         self.feed_has_native_bitwarden()
@@ -281,12 +343,47 @@ class MigrationOfferTests(unittest.TestCase):
     def test_package_and_flatpak_both_present_removes_only_the_flatpak(self):
         self.feed_has_native_bitwarden()
         data = self.seed_bitwarden_flatpak()
-        (self.bin / 'bitwarden').symlink_to(self.bin / 'stub')
+        self.seed_native_bitwarden_package()
         self.run_install('--migrate-to-omarchy-installers')
         self.assertNotIn(NATIVE_ADD, self.calls())
         self.assertIn(FLATPAK_UNINSTALL, self.calls())
         self.assertFalse((self.root / 'bitwarden-flatpak').exists())
         self.assertTrue(data.exists())
+
+    def test_user_wrapper_is_not_the_package(self):
+        self.feed_has_native_bitwarden()
+        self.seed_bitwarden_flatpak()
+        wrapper = self.root / 'home/.local/bin/bitwarden'
+        wrapper.parent.mkdir(parents=True)
+        wrapper.write_text('#!/bin/sh\nexec flatpak run com.bitwarden.desktop "$@"\n')
+        wrapper.chmod(0o755)
+        result = self.run_install('--migrate-to-omarchy-installers', success=False)
+        self.assertIn(f'{wrapper} is not from Omarchy\'s bitwarden package', result.stderr)
+        self.assertNotIn(FLATPAK_UNINSTALL, self.calls())
+        self.assertNotIn(NATIVE_ADD, self.calls())
+        self.assertTrue((self.root / 'bitwarden-flatpak').exists())
+        self.assertTrue(wrapper.exists())
+
+    def test_misaligned_package_keeps_the_flatpak_and_drops_only_what_it_added(self):
+        self.feed_has_native_bitwarden(align='0x800')
+        self.seed_bitwarden_flatpak()
+        result = self.run_install('--migrate-to-omarchy-installers', success=False)
+        self.assertIn(NATIVE_ADD, self.calls())
+        self.assertIn(NATIVE_DROP, self.calls())
+        self.assertNotIn(FLATPAK_UNINSTALL, self.calls())
+        self.assertTrue((self.root / 'bitwarden-flatpak').exists())
+        self.assertIn('the Bitwarden Flatpak was kept unchanged', result.stderr)
+        self.assertIn('is not aligned for', result.stderr)
+
+    def test_misaligned_preinstalled_package_is_not_dropped(self):
+        self.feed_has_native_bitwarden(align='0x800')
+        self.seed_bitwarden_flatpak()
+        self.seed_native_bitwarden_package()
+        self.run_install('--migrate-to-omarchy-installers', success=False)
+        self.assertNotIn(NATIVE_ADD, self.calls())
+        self.assertNotIn(NATIVE_DROP, self.calls())
+        self.assertNotIn(FLATPAK_UNINSTALL, self.calls())
+        self.assertTrue((self.root / 'pacman-installed/bitwarden').exists())
 
     # Explicit flag.
 
@@ -308,7 +405,7 @@ class MigrationOfferTests(unittest.TestCase):
         self.assertIn('Nothing was migrated.', result.stdout)
         calls = self.calls()
         self.assertFalse(any(call[0] in ('cursor', 'omarchy-install-cursor') for call in calls))
-        self.assertFalse(any('cursor-bin' in call for call in calls))
+        self.assertFalse(any('cursor-bin' in call and call[:2] != ['pacman', '-Si'] for call in calls))
         self.assertNotIn(FLATPAK_UNINSTALL, calls)
 
     # Failed migrations keep the Flatpak, still save setup, and exit nonzero.
@@ -324,8 +421,8 @@ class MigrationOfferTests(unittest.TestCase):
         self.assertTrue((self.root / 'home/.local/bin/groundwork-update').exists())
 
     def test_package_failure_keeps_the_flatpak(self):
-        (self.bin / 'pacman').symlink_to(self.bin / 'stub')
-        self.env['FIXTURE_FEED'] = 'bitwarden'
+        self.feed_has_native_bitwarden()
+        self.env['FIXTURE_BITWARDEN_ADD_STATUS'] = '1'
         self.seed_bitwarden_flatpak()
         result = self.run_install('--migrate-to-omarchy-installers', success=False)
         self.assertIn(NATIVE_ADD, self.calls())
@@ -334,6 +431,14 @@ class MigrationOfferTests(unittest.TestCase):
         self.assertIn('the Bitwarden Flatpak was kept unchanged', result.stderr)
         self.assertTrue(any(call[0] == 'stow' for call in self.calls()))
         self.assertTrue(self.saved()['keyd'])
+
+    def test_flatpak_ps_failure_refuses_the_migration(self):
+        self.feed_has_native_bitwarden()
+        self.seed_bitwarden_flatpak()
+        self.env['FIXTURE_FLATPAK_PS_STATUS'] = '1'
+        result = self.run_install('--migrate-to-omarchy-installers', success=False)
+        self.assertIn('flatpak ps failed', result.stderr)
+        self.assert_not_migrated()
 
     def test_uninstall_failure_names_the_command_to_finish(self):
         self.feed_has_native_bitwarden()
@@ -353,12 +458,100 @@ class MigrationOfferTests(unittest.TestCase):
         result = self.run_update()
         self.assertIn('sudo was not used', result.stdout)
         self.assertNotIn(NATIVE_ADD, self.calls())
-        (self.bin / 'bitwarden').unlink()
+        # The package was removed outside setup.
+        subprocess.run([str(self.bin / 'omarchy'), 'pkg', 'drop', 'bitwarden'], env=self.env, check=True, timeout=10)
+        self.assertFalse((self.bin / 'bitwarden').exists())
         self.reset_calls()
         self.env['FIXTURE_SUDO_CACHED'] = '1'
         result = self.run_update()
         self.assertNotIn('sudo was not used', result.stdout)
         self.assertIn(NATIVE_ADD, self.calls())
+
+
+class CursorNoticeTests(unittest.TestCase):
+    setUp = base.InstallKeydTests.setUp
+    calls = base.InstallKeydTests.calls
+    run_install = MigrationOfferTests.run_install
+
+    def feed(self, owned):
+        (self.bin / 'pacman').symlink_to(self.bin / 'stub')
+        self.env['FIXTURE_FEED'] = 'cursor-bin'
+        if owned:
+            (self.root / 'pacman-owned').write_text(str(self.bin / 'cursor') + '\n')
+
+    def assert_cursor_untouched(self):
+        calls = self.calls()
+        self.assertFalse(any('cursor-bin' in call and call[:2] != ['pacman', '-Si'] for call in calls))
+        self.assertFalse(any(call[0] in ('cursor', 'omarchy-install-cursor') for call in calls))
+        self.assertTrue((self.bin / 'cursor').is_symlink())
+
+    def test_package_owned_cursor_gets_no_notice(self):
+        self.feed(owned=True)
+        result = self.run_install('--migrate-to-omarchy-installers')
+        self.assertIn(['pacman', '-Qo', str(self.bin / 'cursor')], self.calls())
+        self.assertNotIn('Cursor is installed as', result.stdout)
+        self.assert_cursor_untouched()
+
+    def test_unowned_cursor_gets_a_manual_notice_only(self):
+        self.feed(owned=False)
+        for args in ((), ('--migrate-to-omarchy-installers',)):
+            with self.subTest(args=args):
+                (self.root / 'calls.jsonl').unlink(missing_ok=True)
+                result = self.run_install(*args)
+                notices = [line for line in result.stdout.splitlines() if line.startswith('Cursor is installed as')]
+                self.assertEqual(len(notices), 1, result.stdout)
+                self.assertIn(f'{self.bin / "cursor"}, which no pacman package owns', notices[0])
+                self.assertIn('the cursor-bin package (omarchy pkg add cursor-bin)', notices[0])
+                self.assertIn('manual', notices[0])
+                self.assertIn('docs/apps.md', notices[0])
+                self.assert_cursor_untouched()
+
+    def test_older_omarchy_installer_or_no_feed_package_gets_no_notice(self):
+        self.feed(owned=False)
+        for case in ('installer', 'feed'):
+            with self.subTest(case=case):
+                (self.root / 'calls.jsonl').unlink(missing_ok=True)
+                if case == 'installer':
+                    (self.bin / 'omarchy-install-cursor').symlink_to(self.bin / 'stub')
+                else:
+                    (self.bin / 'omarchy-install-cursor').unlink()
+                    self.env['FIXTURE_FEED'] = ''
+                result = self.run_install()
+                self.assertNotIn('Cursor is installed as', result.stdout)
+                self.assert_cursor_untouched()
+
+
+class UpdateAllBitwardenSummaryTests(unittest.TestCase):
+    # The update-all fixture: real local Git, mocked machine-owner commands.
+    setUp = update_base.UpdateTests.setUp
+    command = update_base.UpdateTests.command
+    git = update_base.UpdateTests.git
+    commit = update_base.UpdateTests.commit
+    run_command = update_base.UpdateTests.run_command
+
+    def update_all(self, native):
+        updater = update_base.updater
+        previous = self.run_command
+
+        def without_bitwarden_flatpak(args, **kwargs):
+            if args[:3] == ['flatpak', '--user', 'list']:
+                self.machine_calls.append(args)
+                return 'io.freetubeapp.FreeTube'
+            return previous(args, **kwargs)
+
+        which = lambda name: None if name == 'bitwarden' and not native else '/fixture/' + name
+        with patch.object(updater, 'run', side_effect=without_bitwarden_flatpak), \
+                patch.object(updater.shutil, 'which', side_effect=which), redirect_stdout(io.StringIO()):
+            updater.update('all')
+        receipt = json.loads((self.state / 'update-all-last-success.json').read_text())
+        self.assertNotIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], self.machine_calls)
+        return receipt['completed']
+
+    def test_native_bitwarden_is_not_reported_as_a_skipped_flatpak(self):
+        self.assertNotIn('Bitwarden user Flatpak not installed; skipped', self.update_all(native=True))
+
+    def test_missing_bitwarden_is_still_reported(self):
+        self.assertIn('Bitwarden user Flatpak not installed; skipped', self.update_all(native=False))
 
 
 class DeclinedMigrationSettingsTests(unittest.TestCase):
