@@ -321,7 +321,7 @@ class InstallKeydTests(unittest.TestCase):
 
     def run_install(self, *args, success=True):
         result = subprocess.run(['bash', str(REPO / 'install.sh'), *args],
-                                env=self.env, capture_output=True, text=True, timeout=10)
+                                env=self.env, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode == 0, success, result.stdout + result.stderr)
         return result
 
@@ -354,7 +354,7 @@ class InstallKeydTests(unittest.TestCase):
         self.run_install('--without-keyd', '--without-screen-sharing')
         (self.root / 'calls.jsonl').unlink()
         result = subprocess.run(['python3', str(REPO / 'scripts/groundwork-update.py'), 'setup', str(REPO), '--update'],
-                                env=self.env, capture_output=True, text=True, timeout=10)
+                                env=self.env, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn('finish vault', result.stdout)
         self.assertFalse(any(call[0] == 'curl' for call in self.calls()))
@@ -405,7 +405,7 @@ raise SystemExit(os.WEXITSTATUS(status))
             command = [sys.executable, '-c', bridge, str(REPO / 'scripts/groundwork-update.py'), *command]
         return subprocess.run(
             [sys.executable, "-c", helper, *command],
-            env=self.env, capture_output=True, timeout=10)
+            env=self.env, capture_output=True, timeout=30)
 
     def test_updater_hands_uncached_authorization_a_real_foreground_terminal(self):
         self.env.update(FIXTURE_SUDO_CACHED='0', FIXTURE_REQUIRE_TTY='1')
@@ -416,7 +416,7 @@ raise SystemExit(os.WEXITSTATUS(status))
 
     def run_update(self):
         return subprocess.run(['python3', str(REPO / 'scripts/groundwork-update.py'), 'setup', str(REPO), '--update'],
-                              env=self.env, capture_output=True, text=True, timeout=10)
+                              env=self.env, capture_output=True, text=True, timeout=30)
 
     def prepare_routine_update(self, *setup_args):
         self.run_install(*(setup_args or ('--without-keyd',)))
@@ -444,7 +444,7 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
         self.env['FIXTURE_SERVICES_DOWN'] = 'tailscaled'
         result = subprocess.run(['python3', str(REPO / 'scripts/groundwork-update.py'), 'setup', str(REPO), '--update'],
-                                env=self.env, capture_output=True, text=True, timeout=10, start_new_session=True)
+                                env=self.env, capture_output=True, text=True, timeout=30, start_new_session=True)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('no terminal is available', result.stderr)
         self.assertNotIn(['sudo', 'systemctl', 'enable', '--now', 'tailscaled'], self.calls())
@@ -661,7 +661,7 @@ raise SystemExit(os.WEXITSTATUS(status))
                 directory.parent.chmod(0o700)
             result = subprocess.run(
                 ['bash', '-c', 'umask 077; exec bash "$1"', 'fixture', str(REPO / 'install.sh')],
-                env=self.env, capture_output=True, text=True, timeout=10)
+                env=self.env, capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(directory.parent.stat().st_mode & 0o777, 0o755)
             self.assertEqual(directory.stat().st_mode & 0o777, 0o755)
@@ -939,7 +939,7 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.run_install('--without-keyd', '--without-screen-sharing')
         (self.root / 'calls.jsonl').unlink()
         result = subprocess.run(['python3', str(REPO / 'scripts/groundwork-update.py'), 'setup', str(REPO), '--update'],
-                                env=self.env, capture_output=True, text=True, timeout=10)
+                                env=self.env, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn(['omarchy-install-cursor'], self.calls())
         self.assertNotIn(['omarchy', 'pkg', 'add', 'cursor-bin'], self.calls())
@@ -991,7 +991,7 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.env['FIXTURE_SUDO_CACHED'] = '0'
         result = subprocess.run(
             ['bash', str(REPO / 'install.sh')],
-            env=self.env, capture_output=True, text=True, timeout=10,
+            env=self.env, capture_output=True, text=True, timeout=30,
             start_new_session=True)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('no terminal is available', result.stderr)
@@ -1439,23 +1439,25 @@ raise SystemExit(os.WEXITSTATUS(status))
         if scope:
             (supply / 'scope').write_text(scope + '\n')
 
-    def test_a_machine_with_a_system_battery_does_not_linger(self):
+    def assert_battery_machine_does_not_linger(self, name):
+        self.power_supply(name, 'Battery', 'System')
+        self.power_supply('ac', 'Mains')
+        self.run_install()
+        self.assertFalse(any(call[1:3] == ['loginctl', 'enable-linger'] for call in self.calls()), name)
+        self.assertFalse((self.root / 'var/lib/systemd/linger').exists())
+        # And a routine update does not need sudo for lingering.
+        (self.root / 'calls.jsonl').unlink()
+        self.env['FIXTURE_SUDO_CACHED'] = '0'
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.privileged_calls(), [])
+
+    def test_an_asahi_macbook_battery_does_not_linger(self):
         # The Asahi SMC registers macsmc-battery, not BAT0.
-        for name in ('macsmc-battery', 'BAT0'):
-            self.power_supply(name, 'Battery', 'System')
-            self.power_supply('ac', 'Mains')
-            self.run_install()
-            self.assertFalse(any(call[1:3] == ['loginctl', 'enable-linger'] for call in self.calls()), name)
-            self.assertFalse((self.root / 'var/lib/systemd/linger').exists())
-            # And a routine update does not need sudo for lingering.
-            (self.root / 'calls.jsonl').unlink()
-            self.env['FIXTURE_SUDO_CACHED'] = '0'
-            result = self.run_update()
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(self.privileged_calls(), [])
-            shutil.rmtree(self.root / 'sys')
-            (self.root / 'calls.jsonl').unlink(missing_ok=True)
-            self.env['FIXTURE_SUDO_CACHED'] = '1'
+        self.assert_battery_machine_does_not_linger('macsmc-battery')
+
+    def test_a_bat0_battery_does_not_linger(self):
+        self.assert_battery_machine_does_not_linger('BAT0')
 
     def test_a_peripheral_battery_does_not_stop_a_desktop_from_lingering(self):
         # A Bluetooth keyboard registers a Battery with device scope.

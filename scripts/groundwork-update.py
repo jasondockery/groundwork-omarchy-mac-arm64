@@ -23,7 +23,8 @@ import zipfile
 
 MARKER = '# Groundwork Omarchy updater'
 CONFIG = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config')) / 'groundwork/omarchy.json'
-STATE = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local/state')) / 'groundwork'
+# An exported but empty XDG_STATE_HOME means unset, as it does for the shell side of apply-layer.sh.
+STATE = Path(os.environ.get('XDG_STATE_HOME') or Path.home() / '.local/state') / 'groundwork'
 KEYD_CONFIG = Path('/etc/keyd/default.conf')
 T3_REPO = 'pingdotgg/t3code'
 T3_RELEASES = f'https://api.github.com/repos/{T3_REPO}/releases?per_page=100'
