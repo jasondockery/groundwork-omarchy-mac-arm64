@@ -288,7 +288,7 @@ class InstallKeydTests(unittest.TestCase):
         for name in ('bash', 'sh', 'python3', 'env'):
             (self.bin / name).symlink_to(shutil.which(name))
         for name in ('timeout', 'mktemp', 'dirname', 'rm', 'mkdir', 'cp', 'chmod',
-                     'mv', 'find', 'readlink', 'sleep', 'cmp', 'stat', 'id'):
+                     'mv', 'find', 'readlink', 'sleep', 'cmp', 'stat', 'id', 'head'):
             (self.bin / name).symlink_to(host_tool(name))
         stub = self.bin / 'stub'
         stub.write_text(STUB)

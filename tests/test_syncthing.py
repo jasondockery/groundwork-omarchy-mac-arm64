@@ -252,7 +252,7 @@ class SyncthingCase(unittest.TestCase):
         self.at_enable = None
         self.real_listening = REAL_LISTENING
         real_wait = gs.wait_for
-        patch.object(gs, 'wait_for', lambda check, seconds, pause=0.5: real_wait(check, min(seconds, 1), 0.05)).start()
+        patch.object(gs, 'wait_for', lambda check, seconds, pause=0.5: real_wait(check, min(seconds, 0.3), 0.02)).start()
 
         def systemctl(*args, **kwargs):
             if args[:1] == ('enable',) and self.config.exists():

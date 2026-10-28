@@ -964,7 +964,10 @@ install_syncthing() {
   bin=$(command -v syncthing)
   # Apple Silicon kernels use 16 KiB pages. A non-ELF wrapper is skipped here;
   # the helper refuses a PATH copy that is not the one the service runs.
-  python3 "$root/scripts/groundwork-update.py" check-elf-alignment "$bin" || status=$?
+  # Only an ELF needs the check; a wrapper script skips the interpreter start.
+  if [[ $(head -c 4 "$bin") == $'\x7f'ELF ]]; then
+    python3 "$root/scripts/groundwork-update.py" check-elf-alignment "$bin" || status=$?
+  fi
   if [[ $status -ne 0 && $status -ne 2 ]]; then
     echo "Refusing to treat Syncthing as installed. syncthing.service was not enabled." >&2
     echo "If the reason above is the package itself, remove it with: sudo pacman -Rns syncthing" >&2
@@ -990,10 +993,14 @@ install_syncthing() {
       ;;
   esac
   syncthing_pending_note=$pending
-  # An update reads this to report a warning instead of a clean success.
+  # An update reads this to report a warning instead of a clean success. The
+  # updater validates the path, so only start it when the marker must change.
+  local marker=${XDG_STATE_HOME:-$HOME/.local/state}/groundwork/syncthing-pending
   if [[ -n $pending ]]; then
-    python3 "$root/scripts/groundwork-update.py" marker write syncthing-pending "$pending"
-  else
+    if [[ -L $marker || ! -f $marker || $(<"$marker") != "$pending" ]]; then
+      python3 "$root/scripts/groundwork-update.py" marker write syncthing-pending "$pending"
+    fi
+  elif [[ -e $marker || -L $marker ]]; then
     python3 "$root/scripts/groundwork-update.py" marker remove syncthing-pending
   fi
 }
