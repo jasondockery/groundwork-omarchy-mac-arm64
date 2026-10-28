@@ -138,8 +138,8 @@ fi
 # Fail before installing packages or moving files when the checkout is incomplete.
 bitwarden_extension=nngceckbapebfimnlniiiahkandclblb.json
 extension_source="$root/chromium/extensions/$bitwarden_extension"
-[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$extension_source" ]] || {
-  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, plugin helper, or Bitwarden extension manifest is missing." >&2
+[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$extension_source" ]] || {
+  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, or Bitwarden extension manifest is missing." >&2
   exit 1
 }
 
@@ -207,11 +207,16 @@ local_inference_ready() {
   [[ -d $vulkan_dir ]] || return 1
   compgen -G "$vulkan_dir/*" >/dev/null
 }
+# Lingering lets the user service start at boot without a graphical login.
+syncthing_user=${USER:-$(id -un)}
+syncthing_linger_enabled() {
+  [[ -e $test_root/var/lib/systemd/linger/$syncthing_user ]]
+}
 privileged_changes_needed() {
   local executable
   # Missing tools are installed through omarchy pkg add or Omarchy's installers.
   # readelf (binutils) is what update-all uses to check T3 Code builds.
-  for executable in cursor herdr tailscale obsidian bw readelf; do
+  for executable in cursor herdr tailscale syncthing obsidian bw readelf; do
     command -v "$executable" >/dev/null || return 0
   done
   # FreeTube is a user Flatpak, so a missing flatpak package still needs
@@ -220,6 +225,7 @@ privileged_changes_needed() {
     return 0
   fi
   service_ready tailscaled || return 0
+  syncthing_linger_enabled || return 0
   if command -v chromium >/dev/null; then
     chromium_extension_current || return 0
   fi
@@ -927,6 +933,40 @@ install_local_inference() {
 if [[ $with_local_inference -eq 1 ]]; then
   install_local_inference
 fi
+
+# Syncthing is a default on every Groundwork machine (groundwork-core/docs/syncthing.md).
+# This Mac mini is the always-on peer, so lingering starts the user service at boot.
+# The helper holds the contract: tailnet-only listen addresses, the two shared
+# folders, and groundwork syncthing-pair. It waits, rather than failing setup,
+# when Tailscale has no address yet.
+install_syncthing() {
+  local bin status=0 apply_status=0
+  install_package syncthing
+  bin=$(command -v syncthing)
+  # Apple Silicon kernels use 16 KiB pages. A non-ELF wrapper is skipped here
+  # and fails on its own when the helper runs it.
+  python3 "$root/scripts/groundwork-update.py" check-elf-alignment "$bin" || status=$?
+  if [[ $status -ne 0 && $status -ne 2 ]]; then
+    echo "Refusing to treat Syncthing as installed. syncthing.service was not enabled." >&2
+    echo "Remove the package with: sudo pacman -Rns syncthing" >&2
+    exit 1
+  fi
+  if ! syncthing_linger_enabled; then
+    if ! sudo loginctl enable-linger "$syncthing_user"; then
+      echo "Could not enable lingering for $syncthing_user; Syncthing will start at login until you rerun groundwork-update." >&2
+    fi
+  fi
+  python3 "$root/scripts/groundwork-syncthing.py" apply || apply_status=$?
+  case $apply_status in
+    0) ;;
+    75) echo "Syncthing is waiting for Tailscale; rerun groundwork-update after tailnet sign-in." >&2 ;;
+    *)
+      echo "Syncthing could not be applied (exit $apply_status). Fix the message above and rerun." >&2
+      exit 1
+      ;;
+  esac
+}
+install_syncthing
 
 python3 "$root/scripts/groundwork-update.py" register "$root" "$with_keyd" "$with_screen_sharing" \
   "${GROUNDWORK_OBSIDIAN_VAULT:-$HOME/Documents/Obsidian/my_obsidian_vault}" "$with_blip" "$with_local_inference"

@@ -66,6 +66,12 @@ elif name == 'sudo':
         sys.exit(int(os.environ.get('FIXTURE_RELOAD_STATUS', '0')))
     if args[0] in ('systemctl', 'ufw'):
         sys.exit(0)
+    if args[:2] == ['loginctl', 'enable-linger']:
+        if os.environ.get('FIXTURE_LINGER_STATUS', '0') == '0':
+            linger = root / 'var/lib/systemd/linger' / args[2]
+            linger.parent.mkdir(parents=True, exist_ok=True)
+            linger.touch()
+        sys.exit(int(os.environ.get('FIXTURE_LINGER_STATUS', '0')))
     if args[0] not in ('mkdir', 'install', 'cmp', 'cp', 'chmod'):
         raise SystemExit('Unexpected privileged operation: ' + repr(args))
     if args[0] == 'cp' and '/usr/share/chromium/extensions/' in args[-1]:
@@ -192,7 +198,13 @@ elif name == 'flatpak':
         if not status and marker is not None:
             marker.touch()
         sys.exit(status)
+elif name == 'syncthing':
+    if args == ['--version']:
+        print(os.environ.get('FIXTURE_SYNCTHING_VERSION', 'syncthing v2.1.7 "Hafnium Hornet" (go1.25.1 linux-arm64) builder 2026-10-20'))
 elif name == 'systemctl':
+    if args[:1] == ['--user'] and args[-1:] == ['syncthing.service'] and 'is-active' in args:
+        # Not serving yet unless a test says otherwise.
+        sys.exit(0 if os.environ.get('FIXTURE_SYNCTHING_ACTIVE') == '1' else 3)
     if args[:1] in (['is-enabled'], ['is-active']):
         sys.exit(3 if args[-1] in os.environ.get('FIXTURE_SERVICES_DOWN', '').split() else 0)
     sys.exit(int(os.environ.get('FIXTURE_USER_SYSTEMCTL_STATUS', '0')))
@@ -243,6 +255,10 @@ elif name == 'omarchy':
             target = root / 'bin' / 'vulkaninfo'
             if not target.exists():
                 target.symlink_to(root / 'bin' / 'stub')
+    if args[:3] == ['pkg', 'add', 'syncthing']:
+        target = root / 'bin' / 'syncthing'
+        if not target.exists():
+            target.symlink_to(root / 'bin' / 'stub')
     if args[:2] == ['pkg', 'add'] and os.environ.get('FIXTURE_MATERIALIZE_ADDED') == '1' and len(args) > 2:
         mapping = {'openssh': 'ssh', 'cursor-bin': 'cursor', 'libnotify': 'notify-send', 'wl-clipboard': 'wl-copy', 'xdg-utils': 'xdg-open'}
         executable = mapping.get(args[2], args[2])
@@ -272,12 +288,12 @@ class InstallKeydTests(unittest.TestCase):
         for name in ('bash', 'sh', 'python3', 'env'):
             (self.bin / name).symlink_to(shutil.which(name))
         for name in ('timeout', 'mktemp', 'dirname', 'rm', 'mkdir', 'cp', 'chmod',
-                     'mv', 'find', 'readlink', 'sleep', 'cmp', 'stat'):
+                     'mv', 'find', 'readlink', 'sleep', 'cmp', 'stat', 'id'):
             (self.bin / name).symlink_to(host_tool(name))
         stub = self.bin / 'stub'
         stub.write_text(STUB)
         stub.chmod(0o755)
-        for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'omarchy-install-dev-env', 'omarchy-remove-dev-env', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw', 'getconf', 'readelf'):
+        for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'omarchy-install-dev-env', 'omarchy-remove-dev-env', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw', 'getconf', 'readelf', 'syncthing', 'loginctl'):
             (self.bin / name).symlink_to(stub)
         (self.root / 'home').mkdir()
         (self.root / 'runtime').mkdir()
@@ -610,7 +626,8 @@ raise SystemExit(os.WEXITSTATUS(status))
         config.write_text('user owned settings\n')
         self.run_install('--without-screen-sharing')
         self.assertEqual(config.read_text(), 'user owned settings\n')
-        self.assertFalse(any(call[0] == 'systemctl' for call in self.calls()))
+        # Syncthing's user service is separate; only screen sharing must stay untouched.
+        self.assertFalse(any(call[0] == 'systemctl' and 'groundwork-screen-share.service' in call for call in self.calls()))
         self.assertNotIn(['omarchy', 'pkg', 'add', 'wayvnc'], self.calls())
 
     def test_failed_screen_sharing_service_setup_stops_before_input_changes(self):
@@ -1373,6 +1390,59 @@ raise SystemExit(os.WEXITSTATUS(status))
                              for call in self.calls()))
         saved = json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())
         self.assertFalse(saved['local_inference'])
+
+
+    def test_default_install_adds_syncthing_and_waits_for_tailscale(self):
+        result = self.run_install()
+        calls = self.calls()
+        self.assertIn(['omarchy', 'pkg', 'add', 'syncthing'], calls)
+        self.assertIn(['sudo', 'loginctl', 'enable-linger', os.environ.get('USER') or subprocess.check_output(['id', '-un'], text=True).strip()], calls)
+        self.assertIn('waiting for Tailscale', result.stderr)
+        # Nothing is enabled until Tailscale has an address to bind.
+        self.assertFalse(any(call[:3] == ['systemctl', '--user', 'enable'] and 'syncthing.service' in call for call in calls))
+        helper = self.root / 'home/.local/bin/groundwork-syncthing'
+        self.assertTrue(helper.is_file() and os.access(helper, os.X_OK))
+        self.assertIn('syncthing-pair', (self.root / 'home/.local/bin/groundwork').read_text())
+        self.assertFalse((self.root / 'home/Sync').exists())
+
+    def test_syncthing_linger_is_enabled_once_and_update_needs_no_sudo_after(self):
+        self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.privileged_calls(), [])
+        self.assertNotIn('loginctl', [call[1] for call in self.privileged_calls() if len(call) > 1])
+
+    def test_update_primes_sudo_when_linger_is_missing(self):
+        self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
+        for path in (self.root / 'var/lib/systemd/linger').iterdir():
+            path.unlink()
+        self.env['FIXTURE_SUDO_CACHED'] = '1'
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(any(call[1:3] == ['loginctl', 'enable-linger'] for call in self.privileged_calls()))
+
+    def test_failed_linger_is_reported_and_setup_continues(self):
+        self.env['FIXTURE_LINGER_STATUS'] = '1'
+        result = self.run_install()
+        self.assertIn('Could not enable lingering', result.stderr)
+
+    def test_misaligned_syncthing_is_not_enabled(self):
+        binary = self.bin / 'syncthing'
+        binary.unlink()
+        binary.write_bytes(b'\x7fELF' + bytes(16))
+        binary.chmod(0o755)
+        self.env['FIXTURE_LOAD_ALIGN'] = '0x100'
+        result = self.run_install(success=False)
+        self.assertIn('Refusing to treat Syncthing as installed', result.stderr)
+        self.assertFalse(any(call[:1] == ['loginctl'] or call[1:2] == ['loginctl'] for call in self.calls()))
+        self.assertFalse((self.root / 'home/.local/bin/groundwork-syncthing').exists())
+        self.assertFalse((self.root / 'home/.config/groundwork/omarchy.json').exists())
+
+    def test_old_syncthing_stops_setup_with_an_actionable_message(self):
+        self.env['FIXTURE_SYNCTHING_VERSION'] = 'syncthing v2.1.1 "x"'
+        result = self.run_install(success=False)
+        self.assertIn('older than 2.1.2', result.stderr)
+        self.assertFalse((self.root / 'home/Shared').exists())
 
 
 if __name__ == '__main__':

@@ -274,6 +274,18 @@ Omarchy keeps its own desktop, tmux file, shell, and Super keybindings. Practice
 | `git/config.local.example` | Placeholder for a name and email. Not applied |
 | `scripts/omarchy-plugins.py` | Applies the shared Omarchy shell-plugin list through `omarchy plugin` |
 | `omarchy-plugins.exclude.json` | Plugin ids this layer skips, each with a reason |
+| `scripts/groundwork-syncthing.py` | Syncthing as a user service on the tailnet, the `~/Shared` and FreeTube folders, and `groundwork syncthing-pair` |
+
+## Syncthing shared folders
+
+Setup installs pacman `syncthing`, enables lingering so this always-on Mac starts it at boot, and runs `systemctl --user enable --now syncthing.service` once Tailscale has an address. Syncthing listens only on localhost and the tailnet, with relays, discovery and NAT mapping off, and its GUI stays on `127.0.0.1:8384`. The shared folder is `~/Shared`; pairing is one command on each machine:
+
+```bash
+groundwork syncthing-pair show
+groundwork syncthing-pair add --device-id DEVICE_ID --name NAME --magicdns MAGICDNS
+```
+
+If Tailscale is not signed in yet, setup says Syncthing is waiting; rerun `groundwork-update` after `sudo tailscale up`. The contract is in [groundwork-core](https://github.com/jasondockery/groundwork-core/blob/main/docs/syncthing.md); the choices here and what is not done yet are in `docs/decisions/0013-syncthing-shared-folders.md`.
 
 ## Learn Omarchy's defaults
 
