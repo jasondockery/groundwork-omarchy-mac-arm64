@@ -16,6 +16,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 import uuid
 import zipfile
@@ -212,7 +213,7 @@ def group_alive(process):
     except PermissionError:
         print(f'Could not check the remaining processes started by {process.args[0]}; continuing.',
               file=sys.stderr, flush=True)
-        return False
+        return True
     return True
 
 
@@ -359,19 +360,34 @@ def page_size():
     return os.sysconf('SC_PAGESIZE')
 
 
+class HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urllib.parse.urlsplit(newurl).scheme != 'https':
+            raise UpdateError(f'Refusing a non-https redirect from {req.full_url}.')
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+https_opener = urllib.request.build_opener(HttpsOnlyRedirects)
+
+
 def fetch(url, deadline=60):
-    # urlopen's timeout bounds each socket operation, not the whole transfer.
     ends = time.monotonic() + deadline
     request = urllib.request.Request(url, headers={'User-Agent': 'groundwork-omarchy-updater'})
     chunks = []
-    with urllib.request.urlopen(request, timeout=min(deadline, 30)) as response:
-        while True:
-            if time.monotonic() > ends:
-                raise UpdateError(f'Downloading {url} exceeded {deadline} seconds.')
-            chunk = response.read(1 << 20)
-            if not chunk:
-                return b''.join(chunks)
-            chunks.append(chunk)
+    try:
+        with https_opener.open(request, timeout=min(deadline, 30)) as response:
+            # The response closes itself on the last byte.
+            while not response.isclosed():
+                # A socket timeout bounds one recv, not the transfer. Bound each
+                # read by the time left, so a stalled read cannot pass the deadline.
+                left = ends - time.monotonic()
+                if left <= 0:
+                    raise UpdateError(f'Downloading {url} exceeded {deadline} seconds.')
+                response.fp.raw._sock.settimeout(left)
+                chunks.append(response.read1(1 << 20))
+    except TimeoutError as error:
+        raise UpdateError(f'Downloading {url} exceeded {deadline} seconds.') from error
+    return b''.join(chunks)
 
 
 def reported_t3_version(reported):
