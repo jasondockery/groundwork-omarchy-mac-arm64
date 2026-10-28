@@ -36,6 +36,8 @@ BUN_PAGE_SIZE_ISSUE = 'oven-sh/bun#17627'
 BUN_PAGE_SIZE_URL = 'https://github.com/oven-sh/bun/issues/17627'
 BUN_LINUX_ARCHIVE = 'bun-linux-aarch64.zip'
 BLIP_ID = 'nixfred.blip'
+# Ids in declined_migrations: lowercase letters, digits, and hyphens.
+MIGRATION_ID_CHARACTERS = frozenset('abcdefghijklmnopqrstuvwxyz0123456789-')
 # Last nightly whose ELF files all load on 16 KiB pages (pingdotgg/t3code#23433).
 T3_KNOWN_GOOD_LARGE_PAGE = '0.1.2-nightly.20261021.3499'
 # A downloaded candidate must finish --version inside its temp directory.
@@ -129,9 +131,37 @@ def settings(required=True):
             or not isinstance(value.get('obsidian_vault'), str)
             or '\n' in value['obsidian_vault']
             or ('blip' in value and type(value['blip']) is not bool)
-            or ('local_inference' in value and type(value['local_inference']) is not bool)):
+            or ('local_inference' in value and type(value['local_inference']) is not bool)
+            or ('declined_migrations' in value and not valid_migration_ids(value['declined_migrations']))):
         raise UpdateError(f'Invalid updater settings in {CONFIG}; preserve and repair that file before updating.')
     return value
+
+
+def valid_migration_id(name):
+    return (isinstance(name, str) and 0 < len(name) <= 64 and name[0].isalnum()
+            and all(character in MIGRATION_ID_CHARACTERS for character in name))
+
+
+def valid_migration_ids(names):
+    return isinstance(names, list) and all(valid_migration_id(name) for name in names)
+
+
+def declined_migrations(value):
+    """Migration offers the person declined (decision 0014). Older setups have none."""
+    if value is None or 'declined_migrations' not in value:
+        return []
+    names = value['declined_migrations']
+    if not valid_migration_ids(names):
+        raise UpdateError(f'Invalid updater settings in {CONFIG}; preserve and repair that file before updating.')
+    return list(dict.fromkeys(names))
+
+
+def parse_declined_migrations(text):
+    """Comma-separated ids from apply-layer.sh. An empty string means none."""
+    names = [name for name in text.split(',') if name]
+    if not valid_migration_ids(names):
+        raise UpdateError('Declined migration ids must be lowercase letters, digits, and hyphens.')
+    return list(dict.fromkeys(names))
 
 
 def blip_enabled(value):
@@ -167,7 +197,7 @@ def validate_registration(source):
     return previous
 
 
-def register(source, keyd, screen_sharing, vault, blip='0', local_inference='0'):
+def register(source, keyd, screen_sharing, vault, blip='0', local_inference='0', declined=None):
     source = Path(source).resolve()
     previous = validate_registration(source)
     if blip not in ('0', '1'):
@@ -177,6 +207,13 @@ def register(source, keyd, screen_sharing, vault, blip='0', local_inference='0')
     value = dict(previous or {}, schema=1, source=str(source), keyd=keyd == '1',
                  screen_sharing=screen_sharing == '1', obsidian_vault=vault, blip=blip == '1',
                  local_inference=local_inference == '1')
+    # None keeps whatever was saved. apply-layer.sh always passes the full list.
+    if declined is not None:
+        names = parse_declined_migrations(declined)
+        if names:
+            value['declined_migrations'] = names
+        else:
+            value.pop('declined_migrations', None)
     if value['keyd']:
         value['keyd_sha256'] = hashlib.sha256((source / 'keyd/default.conf').read_bytes()).hexdigest()
     value.pop('pending_keyd', None)
@@ -1120,9 +1157,13 @@ def main(args):
         source, *options = args[1:]
         valid = {'--with-keyd', '--without-keyd', '--with-screen-sharing', '--without-screen-sharing',
                  '--with-blip', '--without-blip', '--with-local-inference', '--without-local-inference',
-                 '--update', '--help', '-h'}
+                 '--migrate-to-omarchy-installers', '--update', '--help', '-h'}
         if any(option not in valid for option in options):
             print('Unknown setup argument; nothing changed.', file=sys.stderr)
+            return 64
+        if {'--migrate-to-omarchy-installers', '--update'} <= set(options):
+            print('--migrate-to-omarchy-installers is a setup option. Run ./install.sh --migrate-to-omarchy-installers; nothing changed.',
+                  file=sys.stderr)
             return 64
         if ({'--with-keyd', '--without-keyd'} <= set(options)
                 or {'--with-screen-sharing', '--without-screen-sharing'} <= set(options)
@@ -1131,8 +1172,9 @@ def main(args):
             print('Choose only one option for each setup preference; nothing changed.', file=sys.stderr)
             return 64
         if '--help' in options or '-h' in options:
-            print('Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip] [--with-local-inference|--without-local-inference]')
+            print('Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip] [--with-local-inference|--without-local-inference] [--migrate-to-omarchy-installers]')
             print('Saved setup choices are reused. Explicit options change those choices.')
+            print('--migrate-to-omarchy-installers moves apps installed another way to Omarchy\'s own installer, even after an earlier no. See docs/decisions/0014-offer-migration-to-omarchy-installers.md.')
             print('Blip is off unless --with-blip is set. --without-blip leaves an existing Blip install unchanged.')
             print('Local inference is off unless --with-local-inference is set. --without-local-inference records that preference as off. See docs/local-inference.md for package and model removal.')
             return 0
@@ -1161,13 +1203,19 @@ def main(args):
     if args and args[0] == 'preferences' and len(args) == 2 and args[1] in ('setup', 'update'):
         value = settings(args[1] == 'update')
         if value:
-            print(f"{int(value['keyd'])}\n{int(value['screen_sharing'])}\n{value['obsidian_vault']}\n{int(blip_enabled(value))}\n{int(local_inference_enabled(value))}")
+            lines = [int(value['keyd']), int(value['screen_sharing']), value['obsidian_vault'],
+                     int(blip_enabled(value)), int(local_inference_enabled(value))]
+            # A sixth line only when an offer was declined, so older readers see five.
+            declined = declined_migrations(value)
+            if declined:
+                lines.append(','.join(declined))
+            print('\n'.join(str(line) for line in lines))
         return 0
-    if args and args[0] == 'register' and len(args) in (5, 6, 7) and args[2] in ('0', '1') and args[3] in ('0', '1'):
+    if args and args[0] == 'register' and len(args) in (5, 6, 7, 8) and args[2] in ('0', '1') and args[3] in ('0', '1'):
         if len(args) >= 6 and args[5] not in ('0', '1'):
             print('Invalid Blip choice; nothing changed.', file=sys.stderr)
             return 64
-        if len(args) == 7 and args[6] not in ('0', '1'):
+        if len(args) >= 7 and args[6] not in ('0', '1'):
             print('Invalid local inference choice; nothing changed.', file=sys.stderr)
             return 64
         register(*args[1:])

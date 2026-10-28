@@ -190,8 +190,16 @@ elif name == 'flatpak':
         'com.bitwarden.desktop': root / 'bitwarden-flatpak',
         'io.freetubeapp.FreeTube': root / 'freetube-flatpak',
     }.get(app)
+    if args[:1] == ['ps']:
+        print(os.environ.get('FIXTURE_FLATPAK_RUNNING', ''))
+        sys.exit(0)
     if 'info' in args:
         sys.exit(0 if marker is not None and marker.exists() else 1)
+    if 'uninstall' in args:
+        status = int(os.environ.get('FIXTURE_FLATPAK_UNINSTALL_STATUS', '0'))
+        if not status and marker is not None and marker.exists():
+            marker.unlink()
+        sys.exit(status)
     if 'install' in args:
         status_var = 'FIXTURE_FREETUBE_FLATPAK_STATUS' if app == 'io.freetubeapp.FreeTube' else 'FIXTURE_FLATPAK_STATUS'
         status = int(os.environ.get(status_var, '0'))
@@ -201,6 +209,11 @@ elif name == 'flatpak':
 elif name == 'syncthing':
     if args == ['--version']:
         print(os.environ.get('FIXTURE_SYNCTHING_VERSION', 'syncthing v2.1.7 "Hafnium Hornet" (go1.25.1 linux-arm64) builder 2026-10-20'))
+elif name == 'pacman':
+    # Read-only sync database lookup: FIXTURE_FEED lists packages the feed has.
+    if args[:1] == ['-Si'] and len(args) == 2:
+        sys.exit(0 if args[1] in os.environ.get('FIXTURE_FEED', '').split() else 1)
+    raise SystemExit('Unexpected pacman command: ' + repr(args))
 elif name == 'systemctl':
     if args[:1] == ['--user'] and args[-1:] == ['syncthing.service'] and 'is-active' in args:
         # Not serving yet unless a test says otherwise.
