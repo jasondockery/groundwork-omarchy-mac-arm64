@@ -617,7 +617,10 @@ done < <(find "$pkg" -type f -print0)
 stow --dir "$root/packages" --target "$HOME" --no-folding hypr
 
 if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
-  hyprctl reload
+  if ! reload_output=$(hyprctl reload); then
+    printf '%s\n' "$reload_output" >&2
+    exit 1
+  fi
   config_errors=$(hyprctl configerrors)
   if [[ -n $config_errors ]]; then
     printf 'Hyprland reports configuration errors after reload:\n%s\n' "$config_errors" >&2
