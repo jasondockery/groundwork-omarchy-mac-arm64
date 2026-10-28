@@ -12,17 +12,17 @@ Omarchy owns the live keymap on this machine. This repo leaves it in place. Prac
 | `Super+Ctrl+K` | Show Herdr bindings |
 | `Super+Alt+Return` | Open tmux |
 | `Super+Ctrl+Return` | Open Herdr |
-| `Super+Arrow` | Focus the tiled window in that direction |
-| `Super+Shift+Arrow` | Swap the current tile in that direction |
+| `Super+Arrow` | Focus the window in that direction, crossing to the monitor on that side at the screen edge |
+| `Super+Shift+Arrow` | Swap the current window with the one in that direction, including one on the monitor on that side |
 | `Alt+Tab` / `Alt+Shift+Tab` | Next/previous window on this workspace |
 | `Super+Tab` / `Super+Shift+Tab` | Next/previous workspace on this monitor |
-| `Super+1` through `Super+9` | Select workspace on this monitor |
+| `Super+1` through `Super+9`, and `Super+0` for workspace 10 | Select workspace on this monitor |
 | `Super+Shift+1` through `Super+Shift+9` | Move the current window to that workspace on this monitor |
 | `Super+Shift+O` | Open Obsidian |
 
 Stock directional desktop navigation uses arrows. To cycle without reaching for them, use `Alt+Tab` for windows or `Super+Tab` for workspaces. `Super+H/J/K/L` is not a stock directional keymap: `Super+K` already opens help and `Super+L` cycles the workspace between dwindle tiling, scrolling, and floating. This layer preserves those bindings. On Apple keyboards attached to this machine, `Super` is Command and `Alt` is Option.
 
-Omarchy 4.5 gives every monitor its own workspaces 1 through 10, so the workspace keys above act on the monitor you are using. With one display they behave as before. It also moved several shortcuts you may have learned on 4.0: Calculator is `Super+Shift+Q`, Activity is `Super+Shift+T`, Network is `Super+Ctrl+N`, themes are `Super+Ctrl+T`, and backgrounds are `Super+Ctrl+W`. `Super+Comma` now acts on the newest notification instead of only dismissing it. In a terminal, `Super+C` and `Super+V` send `Ctrl+Shift+C` and `Ctrl+Shift+V`. Press `Super+K` for the list your installed build actually has.
+Omarchy 4.5 gives every monitor its own workspaces 1 through 10, so the workspace keys above act on the monitor you are using. With one display they behave as before. It also moved shortcuts you may have learned on 4.0: Calculator is `Super+Shift+Q`, Activity is `Super+Shift+T`, Network is `Super+Ctrl+N`, themes are `Super+Ctrl+T`, backgrounds are `Super+Ctrl+W`, and `Super+Alt+Space` opens Apps from the dock. Night Light no longer has a shortcut. For notifications, `Super+Comma` acts on the newest one instead of only dismissing it, `Super+Alt+Comma` dismisses the last one, `Super+Ctrl+Comma` hands you keyboard control of them, and silencing moved to `Super+Ctrl+Alt+Comma`. In a terminal, `Super+C` and `Super+V` send `Ctrl+Shift+C` and `Ctrl+Shift+V`. Edge builds can still report a 4.0-style version string, so press `Super+K` for the list your installed build actually has.
 
 ## Apple Screen Sharing
 
@@ -31,7 +31,7 @@ Apple's Screen Sharing app sends Command as Alt and Option as Super. That mappin
 | From Screen Sharing | Action |
 |---|---|
 | `Command+1` through `Command+9` | Select workspace on this monitor |
-| `Command+Shift+1` through `Command+Shift+9` | Move the current window to that workspace |
+| `Command+Shift+1` through `Command+Shift+9` | Move the current window to that workspace on this monitor |
 | `Command+Tab` / `Command+Shift+Tab` | Next/previous workspace on this monitor |
 | `Option+Tab` / `Option+Shift+Tab` | Next/previous window on this workspace |
 | `Command+Minus` | Expand the window left |
