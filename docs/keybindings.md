@@ -12,15 +12,17 @@ Omarchy owns the live keymap on this machine. This repo leaves it in place. Prac
 | `Super+Ctrl+K` | Show Herdr bindings |
 | `Super+Alt+Return` | Open tmux |
 | `Super+Ctrl+Return` | Open Herdr |
-| `Super+Arrow` | Focus the tiled window in that direction |
-| `Super+Shift+Arrow` | Swap the current tile in that direction |
+| `Super+Arrow` | Focus the window in that direction, crossing to the monitor on that side at the screen edge |
+| `Super+Shift+Arrow` | Swap the current window with the one in that direction, including one on the monitor on that side |
 | `Alt+Tab` / `Alt+Shift+Tab` | Next/previous window on this workspace |
-| `Super+Tab` / `Super+Shift+Tab` | Next/previous workspace |
-| `Super+1` through `Super+9` | Select workspace |
-| `Super+Shift+1` through `Super+Shift+9` | Move the current window to that workspace |
+| `Super+Tab` / `Super+Shift+Tab` | Next/previous workspace on this monitor |
+| `Super+1` through `Super+0` | Select workspace on this monitor (`Super+0` is workspace 10) |
+| `Super+Shift+1` through `Super+Shift+0` | Move the current window to that workspace on this monitor |
 | `Super+Shift+O` | Open Obsidian |
 
-Stock directional desktop navigation uses arrows. To cycle without reaching for them, use `Alt+Tab` for windows or `Super+Tab` for workspaces. `Super+H/J/K/L` is not a stock directional keymap: `Super+K` already opens help and `Super+L` cycles layouts. This layer preserves those bindings. On Apple keyboards attached to this machine, `Super` is Command and `Alt` is Option.
+Stock directional desktop navigation uses arrows. To cycle without reaching for them, use `Alt+Tab` for windows or `Super+Tab` for workspaces. `Super+H/J/K/L` is not a stock directional keymap: `Super+K` already opens help and `Super+L` cycles the workspace between dwindle tiling, scrolling, and floating. This layer preserves those bindings. On Apple keyboards attached to this machine, `Super` is Command and `Alt` is Option.
+
+Omarchy 4.5 gives every monitor its own workspaces 1 through 10, so the workspace keys above act on the monitor you are using, as do `Super+Ctrl+Tab` (former workspace) and `Super` with the scroll wheel. With one display they behave as before. It also moved shortcuts you may have learned on 4.0: Calculator is `Super+Shift+Q`, Activity is `Super+Shift+T`, Network is `Super+Ctrl+N`, themes are `Super+Ctrl+T`, backgrounds are `Super+Ctrl+W`, and `Super+Alt+Space` opens Apps from the dock. Night Light no longer has a shortcut. For notifications, `Super+Comma` acts on the newest one instead of only dismissing it, `Super+Alt+Comma` dismisses the last one, `Super+Ctrl+Comma` hands you keyboard control of them, and silencing moved to `Super+Ctrl+Alt+Comma`. In a terminal, `Super+C` and `Super+V` send `Ctrl+Shift+C` and `Ctrl+Shift+V`. Edge builds can still report a 4.0-style version string, so press `Super+K` for the list your installed build actually has.
 
 ## Apple Screen Sharing
 
@@ -28,9 +30,9 @@ Apple's Screen Sharing app sends Command as Alt and Option as Super. That mappin
 
 | From Screen Sharing | Action |
 |---|---|
-| `Command+1` through `Command+9` | Select workspace |
-| `Command+Shift+1` through `Command+Shift+9` | Move the current window to that workspace |
-| `Command+Tab` / `Command+Shift+Tab` | Next/previous workspace |
+| `Command+1` through `Command+9` | Select workspace on the focused monitor |
+| `Command+Shift+1` through `Command+Shift+9` | Move the current window to that workspace on the focused monitor |
+| `Command+Tab` / `Command+Shift+Tab` | Next/previous workspace on the focused monitor |
 | `Option+Tab` / `Option+Shift+Tab` | Next/previous window on this workspace |
 | `Command+Minus` | Expand the window left |
 | `Command+Equal` | Shrink the window left |
@@ -75,4 +77,4 @@ Try one short loop: launch Herdr, split below and beside, focus each pane, renam
 
 The [original Groundwork curriculum](https://jasondockery.github.io/groundwork/) remains available for shell, Git, and agent-supervision practice. Its older keymap is not the keymap installed here. Mac/Linux/Windows parity and migration work are separate from this native Omarchy setup.
 
-References: [Omarchy hotkeys](https://github.com/omacom/omarchy/blob/quattro/manual/07-hotkeys.md), [Omarchy tmux config](https://github.com/omacom/omarchy/blob/quattro/config/tmux/tmux.conf), [Omarchy Herdr config](https://github.com/omacom/omarchy/blob/quattro/config/herdr/config.toml), and [T3 Code keybindings](https://github.com/pingdotgg/t3code/blob/main/docs/user/keybindings.md). Bindings reviewed on 2026-10-18; `omarchy update` owns future changes.
+References: [Omarchy hotkeys](https://github.com/omacom/omarchy/blob/quattro/manual/07-hotkeys.md), [Omarchy tmux config](https://github.com/omacom/omarchy/blob/quattro/config/tmux/tmux.conf), [Omarchy Herdr config](https://github.com/omacom/omarchy/blob/quattro/config/herdr/config.toml), and [T3 Code keybindings](https://github.com/pingdotgg/t3code/blob/main/docs/user/keybindings.md). Bindings reviewed on 2026-10-28 against Omarchy v4.5.0-rc2 (a release candidate; the installed edge build may differ), whose release notes list the moved shortcuts. `omarchy update` owns future changes.
