@@ -1056,10 +1056,11 @@ def apply_plugins(updating):
             if command_failed(outcome):
                 say(f'Omarchy plugin {plugin_id} remove failed: {failure_text(outcome)}.')
                 continue
-        if not restore_replaced(recorded, states, listing):
+        if not restore_replaced(record, recorded, states, listing):
             continue
         record['plugins'].pop(plugin_id, None)
         save_record(record)
+    restore_dropped(record, selected, retired_ids, states, listing, deferred, shell_up)
     already_noticed = set(record.get('noticedRetired', []))
     pending_notice = []
     for item in document['retired']:
@@ -1124,13 +1125,15 @@ def apply_builtin(record, item, states):
     return enabled
 
 
-def restore_replaced(recorded, states, listing):
-    """Turn a retired plugin's replaced ids back on when the shell lists them off.
+def restore_replaced(record, recorded, states, listing, ids=None, reason='its replacement was retired'):
+    """Turn replaced ids back on, in their old slots, when the shell lists them off.
 
-    True when nothing is left to restore. Needs a listing; the caller defers
+    `ids` limits the work to some of the recorded ids. Each handled id is pruned
+    from the record at once, so an interruption keeps only what is left to do.
+    True when every id was handled; needs a listing, and the caller defers
     when there is none.
     """
-    replaced = recorded.get('replaced')
+    replaced = [other for other in recorded.get('replaced', []) if ids is None or other in ids]
     if not replaced:
         return True
     known = states()
@@ -1140,8 +1143,10 @@ def restore_replaced(recorded, states, listing):
     slots = {slot['id']: slot for slot in recorded.get('replacedAt', [])}
     # Widgets without a slot first; slotted ones in reverse capture order, so
     # each index meets the layout it was measured against.
-    order = [other for other in replaced if other not in slots] + [slot['id'] for slot in reversed(recorded.get('replacedAt', []))]
+    order = [other for other in replaced if other not in slots]
+    order += [slot['id'] for slot in reversed(recorded.get('replacedAt', [])) if slot['id'] in replaced]
     for other in order:
+        # A widget the user turned back on, or one the shell no longer lists, is only pruned.
         if other in known and not known[other][0]:
             command = ['plugin', 'enable', other]
             if other in slots:
@@ -1152,8 +1157,39 @@ def restore_replaced(recorded, states, listing):
                 say(f'Omarchy plugin {other} enable failed: {failure_text(outcome)}.')
                 ok = False
                 continue
-            say(f'Omarchy plugin {other} was enabled again; its replacement was retired.')
+            say(f'Omarchy plugin {other} was enabled again; {reason}.')
+        prune_replaced(record, recorded, other)
     return ok
+
+
+def prune_replaced(record, recorded, plugin_id):
+    remaining = [other for other in recorded.get('replaced', []) if other != plugin_id]
+    slots = [slot for slot in recorded.get('replacedAt', []) if slot['id'] != plugin_id]
+    for key, value in (('replaced', remaining), ('replacedAt', slots)):
+        if value:
+            recorded[key] = value
+        else:
+            recorded.pop(key, None)
+    save_record(record)
+
+
+def restore_dropped(record, selected, retired_ids, states, listing, deferred, shell_up):
+    """Undo swaps the current list no longer asks for.
+
+    Covers an entry that drops a replaced id, an entry that left the list
+    without being retired, and a replacing plugin the user excluded. An id
+    that another listed entry still replaces is left alone.
+    """
+    wanted = {other for item in selected if item['id'] not in retired_ids for other in item.get('replaces', [])}
+    for plugin_id, recorded in list(record['plugins'].items()):
+        if plugin_id in retired_ids or not recorded.get('replaced'):
+            continue
+        stale = {other for other in recorded['replaced'] if other not in wanted}
+        if not stale:
+            continue
+        if not shell_up() or not restore_replaced(record, recorded, states, listing, stale,
+                                                   'the list no longer replaces it'):
+            deferred.append(plugin_id)
 
 
 def apply_replacements(record, item, states, exclusions):
