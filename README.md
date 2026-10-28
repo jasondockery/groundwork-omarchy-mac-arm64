@@ -51,7 +51,7 @@ Only enable SSH after reviewing that guide and your effective tailnet policy. No
 - `Super+Space` opens the Omarchy menu; `Super+K` shows desktop bindings. Launch tmux with `Super+Alt+Return` and Herdr with `Super+Ctrl+Return`. In either, use `Ctrl+Space`, then `?` for live help, and practice the [same pane keys](docs/keybindings.md).
 - Check that `t3 --version` identifies a Nightly build, then run `t3`, open its local interface, authenticate a provider already installed on this machine, and complete one small task in a disposable project. Installing the UI does not authenticate Codex or Claude.
 - Open Obsidian with `Super+Shift+O` and select the local vault printed by setup. A new vault has Vim mode enabled; existing settings are preserved. Verify your notes and the chosen sync path using the [apps guide](docs/apps.md).
-- Launch Bitwarden from the app menu and finish sign-in/MFA. Restart Chromium to load the registered official extension, approve/enable it if prompted in each profile, and test autofill. `bw --version` checks CLI availability; it does not prove vault sign-in. User Flatpak updates use `flatpak --user update` separately from Omarchy updates.
+- Launch Bitwarden from the app menu and finish sign-in/MFA. Restart Chromium to load the registered official extension, approve/enable it if prompted in each profile, and test autofill. `bw --version` checks CLI availability; it does not prove vault sign-in. A new install uses Omarchy's `bitwarden` package when the feed has it, and otherwise the user Flatpak. User Flatpak updates use `flatpak --user update` separately from Omarchy updates.
 - Launch FreeTube from the app menu. It opens with upstream defaults. Subscriptions and history stay in `~/.var/app/io.freetubeapp.FreeTube/config/FreeTube`. See the [apps guide](docs/apps.md).
 - From another approved computer in the same tailnet, run `ssh LOCAL_USER@MACHINE` using this machine's local login and MagicDNS name. Confirm the hostname and attach to tmux or Herdr. Test the reverse direction too using the destination's supported SSH setup.
 - From a Mac, connect to `vnc://MACHINE` with the generated local VNC password. Verify the screen and input, including after logout/login or reboot. Command+1 selects a workspace, and Option+1 selects a multiplexer window. Tailscale visibility alone does not prove a desktop server is running or permitted by policy.
@@ -119,6 +119,17 @@ the settings. Use `./install.sh` with explicit `--with-keyd`, `--without-keyd`,
 `--without-blip`, `--with-local-inference`, or `--without-local-inference`
 when changing those preferences. Skipping an existing feature
 does not disable its service or remove Blip.
+
+When an app this layer manages was installed another way than Omarchy's own
+installer, and Omarchy has one, setup offers to move it and never forces it
+([decision 0014](docs/decisions/0014-offer-migration-to-omarchy-installers.md)).
+Today that is a Bitwarden user Flatpak once the feed has the `bitwarden`
+package. `./install.sh` in a terminal asks `[y/N]` and saves a no with the
+setup choices. `groundwork-update`, `update-all`, and runs without a terminal
+print one line naming the current and preferred methods. Run
+`./install.sh --migrate-to-omarchy-installers` to migrate without a prompt,
+including after an earlier no. App data is kept; see the
+[apps guide](docs/apps.md#moving-from-the-flatpak-to-omarchys-package).
 
 Routine updates ask for your password only when a system change is needed, for
 example a stopped `tailscaled` or keyd service, a changed keyd config, or a
@@ -382,6 +393,6 @@ For a macOS machine, Groundwork recommends Colima plus the Docker CLI. The singl
 
 ## Coding agents and desktop apps
 
-Setup preserves existing Codex, Claude Code, Grok Build, and OpenCode commands. A missing provider is installed through Omarchy’s declared mise tool, with a five-minute deadline; setup verifies that the command becomes available and stops on failure. Omarchy continues to own provider versions, updates, shortcuts, and default-agent selection. It also owns multiple subscriptions (Omarchy 4.5 and later; if the command is missing, update Omarchy first): add a second Claude or Codex account with `omarchy agent account add claude Work` (or `codex`), switch with `omarchy agent account use work`, and list accounts with `omarchy agent account list`. This layer adds no account aliases or separate config folders. Run `omarchy update` through its supported workflow before setup to get current upstream declarations. When `cursor` is missing, setup runs Omarchy’s `omarchy-install-cursor` on older Omarchy Mac builds, which may open Cursor once. Current Omarchy has no such command, so setup adds the `cursor-bin` package that Omarchy’s Install menu uses, without launching it. An existing `cursor` command is not replaced and is not launched again. If `~/.config/Cursor/argv.json` has no `password-store`, setup adds `gnome-libsecret` and preserves every other key; a password store that is already set is left as written. Sign-in stays local.
+Setup preserves existing Codex, Claude Code, Grok Build, and OpenCode commands. A missing provider is installed through Omarchy’s declared mise tool, with a five-minute deadline; setup verifies that the command becomes available and stops on failure. Omarchy continues to own provider versions, updates, shortcuts, and default-agent selection. It also owns multiple subscriptions (Omarchy 4.5 and later; if the command is missing, update Omarchy first): add a second Claude or Codex account with `omarchy agent account add claude Work` (or `codex`), switch with `omarchy agent account use work`, and list accounts with `omarchy agent account list`. This layer adds no account aliases or separate config folders. Run `omarchy update` through its supported workflow before setup to get current upstream declarations. When `cursor` is missing, setup runs Omarchy’s `omarchy-install-cursor` on older Omarchy Mac builds, which may open Cursor once. Current Omarchy has no such command, so setup adds the `cursor-bin` package that Omarchy’s Install menu uses, without launching it. An existing `cursor` command is not replaced and is not launched again. If `~/.config/Cursor/argv.json` has no `password-store`, setup adds `gnome-libsecret` and preserves every other key; a password store that is already set is left as written. No migration is offered for an existing Cursor: on current Omarchy the `cursor-bin` package is Omarchy's own method. Sign-in stays local.
 
 ChatGPT and Claude have no official native Linux desktop app in this setup. Use their web apps on Omarchy; this repo does not install unofficial replacements. Tailscale remains a required native package and service, with interactive tailnet enrollment. Authentication and live desktop acceptance are separate from package fixtures.

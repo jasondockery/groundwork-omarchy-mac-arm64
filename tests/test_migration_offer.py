@@ -19,7 +19,7 @@ FLATPAK_INSTALL = ['flatpak', '--user', 'install', '--noninteractive', 'flathub'
 NATIVE_ADD = ['omarchy', 'pkg', 'add', 'bitwarden']
 PROMPT = b'Migrate Bitwarden desktop now? [y/N] '
 
-# Answers each [y/N] prompt in turn. "EOF" sends Ctrl+D at an empty line.
+# Answers each [y/N] prompt in turn. "EOF" sends Ctrl+D at an empty line; "INT" sends Ctrl+C.
 PTY_HELPER = r"""
 import json, os, pty, select, sys, time
 answers = json.loads(sys.argv[1])
@@ -46,7 +46,8 @@ while True:
         while output.count(b"[y/N] ") > seen:
             seen += 1
             answer = answers.pop(0) if answers else "EOF"
-            os.write(master, b"\x04" if answer == "EOF" else answer.encode() + b"\n")
+            special = {"EOF": b"\x04", "INT": b"\x03"}
+            os.write(master, special.get(answer, answer.encode() + b"\n"))
     waited, candidate = os.waitpid(pid, os.WNOHANG)
     if waited == pid:
         status = candidate
@@ -240,6 +241,18 @@ class MigrationOfferTests(unittest.TestCase):
         self.seed_bitwarden_flatpak()
         output = self.run_in_terminal(['EOF'])
         self.assertIn('Setup asks again next time', output)
+        self.assert_not_migrated()
+        self.assertNotIn('declined_migrations', self.saved())
+
+    def test_interrupt_at_the_prompt_stops_without_migrating_or_remembering(self):
+        self.feed_has_native_bitwarden()
+        self.seed_bitwarden_flatpak()
+        # Saved setup exists, so the interrupt cannot pass for a first-run failure.
+        self.run_install()
+        self.reset_calls()
+        output = self.run_in_terminal(['INT'], success=False)
+        self.assertIn('[y/N]', output)
+        self.assertIn('Update cancelled', output)
         self.assert_not_migrated()
         self.assertNotIn('declined_migrations', self.saved())
 

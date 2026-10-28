@@ -4,9 +4,21 @@
 
 ## Bitwarden
 
-Keep your existing Bitwarden account. No export or password-manager migration is needed. The [Omarchy manual](https://github.com/omacom/omarchy/blob/quattro/manual/24-commercial-apps-services.md#bitwarden) includes Bitwarden as a supported service. The current Apple Silicon feed has `bitwarden-cli` but lacks the native desktop package, so this layer uses the [Flathub desktop app](https://flathub.org/apps/com.bitwarden.desktop), which lists aarch64 support. An existing native `bitwarden` executable is reused instead. Package availability was checked on 2026-10-18; reconsider the fallback when the upstream ARM feed gains a desktop package.
+Keep your existing Bitwarden account. No export or password-manager migration is needed. The [Omarchy manual](https://github.com/omacom/omarchy/blob/quattro/manual/24-commercial-apps-services.md#bitwarden) includes Bitwarden as a supported service, and Omarchy's Install → Service → Bitwarden adds the `bitwarden` and `bitwarden-cli` packages. The Apple Silicon feed lacked the desktop package on 2026-10-18. On 2026-10-28, `pacman -Si bitwarden` showed `omarchy/bitwarden 2026.10.1-1` for aarch64.
 
-Launch **Bitwarden** from `Super+Space`, or run `flatpak run com.bitwarden.desktop` for the Flatpak installation. Sign in to the right region/server, finish MFA, and choose your vault timeout and lock behavior. Keep the extension's own unlock flow; desktop biometric integration is not assumed for this sandboxed build. The CLI is optional for daily use; authenticate it only when needed and never save its session token in the repo or shell startup files.
+A new install runs `omarchy pkg add bitwarden` when `pacman -Si bitwarden` finds the package. Otherwise it installs the [Flathub desktop app](https://flathub.org/apps/com.bitwarden.desktop), which lists aarch64 support. An existing native `bitwarden` executable is reused.
+
+### Moving from the Flatpak to Omarchy's package
+
+If the user Flatpak `com.bitwarden.desktop` is installed and the package is available, setup offers the move and never forces it ([decision 0014](decisions/0014-offer-migration-to-omarchy-installers.md)). `./install.sh` in a terminal asks `[y/N]`. `groundwork-update`, `update-all`, and runs without a terminal print one line instead. A no is saved and not asked again. To move later, or after a no, run:
+
+```bash
+./install.sh --migrate-to-omarchy-installers
+```
+
+Quit Bitwarden first; the move is refused while the Flatpak is running. It installs `bitwarden` unless it is already installed, then runs `flatpak --user uninstall com.bitwarden.desktop` without `--delete-data`. The Flatpak's local data in `~/.var/app/com.bitwarden.desktop` stays, and only one launcher entry remains. Your vault is in your Bitwarden account: sign in again in the native app, choose the same region or server, and set your vault timeout again. Desktop settings do not carry over. To go back, run `flatpak --user install flathub com.bitwarden.desktop` and then `omarchy pkg drop bitwarden`. Remove the old data directory only after the native app works.
+
+Launch **Bitwarden** from `Super+Space`. For a Flatpak installation, `flatpak run com.bitwarden.desktop` also works. Sign in to the right region/server, finish MFA, and choose your vault timeout and lock behavior. Keep the extension's own unlock flow; desktop biometric integration is not assumed for either build. The CLI is optional for daily use; authenticate it only when needed and never save its session token in the repo or shell startup files.
 
 ### Chromium extension
 
@@ -26,7 +38,7 @@ flatpak --user update
 
 Rerunning this layer reuses an installed desktop app. If its installation fails, resolve that error and rerun; the installer stops before changing input settings. If its launcher is missing immediately after installing Flatpak for the first time, log out and back in to refresh desktop application discovery.
 
-To remove the layer-installed Flatpak, use `flatpak --user uninstall com.bitwarden.desktop`. Keep its local data unless you deliberately choose to remove it after checking account recovery. The shared Flathub remote and Flatpak runtime may serve other apps; leave those in place. Native apps and browser extensions are removed through their own package/browser controls.
+To remove a layer-installed Bitwarden Flatpak, use `flatpak --user uninstall com.bitwarden.desktop`. Keep its local data unless you deliberately choose to remove it after checking account recovery. The shared Flathub remote and Flatpak runtime may serve other apps; leave those in place. Native apps and browser extensions are removed through their own package/browser controls.
 
 ## FreeTube
 
