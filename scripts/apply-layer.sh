@@ -321,8 +321,9 @@ install_package() {
     exit 1
   fi
 }
-# Omarchy Mac's installer owns Cursor on Apple Silicon, including the GNOME
-# keyring password store. An existing cursor command stays put. This only fills
+# Omarchy owns Cursor. Older Omarchy Mac builds ship omarchy-install-cursor;
+# current Omarchy installs the cursor-bin package. An existing cursor command
+# stays put. This only fills
 # a missing password-store key and never replaces a value already written.
 ensure_cursor_password_store() {
   python3 - "$HOME/.config/Cursor/argv.json" <<'PY'
@@ -408,15 +409,16 @@ PY
 install_cursor() {
   if ! command -v cursor >/dev/null; then
     if ! command -v omarchy-install-cursor >/dev/null; then
-      echo "Omarchy's Cursor installer, omarchy-install-cursor, is unavailable and cursor is not installed." >&2
-      echo "Update Omarchy, then rerun ./install.sh." >&2
-      exit 1
-    fi
-    omarchy-install-cursor
-    hash -r
-    if ! command -v cursor >/dev/null; then
-      echo "omarchy-install-cursor did not provide a cursor command." >&2
-      exit 1
+      # Since Omarchy Mac converged into upstream (omacom/omarchy#14431), the
+      # Install menu adds cursor-bin; the password store is filled in below.
+      install_package cursor-bin cursor
+    else
+      omarchy-install-cursor
+      hash -r
+      if ! command -v cursor >/dev/null; then
+        echo "omarchy-install-cursor did not provide a cursor command." >&2
+        exit 1
+      fi
     fi
   fi
   ensure_cursor_password_store
