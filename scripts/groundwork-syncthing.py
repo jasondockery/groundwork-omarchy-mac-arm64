@@ -542,6 +542,9 @@ def separate_freetube_from_parent(api):
                              'from it, so nothing leaks. Pause Shared in the GUI (127.0.0.1:8384), rerun groundwork-update, '
                              'then resume it.') from None
     # The reset restarts Syncthing and rescans. An empty browse before then proves nothing.
+    # The restart wait is advisory: its result is discarded because /FreeTube is already the
+    # first ignore pattern, so a reset that does not restart (startTime unchanged) is tolerated
+    # and the idle wait and the second browse are the checks that decide.
     wait_for(lambda: restarted_since(api, started), 30, pause=1)
     wait_for_api(api)
     if not wait_for(lambda: folder_idle(api), 180, pause=1):
