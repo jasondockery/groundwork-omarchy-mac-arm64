@@ -862,7 +862,14 @@ def enable_command(item):
 
 
 def drop_record(record, plugin_id):
-    if plugin_id not in record['plugins']:
+    """Forget a checkout this layer added, unless its record holds replaced ids.
+
+    This layer never gives replaced ids to a record that still waits for
+    enable, but an earlier applier could. Such a record stays until
+    restore_dropped restores or hands over its ids, so no widget loses its owner.
+    """
+    current = record['plugins'].get(plugin_id)
+    if current is None or current.get('replaced'):
         return
     record['plugins'].pop(plugin_id, None)
     save_record(record)
@@ -1066,14 +1073,14 @@ def apply_plugins(updating):
             if command_failed(outcome):
                 say(f'Omarchy plugin {plugin_id} remove failed: {failure_text(outcome)}.')
                 continue
-        outcome = restore_replaced(record, plugin_id, states, listing, claims) if recorded.get('replaced') else DONE
+        outcome = restore_replaced(record, plugin_id, states, listing, claims, exclusions) if recorded.get('replaced') else DONE
         if outcome != DONE:
             if outcome == DEFERRED:
                 deferred.append(plugin_id)
             continue
         record['plugins'].pop(plugin_id, None)
         save_record(record)
-    restore_dropped(record, claims, retired_ids, states, listing, deferred, shell_up)
+    restore_dropped(record, claims, retired_ids, exclusions, states, listing, deferred, shell_up)
     already_noticed = set(record.get('noticedRetired', []))
     pending_notice = []
     for item in document['retired']:
@@ -1150,13 +1157,39 @@ def listing_ready(known):
     return known is not None and any(first_party for _enabled, first_party in known.values())
 
 
-def best_slot(record, plugin_id, owner_id):
-    """The stored slot for an id, preferring the owner's own record."""
-    for holder in [owner_id, *sorted(record['plugins'])]:
-        for slot in record['plugins'].get(holder, {}).get('replacedAt', []):
-            if slot['id'] == plugin_id:
-                return slot
-    return None
+def applied(record, plugin_id):
+    """True when this layer recorded plugin_id and its enable finished."""
+    held = record['plugins'].get(plugin_id)
+    return held is not None and not held.get('enablePending')
+
+
+def takes_over(record, plugin_id, other, known, exclusions):
+    """True when plugin_id would disable `other` itself now, so it may hold that swap.
+
+    The same test apply_replacements makes: an applied record, listed on by the
+    shell, for an id the user has not excluded.
+    """
+    return applied(record, plugin_id) and other not in exclusions and known.get(plugin_id, (False, False))[0]
+
+
+def restore_order(record, owner_id, ids):
+    """(id, slot) pairs to undo, slotted ids first and then the rest.
+
+    A slot comes from the owner's record, else from another record that keeps
+    one (only a record an earlier applier wrote holds an id twice). Each
+    record's slots go in reverse capture order, so every index meets the layout
+    it was measured against, and default placements come last so they cannot
+    shift an exact slot.
+    """
+    order = []
+    seen = set()
+    for holder in [owner_id, *sorted(holder for holder in record['plugins'] if holder != owner_id)]:
+        for slot in reversed(record['plugins'][holder].get('replacedAt', [])):
+            if slot['id'] in ids and slot['id'] not in seen:
+                seen.add(slot['id'])
+                order.append((slot['id'], slot))
+    order += [(other, None) for other in ids if other not in seen]
+    return order
 
 
 def prune_replaced(record, plugin_id, keep=None):
@@ -1183,14 +1216,16 @@ def hand_over(record, plugin_id, slot, target_id):
     prune_replaced(record, plugin_id, keep=target_id)
 
 
-def restore_replaced(record, owner_id, states, listing, claims, ids=None,
-                     reason='its replacement was retired', retiring=True):
-    """Undo the swaps one record holds: DONE, FAILED (an enable failed) or DEFERRED.
+def restore_replaced(record, owner_id, states, listing, claims, exclusions, ids=None,
+                     reason='its replacement was retired'):
+    """Undo the swaps one record lets go of: DONE, FAILED (an enable failed) or DEFERRED.
 
-    An id that another listed entry still replaces is not turned on: it moves to
-    that entry's record when it has one. Otherwise a retiring owner forgets it
-    and a live owner keeps it. Other ids are turned on again, in their stored
-    slots, when the shell lists them off, then pruned from every record. The
+    An id moves, with its slot, to another listed entry that takes it over (see
+    takes_over). Every other id is turned on again in its stored slot when the
+    shell lists it off, then pruned from every record, even when a listed entry
+    that has not applied yet replaces it: that entry has done nothing, and when
+    it applies it disables the widget once and measures the slot again. So no
+    widget this layer turned off is left without a record that holds it. The
     record is saved after each id, so an interruption keeps only what is left.
     """
     owner = record['plugins'][owner_id]
@@ -1201,20 +1236,11 @@ def restore_replaced(record, owner_id, states, listing, claims, ids=None,
     if not listing_ready(known):
         return DEFERRED
     status = DONE
-    slots = [slot['id'] for slot in owner.get('replacedAt', [])]
-    # Slotted widgets in reverse capture order, so each index meets the layout
-    # it was measured against; the rest go last, so default inserts cannot shift them.
-    order = [other for other in reversed(slots) if other in replaced]
-    order += [other for other in replaced if other not in order]
-    for other in order:
-        slot = best_slot(record, other, owner_id)
-        heirs = [claimant for claimant in claims.get(other, []) if claimant != owner_id]
+    for other, slot in restore_order(record, owner_id, replaced):
+        heirs = [claimant for claimant in claims.get(other, [])
+                 if claimant != owner_id and takes_over(record, claimant, other, known, exclusions)]
         if heirs:
-            recorded_heirs = [claimant for claimant in heirs if claimant in record['plugins']]
-            if recorded_heirs:
-                hand_over(record, other, slot, recorded_heirs[0])
-            elif retiring:
-                prune_replaced(record, other)
+            hand_over(record, other, slot, heirs[0])
             continue
         # A widget the user turned back on, or one the shell no longer lists, is only pruned.
         if other in known and not known[other][0]:
@@ -1232,32 +1258,35 @@ def restore_replaced(record, owner_id, states, listing, claims, ids=None,
     return status
 
 
-def restore_dropped(record, claims, retired_ids, states, listing, deferred, shell_up):
-    """Undo swaps the current list no longer asks for.
+def restore_dropped(record, claims, retired_ids, exclusions, states, listing, deferred, shell_up):
+    """Undo swaps the current list no longer asks of the record that holds them.
 
     Covers an entry that drops a replaced id, an entry that left the list
     without being retired, a replacing plugin the user excluded, and one that
-    does not apply on this machine's architecture.
+    does not apply on this machine's architecture. A record still waiting for
+    enable never made a swap, so any id it holds (from an earlier applier) is
+    let go of too.
     """
     for plugin_id, recorded in list(record['plugins'].items()):
         if plugin_id in retired_ids or not recorded.get('replaced'):
             continue
-        stale = {other for other in recorded['replaced'] if plugin_id not in claims.get(other, [])}
+        stale = {other for other in recorded['replaced']
+                 if not applied(record, plugin_id) or plugin_id not in claims.get(other, [])}
         if not stale:
             continue
         if not shell_up():
             deferred.append(plugin_id)
             continue
-        if restore_replaced(record, plugin_id, states, listing, claims, stale,
-                            'the list no longer replaces it', retiring=False) == DEFERRED:
+        if restore_replaced(record, plugin_id, states, listing, claims, exclusions, stale,
+                            'the list no longer replaces it') == DEFERRED:
             deferred.append(plugin_id)
 
 
 def apply_replacements(record, item, states, exclusions):
     """Disable each plugin this entry replaces, once, after this layer enabled it."""
-    recorded = record['plugins'].get(item['id'])
-    if recorded is None or recorded.get('enablePending'):
+    if not applied(record, item['id']):
         return
+    recorded = record['plugins'][item['id']]
     done = set(recorded.get('replaced', []))
     due = [other for other in item['replaces'] if other not in done]
     if not due:
@@ -1269,6 +1298,11 @@ def apply_replacements(record, item, states, exclusions):
     placed = list(recorded.get('replacedAt', []))
     for other in due:
         if other in exclusions:
+            continue
+        # An id another record holds stays there, even after the user turned it
+        # back on, so each swap has one owner; it moves here only if that record lets go.
+        if any(other in holder.get('replaced', []) for holder_id, holder in record['plugins'].items()
+               if holder_id != item['id']):
             continue
         if known.get(other, (False, False))[0]:
             slot = bar_slot(other)
@@ -1287,10 +1321,8 @@ def apply_replacements(record, item, states, exclusions):
                 recorded['replacedAt'] = placed
             save_record(record)
             continue
-        # An id another record already holds stays there; it moves here if that record lets go.
-        if any(other in holder.get('replaced', []) for holder_id, holder in record['plugins'].items()
-               if holder_id != item['id']):
-            continue
+        # Off or unlisted, and held by no record: hold it, so the swap is not
+        # repeated and a widget disabled just before an interruption still has a holder.
         done.add(other)
     if done:
         recorded['replaced'] = sorted(done)
