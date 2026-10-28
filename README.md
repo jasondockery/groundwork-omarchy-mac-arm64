@@ -352,7 +352,7 @@ If you already used keyd for other mappings, restore your numbered config backup
 
 ## Packages
 
-`packages.txt` lists optional aarch64 packages. Add one with `omarchy pkg add`. Remote-desktop packages are commented there. See `docs/decisions/0004-remote-access.md`.
+`packages.txt` lists optional aarch64 packages. Add one with `omarchy pkg add`. Remote-desktop choices are explained in `docs/decisions/0004-remote-access.md`.
 
 ## Accounts
 

@@ -35,6 +35,4 @@ wayvnc
 #   ./install.sh --with-local-inference
 # ollama
 # ollama-vulkan
-# Remote desktop experiments. See docs/decisions/0004-remote-access.md.
-# Sunshine, the Moonlight server, is not in the aarch64 repos, so it is not listed.
-# moonlight-qt
+# Remote desktop: see docs/decisions/0004-remote-access.md. Omarchy preinstalls the Moonlight client and offers Sunshine through its own service installer, so neither is listed here.
