@@ -243,7 +243,7 @@ elif name == 'omarchy':
             if not target.exists():
                 target.symlink_to(root / 'bin' / 'stub')
     if args[:2] == ['pkg', 'add'] and os.environ.get('FIXTURE_MATERIALIZE_ADDED') == '1' and len(args) > 2:
-        mapping = {'openssh': 'ssh', 'libnotify': 'notify-send', 'wl-clipboard': 'wl-copy', 'xdg-utils': 'xdg-open'}
+        mapping = {'openssh': 'ssh', 'cursor-bin': 'cursor', 'libnotify': 'notify-send', 'wl-clipboard': 'wl-copy', 'xdg-utils': 'xdg-open'}
         executable = mapping.get(args[2], args[2])
         target = root / 'bin' / executable
         if not target.exists():
@@ -845,11 +845,19 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertNotIn(['omarchy', 'pkg', 'add', 'cursor-bin'], self.calls())
         self.assertEqual(json.loads(self.cursor_argv().read_text())['password-store'], 'gnome-libsecret')
 
-    def test_missing_cursor_without_omarchy_installer_stops(self):
+    def test_missing_cursor_without_omarchy_installer_adds_the_package(self):
+        (self.bin / 'cursor').unlink()
+        self.env['FIXTURE_MATERIALIZE_ADDED'] = '1'
+        self.run_install()
+        self.assertIn(['omarchy', 'pkg', 'add', 'cursor-bin'], self.calls())
+        self.assertNotIn(['omarchy-install-cursor'], self.calls())
+        self.assertEqual(json.loads(self.cursor_argv().read_text())['password-store'], 'gnome-libsecret')
+
+    def test_cursor_package_without_a_command_stops(self):
         (self.bin / 'cursor').unlink()
         result = self.run_install(success=False)
-        self.assertIn('omarchy-install-cursor', result.stderr)
-        self.assertNotIn(['omarchy', 'pkg', 'add', 'cursor-bin'], self.calls())
+        self.assertIn(['omarchy', 'pkg', 'add', 'cursor-bin'], self.calls())
+        self.assertIn('cursor-bin is still unavailable', result.stderr)
         self.assertFalse(self.cursor_argv().exists())
         self.assertFalse(any(call[0] in ('stow', 'hyprctl') for call in self.calls()))
 
