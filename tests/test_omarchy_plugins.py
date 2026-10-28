@@ -570,6 +570,51 @@ class PluginApplyTests(unittest.TestCase):
         self.invoke()
         self.assertNotIn(['plugin', 'disable', 'omarchy.workspaces'], self.omarchy_calls())
 
+    def write_shell_layout(self, layout):
+        shell = self.home / '.config/omarchy/shell.json'
+        shell.parent.mkdir(parents=True, exist_ok=True)
+        shell.write_text(json.dumps({'version': 1, 'bar': {'layout': layout}}) + '\n')
+
+    def test_restored_replaced_widget_returns_to_its_old_slot(self):
+        self.write_shell_layout({'left': [{'id': 'omarchy.menu'}], 'right': [{'id': 'omarchy.tray'}, {'id': 'omarchy.workspaces'}]})
+        self.set_control(listed={'omarchy.workspaces': [True, True]})
+        self.write_list([plugin('example.spaces', replaces=['omarchy.workspaces'])], version=2)
+        self.invoke()
+        self.assertEqual(self.record()['plugins']['example.spaces']['replacedAt'],
+                         {'omarchy.workspaces': {'section': 'right', 'index': 1}})
+        self.clear_calls()
+        self.retire('example.spaces')
+        self.invoke()
+        self.assertIn(['plugin', 'enable', 'omarchy.workspaces', '--section', 'right', '--index', '1'], self.omarchy_calls())
+        self.assertFalse(self.record()['plugins'])
+
+    def test_restore_without_a_remembered_slot_uses_the_default_placement(self):
+        self.set_control(listed={'example.spaces': [True, False], 'omarchy.workspaces': [False, True]})
+        self.seed_directory('example.spaces')
+        self.write_record({'example.spaces': {'repo': 'https://github.com/example/spaces.git', 'replaced': ['omarchy.workspaces']}})
+        self.retire('example.spaces')
+        self.invoke()
+        self.assertIn(['plugin', 'enable', 'omarchy.workspaces'], self.omarchy_calls())
+
+    def test_replaced_slot_in_the_record_must_be_well_formed(self):
+        self.seed_directory('example.spaces')
+        self.write_record({'example.spaces': {'repo': 'https://github.com/example/spaces.git', 'replaced': ['omarchy.workspaces'],
+                                              'replacedAt': {'omarchy.workspaces': {'section': 'nowhere', 'index': 0}}}})
+        self.write_list([plugin('example.spaces')], version=2)
+        result = self.invoke()
+        self.assertIn('install record is invalid', result.stdout)
+
+    def test_excluded_replaced_id_is_not_listed_in_any_run(self):
+        exclusions = self.home / '.config/groundwork/omarchy-plugins.exclude.json'
+        exclusions.parent.mkdir(parents=True)
+        exclusions.write_text(json.dumps({'schemaVersion': 1, 'exclusions': [{'id': 'omarchy.workspaces', 'reason': 'Fixture'}]}))
+        self.set_control(listed={'omarchy.workspaces': [True, True]})
+        self.write_list([plugin('example.spaces', replaces=['omarchy.workspaces'])], version=2)
+        for _ in range(3):
+            result = self.invoke()
+            self.assertNotIn('omarchy.workspaces', result.stdout)
+        self.assertNotIn(['plugin', 'disable', 'omarchy.workspaces'], self.omarchy_calls())
+
     def test_builtin_record_with_a_repo_is_invalid(self):
         self.write_record({'omarchy.agents': {'builtIn': True, 'repo': 'https://github.com/example/agents.git'}})
         self.write_list([self.builtin()], version=2)
