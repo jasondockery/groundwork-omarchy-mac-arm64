@@ -205,14 +205,18 @@ def signal_group(process, signum):
     return True
 
 
-def group_alive(process):
+def group_alive(process, warned=None):
+    # `warned` is a per-stop set, so a polling loop reports an unreadable group once.
     try:
         os.killpg(process.pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
-        print(f'Could not check the remaining processes started by {process.args[0]}; continuing.',
-              file=sys.stderr, flush=True)
+        if warned is None or process.pid not in warned:
+            if warned is not None:
+                warned.add(process.pid)
+            print(f'Could not check the remaining processes started by {process.args[0]}; '
+                  'waiting for them as if they were still running.', file=sys.stderr, flush=True)
         return True
     return True
 
@@ -238,13 +242,14 @@ def stop(process, grace=0):
 def stop_group(process, grace):
     # On a deadline or an interrupt, forward SIGINT first so interactive tools
     # (omarchy update, pacman, sudo) can clean up, as if Ctrl+C was pressed.
+    warned = set()
     if grace:
         if not signal_group(process, signal.SIGINT):
             reap(process)
             return
         ends = time.monotonic() + grace
         while time.monotonic() < ends:
-            if process.poll() is not None and not group_alive(process):
+            if process.poll() is not None and not group_alive(process, warned):
                 return
             if STOP_SIGNALS & signal.sigpending():
                 # A second interrupt asks to stop now: skip the rest of the grace.

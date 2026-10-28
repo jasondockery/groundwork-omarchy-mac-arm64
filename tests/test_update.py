@@ -909,6 +909,22 @@ class T3CandidateTests(unittest.TestCase):
             with self.assertRaisesRegex(updater.UpdateError, 'exceeded'):
                 updater.fetch('https://example.invalid/archive', deadline=0.2)
 
+    def test_fetch_works_without_the_private_socket_attribute(self):
+        class Response:
+            fp = object()
+            def __init__(self):
+                self.chunks = [b'ab', b'cd']
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def isclosed(self):
+                return not self.chunks
+            def read1(self, size):
+                return self.chunks.pop(0)
+        with patch.object(updater.https_opener, 'open', return_value=Response()):
+            self.assertEqual(updater.fetch('https://example.invalid/archive'), b'abcd')
+
     def serve_once(self, respond):
         server = socket.socket()
         server.bind(('127.0.0.1', 0))
@@ -1240,9 +1256,11 @@ class ProcessTests(unittest.TestCase):
             if signum == 0:
                 raise PermissionError
         # The leader has exited, so only group_alive decides whether TERM follows.
-        with patch.object(updater.os, 'killpg', killpg), patch('sys.stderr', new_callable=io.StringIO):
+        with patch.object(updater.os, 'killpg', killpg), patch('sys.stderr', new_callable=io.StringIO) as stopped:
             updater.stop(process, grace=0.2)
         self.assertIn(signal.SIGTERM, checked)
+        self.assertGreater(checked.count(0), 1)
+        self.assertEqual(stopped.getvalue().count('Could not check the remaining processes'), 1)
 
     def test_terminal_less_interactive_stage_keeps_its_heartbeat(self):
         with patch.object(updater, 'HEARTBEAT_SECONDS', 0.1), patch('sys.stdout', new_callable=io.StringIO) as output, \
