@@ -66,6 +66,12 @@ elif name == 'sudo':
         sys.exit(int(os.environ.get('FIXTURE_RELOAD_STATUS', '0')))
     if args[0] in ('systemctl', 'ufw'):
         sys.exit(0)
+    if args[:2] == ['loginctl', 'enable-linger']:
+        if os.environ.get('FIXTURE_LINGER_STATUS', '0') == '0':
+            linger = root / 'var/lib/systemd/linger' / args[2]
+            linger.parent.mkdir(parents=True, exist_ok=True)
+            linger.touch()
+        sys.exit(int(os.environ.get('FIXTURE_LINGER_STATUS', '0')))
     if args[0] not in ('mkdir', 'install', 'cmp', 'cp', 'chmod'):
         raise SystemExit('Unexpected privileged operation: ' + repr(args))
     if args[0] == 'cp' and '/usr/share/chromium/extensions/' in args[-1]:
@@ -192,7 +198,13 @@ elif name == 'flatpak':
         if not status and marker is not None:
             marker.touch()
         sys.exit(status)
+elif name == 'syncthing':
+    if args == ['--version']:
+        print(os.environ.get('FIXTURE_SYNCTHING_VERSION', 'syncthing v2.1.7 "Hafnium Hornet" (go1.25.1 linux-arm64) builder 2026-10-20'))
 elif name == 'systemctl':
+    if args[:1] == ['--user'] and args[-1:] == ['syncthing.service'] and 'is-active' in args:
+        # Not serving yet unless a test says otherwise.
+        sys.exit(0 if os.environ.get('FIXTURE_SYNCTHING_ACTIVE') == '1' else 3)
     if args[:1] in (['is-enabled'], ['is-active']):
         sys.exit(3 if args[-1] in os.environ.get('FIXTURE_SERVICES_DOWN', '').split() else 0)
     sys.exit(int(os.environ.get('FIXTURE_USER_SYSTEMCTL_STATUS', '0')))
@@ -243,6 +255,10 @@ elif name == 'omarchy':
             target = root / 'bin' / 'vulkaninfo'
             if not target.exists():
                 target.symlink_to(root / 'bin' / 'stub')
+    if args[:3] == ['pkg', 'add', 'syncthing']:
+        target = root / 'bin' / 'syncthing'
+        if not target.exists():
+            target.symlink_to(root / 'bin' / 'stub')
     if args[:2] == ['pkg', 'add'] and os.environ.get('FIXTURE_MATERIALIZE_ADDED') == '1' and len(args) > 2:
         mapping = {'openssh': 'ssh', 'cursor-bin': 'cursor', 'libnotify': 'notify-send', 'wl-clipboard': 'wl-copy', 'xdg-utils': 'xdg-open'}
         executable = mapping.get(args[2], args[2])
@@ -272,12 +288,12 @@ class InstallKeydTests(unittest.TestCase):
         for name in ('bash', 'sh', 'python3', 'env'):
             (self.bin / name).symlink_to(shutil.which(name))
         for name in ('timeout', 'mktemp', 'dirname', 'rm', 'mkdir', 'cp', 'chmod',
-                     'mv', 'find', 'readlink', 'sleep', 'cmp', 'stat'):
+                     'mv', 'find', 'readlink', 'sleep', 'cmp', 'stat', 'id', 'head'):
             (self.bin / name).symlink_to(host_tool(name))
         stub = self.bin / 'stub'
         stub.write_text(STUB)
         stub.chmod(0o755)
-        for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'omarchy-install-dev-env', 'omarchy-remove-dev-env', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw', 'getconf', 'readelf'):
+        for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'omarchy-install-dev-env', 'omarchy-remove-dev-env', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw', 'getconf', 'readelf', 'syncthing', 'loginctl'):
             (self.bin / name).symlink_to(stub)
         (self.root / 'home').mkdir()
         (self.root / 'runtime').mkdir()
@@ -305,7 +321,7 @@ class InstallKeydTests(unittest.TestCase):
 
     def run_install(self, *args, success=True):
         result = subprocess.run(['bash', str(REPO / 'install.sh'), *args],
-                                env=self.env, capture_output=True, text=True, timeout=10)
+                                env=self.env, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode == 0, success, result.stdout + result.stderr)
         return result
 
@@ -338,7 +354,7 @@ class InstallKeydTests(unittest.TestCase):
         self.run_install('--without-keyd', '--without-screen-sharing')
         (self.root / 'calls.jsonl').unlink()
         result = subprocess.run(['python3', str(REPO / 'scripts/groundwork-update.py'), 'setup', str(REPO), '--update'],
-                                env=self.env, capture_output=True, text=True, timeout=10)
+                                env=self.env, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn('finish vault', result.stdout)
         self.assertFalse(any(call[0] == 'curl' for call in self.calls()))
@@ -389,7 +405,7 @@ raise SystemExit(os.WEXITSTATUS(status))
             command = [sys.executable, '-c', bridge, str(REPO / 'scripts/groundwork-update.py'), *command]
         return subprocess.run(
             [sys.executable, "-c", helper, *command],
-            env=self.env, capture_output=True, timeout=10)
+            env=self.env, capture_output=True, timeout=30)
 
     def test_updater_hands_uncached_authorization_a_real_foreground_terminal(self):
         self.env.update(FIXTURE_SUDO_CACHED='0', FIXTURE_REQUIRE_TTY='1')
@@ -400,7 +416,7 @@ raise SystemExit(os.WEXITSTATUS(status))
 
     def run_update(self):
         return subprocess.run(['python3', str(REPO / 'scripts/groundwork-update.py'), 'setup', str(REPO), '--update'],
-                              env=self.env, capture_output=True, text=True, timeout=10)
+                              env=self.env, capture_output=True, text=True, timeout=30)
 
     def prepare_routine_update(self, *setup_args):
         self.run_install(*(setup_args or ('--without-keyd',)))
@@ -428,7 +444,7 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
         self.env['FIXTURE_SERVICES_DOWN'] = 'tailscaled'
         result = subprocess.run(['python3', str(REPO / 'scripts/groundwork-update.py'), 'setup', str(REPO), '--update'],
-                                env=self.env, capture_output=True, text=True, timeout=10, start_new_session=True)
+                                env=self.env, capture_output=True, text=True, timeout=30, start_new_session=True)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('no terminal is available', result.stderr)
         self.assertNotIn(['sudo', 'systemctl', 'enable', '--now', 'tailscaled'], self.calls())
@@ -610,7 +626,8 @@ raise SystemExit(os.WEXITSTATUS(status))
         config.write_text('user owned settings\n')
         self.run_install('--without-screen-sharing')
         self.assertEqual(config.read_text(), 'user owned settings\n')
-        self.assertFalse(any(call[0] == 'systemctl' for call in self.calls()))
+        # Syncthing's user service is separate; only screen sharing must stay untouched.
+        self.assertFalse(any(call[0] == 'systemctl' and 'groundwork-screen-share.service' in call for call in self.calls()))
         self.assertNotIn(['omarchy', 'pkg', 'add', 'wayvnc'], self.calls())
 
     def test_failed_screen_sharing_service_setup_stops_before_input_changes(self):
@@ -644,7 +661,7 @@ raise SystemExit(os.WEXITSTATUS(status))
                 directory.parent.chmod(0o700)
             result = subprocess.run(
                 ['bash', '-c', 'umask 077; exec bash "$1"', 'fixture', str(REPO / 'install.sh')],
-                env=self.env, capture_output=True, text=True, timeout=10)
+                env=self.env, capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(directory.parent.stat().st_mode & 0o777, 0o755)
             self.assertEqual(directory.stat().st_mode & 0o777, 0o755)
@@ -922,7 +939,7 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.run_install('--without-keyd', '--without-screen-sharing')
         (self.root / 'calls.jsonl').unlink()
         result = subprocess.run(['python3', str(REPO / 'scripts/groundwork-update.py'), 'setup', str(REPO), '--update'],
-                                env=self.env, capture_output=True, text=True, timeout=10)
+                                env=self.env, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn(['omarchy-install-cursor'], self.calls())
         self.assertNotIn(['omarchy', 'pkg', 'add', 'cursor-bin'], self.calls())
@@ -974,7 +991,7 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.env['FIXTURE_SUDO_CACHED'] = '0'
         result = subprocess.run(
             ['bash', str(REPO / 'install.sh')],
-            env=self.env, capture_output=True, text=True, timeout=10,
+            env=self.env, capture_output=True, text=True, timeout=30,
             start_new_session=True)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('no terminal is available', result.stderr)
@@ -1373,6 +1390,102 @@ raise SystemExit(os.WEXITSTATUS(status))
                              for call in self.calls()))
         saved = json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())
         self.assertFalse(saved['local_inference'])
+
+
+    def test_default_install_adds_syncthing_and_waits_for_tailscale(self):
+        result = self.run_install()
+        calls = self.calls()
+        self.assertIn(['omarchy', 'pkg', 'add', 'syncthing'], calls)
+        self.assertIn(['sudo', 'loginctl', 'enable-linger', subprocess.check_output(['id', '-un'], text=True).strip()], calls)
+        self.assertIn('waiting for Tailscale', result.stderr)
+        # Nothing is enabled until Tailscale has an address to bind.
+        self.assertFalse(any(call[:3] == ['systemctl', '--user', 'enable'] and 'syncthing.service' in call for call in calls))
+        helper = self.root / 'home/.local/bin/groundwork-syncthing'
+        self.assertTrue(helper.is_file() and os.access(helper, os.X_OK))
+        self.assertIn('syncthing-pair', (self.root / 'home/.local/bin/groundwork').read_text())
+        self.assertFalse((self.root / 'home/Sync').exists())
+
+    def test_syncthing_linger_is_enabled_once_and_update_needs_no_sudo_after(self):
+        self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.privileged_calls(), [])
+
+    def test_update_primes_sudo_when_linger_is_missing(self):
+        self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
+        for path in (self.root / 'var/lib/systemd/linger').iterdir():
+            path.unlink()
+        self.env['FIXTURE_SUDO_CACHED'] = '1'
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(any(call[1:3] == ['loginctl', 'enable-linger'] for call in self.privileged_calls()))
+
+    def test_failed_linger_is_reported_and_setup_continues(self):
+        self.env['FIXTURE_LINGER_STATUS'] = '1'
+        result = self.run_install()
+        self.assertIn('Could not enable lingering', result.stderr)
+        marker = self.root / 'home/.local/state/groundwork/syncthing-pending'
+        self.assertIn('Lingering is not enabled', marker.read_text())
+
+    def test_waiting_for_tailscale_leaves_a_marker(self):
+        self.run_install()
+        marker = self.root / 'home/.local/state/groundwork/syncthing-pending'
+        self.assertIn('waiting for Tailscale', marker.read_text())
+
+    def power_supply(self, name, kind, scope=None):
+        supply = self.root / 'sys/class/power_supply' / name
+        supply.mkdir(parents=True)
+        (supply / 'type').write_text(kind + '\n')
+        if scope:
+            (supply / 'scope').write_text(scope + '\n')
+
+    def assert_battery_machine_does_not_linger(self, name):
+        self.power_supply(name, 'Battery', 'System')
+        self.power_supply('ac', 'Mains')
+        self.run_install()
+        self.assertFalse(any(call[1:3] == ['loginctl', 'enable-linger'] for call in self.calls()), name)
+        self.assertFalse((self.root / 'var/lib/systemd/linger').exists())
+        # And a routine update does not need sudo for lingering.
+        (self.root / 'calls.jsonl').unlink()
+        self.env['FIXTURE_SUDO_CACHED'] = '0'
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.privileged_calls(), [])
+
+    def test_an_asahi_macbook_battery_does_not_linger(self):
+        # The Asahi SMC registers macsmc-battery, not BAT0.
+        self.assert_battery_machine_does_not_linger('macsmc-battery')
+
+    def test_a_bat0_battery_does_not_linger(self):
+        self.assert_battery_machine_does_not_linger('BAT0')
+
+    def test_a_peripheral_battery_does_not_stop_a_desktop_from_lingering(self):
+        # A Bluetooth keyboard registers a Battery with device scope.
+        self.power_supply('hid-keyboard', 'Battery', 'Device')
+        self.power_supply('ac', 'Mains')
+        self.run_install()
+        self.assertTrue(any(call[1:3] == ['loginctl', 'enable-linger'] for call in self.privileged_calls()))
+
+    def test_misaligned_syncthing_is_not_enabled(self):
+        binary = self.bin / 'syncthing'
+        binary.unlink()
+        binary.write_bytes(b'\x7fELF' + bytes(16))
+        binary.chmod(0o755)
+        self.env['FIXTURE_LOAD_ALIGN'] = '0x100'
+        result = self.run_install(success=False)
+        self.assertIn('Refusing to treat Syncthing as installed', result.stderr)
+        self.assertFalse(any(call[:1] == ['loginctl'] or call[1:2] == ['loginctl'] for call in self.calls()))
+        self.assertFalse((self.root / 'home/.local/bin/groundwork-syncthing').exists())
+        self.assertFalse((self.root / 'home/.config/groundwork/omarchy.json').exists())
+
+    def test_old_syncthing_stops_setup_with_an_actionable_message(self):
+        self.env['FIXTURE_SYNCTHING_VERSION'] = 'syncthing v2.1.1 "x"'
+        result = self.run_install(success=False)
+        self.assertIn('older than 2.1.2', result.stderr)
+        self.assertFalse((self.root / 'home/Shared').exists())
+        # The update commands exist so the retry is possible.
+        self.assertTrue((self.root / 'home/.local/bin/groundwork-update').exists())
+        self.assertIn('could not be applied', result.stderr)
 
 
 if __name__ == '__main__':

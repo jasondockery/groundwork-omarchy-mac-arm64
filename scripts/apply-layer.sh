@@ -138,8 +138,8 @@ fi
 # Fail before installing packages or moving files when the checkout is incomplete.
 bitwarden_extension=nngceckbapebfimnlniiiahkandclblb.json
 extension_source="$root/chromium/extensions/$bitwarden_extension"
-[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$extension_source" ]] || {
-  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, plugin helper, or Bitwarden extension manifest is missing." >&2
+[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$extension_source" ]] || {
+  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, or Bitwarden extension manifest is missing." >&2
   exit 1
 }
 
@@ -207,11 +207,32 @@ local_inference_ready() {
   [[ -d $vulkan_dir ]] || return 1
   compgen -G "$vulkan_dir/*" >/dev/null
 }
+# Lingering lets the user service start at boot without a graphical login. Only
+# a machine with no system battery (a desktop such as the Mac mini) is the
+# always-on peer; a MacBook (the Asahi SMC registers macsmc-battery) starts Syncthing at
+# login like every other machine.
+syncthing_user=$(id -un)
+syncthing_always_on() {
+  local supply
+  for supply in "$test_root"/sys/class/power_supply/*; do
+    [[ -r $supply/type && $(<"$supply/type") == Battery ]] || continue
+    # A Bluetooth keyboard or mouse is a Battery with device scope, not this machine's.
+    [[ -r $supply/scope && $(<"$supply/scope") == Device ]] && continue
+    return 1
+  done
+  return 0
+}
+syncthing_linger_enabled() {
+  [[ -e $test_root/var/lib/systemd/linger/$syncthing_user ]]
+}
+syncthing_linger_needed() {
+  syncthing_always_on && ! syncthing_linger_enabled
+}
 privileged_changes_needed() {
   local executable
   # Missing tools are installed through omarchy pkg add or Omarchy's installers.
   # readelf (binutils) is what update-all uses to check T3 Code builds.
-  for executable in cursor herdr tailscale obsidian bw readelf; do
+  for executable in cursor herdr tailscale syncthing obsidian bw readelf; do
     command -v "$executable" >/dev/null || return 0
   done
   # FreeTube is a user Flatpak, so a missing flatpak package still needs
@@ -220,6 +241,7 @@ privileged_changes_needed() {
     return 0
   fi
   service_ready tailscaled || return 0
+  ! syncthing_linger_needed || return 0
   if command -v chromium >/dev/null; then
     chromium_extension_current || return 0
   fi
@@ -272,7 +294,7 @@ fi
 if [[ "$EUID" -ne 0 && $needs_privilege -eq 1 ]]; then
   if [[ $updating -eq 0 ]] && ! sudo -n true 2>/dev/null; then
     if [[ -r /dev/tty && -w /dev/tty ]] && : </dev/tty >/dev/null; then
-      echo "This install needs an administrator password for Tailscale, the browser extension, and keyd."
+      echo "This install needs an administrator password for Tailscale, the browser extension, keyd, and lingering."
       echo "Enter your password when asked. This approval covers the privileged steps in this run."
       sudo_status=0
       # sudo -v reads the password on its own standard input. Point that prompt
@@ -928,8 +950,71 @@ if [[ $with_local_inference -eq 1 ]]; then
   install_local_inference
 fi
 
+# Syncthing is a default on every Groundwork machine (groundwork-core/docs/syncthing.md).
+# This Mac mini is the always-on peer, so lingering starts the user service at boot.
+# The helper holds the contract: tailnet-only listen addresses, the two shared
+# folders, and groundwork syncthing-pair. It waits, rather than failing setup,
+# when Tailscale has no address yet.
+syncthing_problem=""
+syncthing_pending_note=""
+install_syncthing() {
+  local bin status=0 apply_status=0 pending=""
+  syncthing_pending_note=""
+  install_package syncthing
+  bin=$(command -v syncthing)
+  # Apple Silicon kernels use 16 KiB pages. A non-ELF wrapper is skipped here;
+  # the helper refuses a PATH copy that is not the one the service runs.
+  # Only an ELF needs the check; a wrapper script skips the interpreter start.
+  if [[ $(head -c 4 "$bin") == $'\x7f'ELF ]]; then
+    python3 "$root/scripts/groundwork-update.py" check-elf-alignment "$bin" || status=$?
+  fi
+  if [[ $status -ne 0 && $status -ne 2 ]]; then
+    echo "Refusing to treat Syncthing as installed. syncthing.service was not enabled." >&2
+    echo "If the reason above is the package itself, remove it with: sudo pacman -Rns syncthing" >&2
+    exit 1
+  fi
+  if syncthing_linger_needed; then
+    if ! sudo loginctl enable-linger "$syncthing_user"; then
+      pending="Lingering is not enabled, so Syncthing starts at login instead of boot."
+      echo "Could not enable lingering for $syncthing_user. $pending Rerun groundwork-update." >&2
+    fi
+  fi
+  python3 "$root/scripts/groundwork-syncthing.py" apply || apply_status=$?
+  case $apply_status in
+    0) ;;
+    75)
+      pending="${pending:+$pending }Syncthing is waiting for Tailscale to have an address."
+      echo "Syncthing is waiting for Tailscale to have an address. Rerun groundwork-update after tailnet sign-in." >&2
+      ;;
+    *)
+      # Register first so the update commands exist for the retry.
+      syncthing_problem="Syncthing could not be applied (exit $apply_status). Fix the message above and rerun."
+      pending="${pending:+$pending }$syncthing_problem"
+      ;;
+  esac
+  syncthing_pending_note=$pending
+  # An update reads this to report a warning instead of a clean success. The
+  # updater validates the path, so only start it when the marker must change.
+  local marker=${XDG_STATE_HOME:-$HOME/.local/state}/groundwork/syncthing-pending
+  if [[ -n $pending ]]; then
+    if [[ -L $marker || ! -f $marker || $(<"$marker") != "$pending" ]]; then
+      python3 "$root/scripts/groundwork-update.py" marker write syncthing-pending "$pending"
+    fi
+  elif [[ -e $marker || -L $marker ]]; then
+    python3 "$root/scripts/groundwork-update.py" marker remove syncthing-pending
+  fi
+}
+install_syncthing
+
 python3 "$root/scripts/groundwork-update.py" register "$root" "$with_keyd" "$with_screen_sharing" \
   "${GROUNDWORK_OBSIDIAN_VAULT:-$HOME/Documents/Obsidian/my_obsidian_vault}" "$with_blip" "$with_local_inference"
+if [[ -n $syncthing_problem ]]; then
+  echo "$syncthing_problem" >&2
+  exit 1
+fi
+if [[ $updating -eq 0 && -n $syncthing_pending_note ]]; then
+  echo "Not finished: $syncthing_pending_note" >&2
+fi
 if [[ $updating -eq 1 ]]; then
   echo "Groundwork settings applied. Saved keyd, screen-sharing, Blip, local inference, and vault choices were preserved."
   exit 0

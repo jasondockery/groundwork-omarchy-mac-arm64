@@ -346,6 +346,41 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
             with self.assertRaisesRegex(updater.UpdateError, 'changed locally'):
                 updater.update('layer')
 
+    def test_unfinished_syncthing_is_a_warning_not_a_clean_success(self):
+        self.state.mkdir(parents=True, exist_ok=True)
+        (self.state / 'syncthing-pending').write_text('Syncthing is waiting for Tailscale to have an address.\n')
+        with patch('sys.stdout', new_callable=io.StringIO), patch('sys.stderr', new_callable=io.StringIO) as errors:
+            self.assertEqual(updater.main(['layer']), 1)
+        receipt = json.loads((self.state / 'groundwork-update-last-success.json').read_text())
+        self.assertEqual(receipt['result'], 'completed_with_warnings')
+        self.assertEqual(receipt['warnings'], ['Syncthing is waiting for Tailscale to have an address.'])
+        self.assertIn('waiting for Tailscale', errors.getvalue())
+
+    def test_syncthing_marker_is_not_followed_through_a_symlink(self):
+        self.state.mkdir(parents=True, exist_ok=True)
+        target = self.state / 'elsewhere'
+        target.write_text('not a marker')
+        (self.state / 'syncthing-pending').symlink_to(target)
+        # An unreadable marker is reported, not treated as absent.
+        self.assertIn('cannot be read', updater.syncthing_pending())
+
+    def test_an_exported_but_empty_state_home_means_unset(self):
+        home = self.home / 'empty-state-home'
+        home.mkdir()
+        env = dict(os.environ, HOME=str(home), XDG_STATE_HOME='')
+        result = subprocess.run(['python3', '-B', str(REPO / 'scripts/groundwork-update.py'),
+                                 'marker', 'write', 'syncthing-pending', 'waiting'],
+                                env=env, cwd=str(home), capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((home / '.local/state/groundwork/syncthing-pending').read_text(), 'waiting\n')
+        self.assertFalse((home / 'groundwork').exists())
+
+    def test_the_syncthing_marker_is_written_and_removed_by_the_setup_adapter(self):
+        self.assertEqual(updater.main(['marker', 'write', 'syncthing-pending', 'waiting']), 0)
+        self.assertEqual(updater.syncthing_pending(), 'waiting')
+        self.assertEqual(updater.main(['marker', 'remove', 'syncthing-pending']), 0)
+        self.assertIsNone(updater.syncthing_pending())
+
     def test_t3_or_flatpak_failure_cannot_mark_full_success(self):
         for failure in ['t3', 'flatpak']:
             self.failure = failure
