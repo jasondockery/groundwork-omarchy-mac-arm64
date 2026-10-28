@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -62,8 +63,19 @@ def freetube_path():
     return str(Path.home() / 'Shared' / 'FreeTube')
 
 
+def state_home():
+    """The state directory the user service will use, not this shell's guess."""
+    shown = systemctl('show-environment', check=False, capture=True)
+    if shown.returncode == 0:
+        for line in (shown.stdout or '').splitlines():
+            if line.startswith('XDG_STATE_HOME=') and line.split('=', 1)[1]:
+                return Path(line.split('=', 1)[1])
+        return Path.home() / '.local/state'
+    return Path(os.environ.get('XDG_STATE_HOME') or Path.home() / '.local/state')
+
+
 def config_dir():
-    new = Path(os.environ.get('XDG_STATE_HOME') or Path.home() / '.local/state') / 'syncthing'
+    new = state_home() / 'syncthing'
     old = Path.home() / '.config/syncthing'
     # Pre-1.27 path wins only while the new one has no config.
     if (old / 'config.xml').exists() and not (new / 'config.xml').exists():
@@ -73,9 +85,24 @@ def config_dir():
 
 # ---- binary, units, and environment -------------------------------------
 
+def unit_binary():
+    shown = systemctl('show', SERVICE, '-p', 'ExecStart', check=False, capture=True)
+    match = re.search(r'path=(\S+)', shown.stdout or '')
+    return match.group(1) if match and Path(match.group(1)).is_file() else None
+
+
+def syncthing_command():
+    """The binary the user service runs; PATH must not name a different one."""
+    unit, found = unit_binary(), shutil.which('syncthing')
+    if unit and found and Path(unit).resolve() != Path(found).resolve():
+        raise SyncthingError(f'The syncthing on PATH ({found}) is not the one {SERVICE} runs ({unit}). '
+                             'Remove the extra copy; two copies would be two peers. Nothing was changed.')
+    return unit or 'syncthing'
+
+
 def syncthing_version():
     try:
-        result = subprocess.run(['syncthing', '--version'], capture_output=True, text=True, timeout=20)
+        result = subprocess.run([syncthing_command(), '--version'], capture_output=True, text=True, timeout=20)
     except (OSError, subprocess.SubprocessError) as error:
         raise SyncthingError(f'Cannot run syncthing: {error}') from error
     return parse_version(result.stdout)
@@ -120,9 +147,18 @@ def gui_override():
     shown = systemctl('show-environment', check=False, capture=True)
     if 'STGUIADDRESS=' in (shown.stdout or ''):
         return 'the user service manager environment'
-    unit = systemctl('show', SERVICE, '-p', 'Environment', '-p', 'ExecStart', check=False, capture=True)
+    unit = systemctl('show', SERVICE, '-p', 'Environment', '-p', 'ExecStart', '-p', 'EnvironmentFiles',
+                     check=False, capture=True)
     if re.search(r'STGUIADDRESS=|--gui-address', unit.stdout or ''):
         return SERVICE
+    for line in (unit.stdout or '').splitlines():
+        if line.startswith('EnvironmentFiles='):
+            path = line.split('=', 1)[1].split()[0] if line.split('=', 1)[1].split() else ''
+            try:
+                if path and 'STGUIADDRESS' in Path(path.lstrip('-')).read_text(errors='replace'):
+                    return path
+            except OSError:
+                pass
     return None
 
 
@@ -209,7 +245,19 @@ def tailscale_ip(flag, network):
     return None
 
 
+def tailscale_running():
+    # Like screen sharing: an address printed while Tailscale is stopped is not usable.
+    try:
+        result = subprocess.run(['tailscale', 'status', '--json'], capture_output=True, text=True, timeout=10, check=True)
+        state = json.loads(result.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+    return state.get('BackendState') == 'Running' and (state.get('Self') or {}).get('Online') is True
+
+
 def tailscale_addresses():
+    if not tailscale_running():
+        raise Waiting()
     v4 = tailscale_ip('-4', TAILSCALE_V4)
     if v4 is None:
         raise Waiting()
@@ -299,11 +347,17 @@ def gui_address_in_config(path):
 
 # ---- REST -----------------------------------------------------------------
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        # The API key must not follow a redirect anywhere.
+        return None
+
+
 class Api:
     def __init__(self, key, base=None):
         self.key = key
         self.base = base or 'http://' + GUI_ADDRESS
-        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect)
 
     def request(self, method, path, body=None, allow_missing=False):
         data = json.dumps(body).encode() if body is not None else None
@@ -356,6 +410,11 @@ def wait_for_api(api, seconds=60):
     return status
 
 
+def require_daemon_supported(api):
+    # The binary can be upgraded while an older daemon keeps running.
+    require_supported(parse_version((api.get('/rest/system/version') or {}).get('version', '')))
+
+
 def listening_on_gui():
     host, port = GUI_ADDRESS.rsplit(':', 1)
     token = ''.join(f'{int(part):02X}' for part in reversed(host.split('.'))) + f':{int(port):04X}'
@@ -363,8 +422,10 @@ def listening_on_gui():
         lines = Path('/proc/net/tcp').read_text().splitlines()[1:]
     except OSError:
         return False
-    # State 0A is LISTEN. Only the exact loopback socket counts.
-    return any(fields[1] == token and fields[3] == '0A' for fields in (line.split() for line in lines) if len(fields) > 3)
+    # State 0A is LISTEN. Only the exact loopback socket, owned by this user, counts:
+    # the API key is sent to it.
+    return any(fields[1] == token and fields[3] == '0A' and fields[7] == str(os.getuid())
+               for fields in (line.split() for line in lines) if len(fields) > 7)
 
 
 # ---- folders --------------------------------------------------------------
@@ -433,14 +494,28 @@ def separate_freetube_from_parent(api):
     current = api.get('/rest/config/folders/' + SHARED['id'])
     me = api.get('/rest/system/status')['myID']
     # Un-share first so the rebuilt index is never announced as deletions.
+    # Say so before the reset: a rerun after an interruption finds nothing to rebuild.
+    print('Removing other devices from the Shared folder and rebuilding its index without FreeTube. '
+          'Pair again with groundwork syncthing-pair add.')
     current['devices'] = [entry for entry in current.get('devices', []) if entry.get('deviceID') == me]
     api.put('/rest/config/folders/' + SHARED['id'], current)
     ensure_stignore(Path(shared_path()) / '.stignore', '/FreeTube', first=True)
     api.post('/rest/system/reset?folder=' + SHARED['id'])
+    # The reset restarts Syncthing and rescans. An empty browse before then proves nothing.
+    wait_for_api(api)
+    if not wait_for(lambda: folder_idle(api), 180, pause=1):
+        raise SyncthingError('groundwork-shared did not finish rescanning after the reset. Rerun apply to check it again.')
     if api.get('/rest/db/browse?folder=%s&prefix=FreeTube' % SHARED['id'], allow_missing=True):
         raise SyncthingError('groundwork-shared still lists FreeTube files after the reset. Other devices were removed from '
                              'that folder; fix the ignore file at ' + str(Path(shared_path()) / '.stignore') + ' and rerun.')
-    print('Rebuilt the Shared index without FreeTube. Pair again with groundwork syncthing-pair add.')
+    print('Rebuilt the Shared index without FreeTube.')
+
+
+def folder_idle(api):
+    try:
+        return (api.get('/rest/db/status?folder=' + SHARED['id']) or {}).get('state') == 'idle'
+    except SyncthingError:
+        return False
 
 
 def ensure_stignore(path, pattern, first):
@@ -471,8 +546,9 @@ def generate_config(config_path):
         return
     if service_active():
         raise SyncthingError(f'{SERVICE} is running but {config_path} is missing. Nothing was changed.')
-    env = dict(os.environ, STNODEFAULTFOLDER='1')
-    subprocess.run(['syncthing', 'generate'], env=env, check=True, timeout=120, capture_output=True)
+    # Write where the user service will read, not where this shell would.
+    env = dict(os.environ, STNODEFAULTFOLDER='1', XDG_STATE_HOME=str(state_home()))
+    subprocess.run([syncthing_command(), 'generate'], env=env, check=True, timeout=120, capture_output=True)
     if not config_path.exists():
         raise SyncthingError(f'syncthing generate did not write {config_path}.')
 
@@ -492,11 +568,12 @@ def apply():
     where = gui_override()
     if where:
         raise SyncthingError(f'STGUIADDRESS or --gui-address is set in {where}. Remove it; Syncthing was not started.')
-    ensure_dropin()
+    if ensure_dropin():
+        systemctl('daemon-reload')
     config_path = config_dir() / 'config.xml'
     generate_config(config_path)
     if gui_tls(config_path):
-        raise SyncthingError('The Syncthing GUI uses TLS here; Groundwork talks to http://' + GUI_ADDRESS + '. Nothing was changed.')
+        raise SyncthingError('The Syncthing GUI uses TLS here; Groundwork talks to http://' + GUI_ADDRESS + '. Nothing more was changed.')
     ensure_directories()
     addresses = listen_addresses(v4, v6) if v4 else None
     if not serving:
@@ -507,9 +584,21 @@ def apply():
         systemctl('daemon-reload')
         systemctl('enable', '--now', SERVICE)
     api = Api(read_api_key(config_path))
-    status = wait_for_api(api)
+    try:
+        status = wait_for_api(api)
+    except SyncthingError:
+        if not serving:
+            # It may have read a different config directory and be listening on the upstream defaults.
+            systemctl('disable', '--now', SERVICE, check=False)
+            raise SyncthingError(f'{SERVICE} did not answer with the API key in {config_path}, so it was stopped and disabled. '
+                                 'Check which state directory the user service uses, then rerun.') from None
+        raise
+    require_daemon_supported(api)
     ensure_gui_address(api)
     restart_needed = ensure_options(api, addresses)
+    if serving and addresses is not None and not restart_needed and not wait_for(lambda: listeners_match(api, addresses), 10):
+        # An earlier run may have stopped between the PATCH and the restart.
+        restart_needed = True
     ensure_folders(api, status['myID'])
     if restart_needed:
         systemctl('restart', SERVICE)
@@ -557,6 +646,11 @@ def ensure_options(api, addresses):
     return changed
 
 
+def listeners_match(api, addresses):
+    status = api.get('/rest/system/status').get('connectionServiceStatus') or {}
+    return set(status) == set(addresses) and all(not (entry or {}).get('error') for entry in status.values())
+
+
 def confirm(api, addresses):
     where = gui_override()
     if where:
@@ -569,17 +663,16 @@ def confirm(api, addresses):
     if set(configured) != set(addresses):
         raise SyncthingError('Syncthing did not keep the Groundwork listen addresses.')
 
-    def running():
-        status = api.get('/rest/system/status').get('connectionServiceStatus') or {}
-        return set(status) == set(addresses)
-    if not wait_for(running, 30):
-        raise SyncthingError('The running Syncthing listeners do not match the Groundwork list. The step is unfinished.')
+    if not wait_for(lambda: listeners_match(api, addresses), 30):
+        raise SyncthingError('The running Syncthing listeners do not match the Groundwork list, or one failed to bind. '
+                             'The step is unfinished.')
 
 
 # ---- pairing --------------------------------------------------------------
 
 def device_id_from_binary():
-    for command in (['syncthing', 'device-id'], ['syncthing', '--device-id']):
+    binary = syncthing_command()
+    for command in ([binary, 'device-id'], [binary, '--device-id']):
         try:
             result = subprocess.run(command, capture_output=True, text=True, timeout=20)
         except (OSError, subprocess.SubprocessError):
@@ -618,9 +711,14 @@ def pair_add(device_id, name, magicdns):
     check_private_file(config_path)
     check_private_file(config_path.parent / 'key.pem')
     api = Api(read_api_key(config_path))
+    require_daemon_supported(api)
     me = api.get('/rest/system/status')['myID']
     if device_id == me:
         raise SyncthingError('That is this machine\'s own device ID. Run add with the other machine\'s ID.')
+    # A missing folder is created below with the peer already in it. Its ignore
+    # files must exist first, and the parent must not have indexed FreeTube.
+    ensure_directories()
+    separate_freetube_from_parent(api)
     wanted = {'name': name, 'addresses': [f'tcp://{magicdns}:{SYNC_PORT}', f'quic://{magicdns}:{SYNC_PORT}'],
               'allowedNetworks': ALLOWED_NETWORKS}
     existing = api.get('/rest/config/devices/' + device_id, allow_missing=True)
@@ -695,6 +793,6 @@ if __name__ == '__main__':
         sys.exit(main(sys.argv[1:]))
     except Waiting:
         sys.exit(EXIT_WAITING)
-    except (SyncthingError, OSError, subprocess.SubprocessError, ValueError) as error:
+    except (SyncthingError, OSError, subprocess.SubprocessError, ValueError, KeyError, AttributeError, TypeError) as error:
         print(f'Groundwork Syncthing: {error}', file=sys.stderr)
         sys.exit(1)

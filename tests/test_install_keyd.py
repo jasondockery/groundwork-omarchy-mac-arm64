@@ -1396,7 +1396,7 @@ raise SystemExit(os.WEXITSTATUS(status))
         result = self.run_install()
         calls = self.calls()
         self.assertIn(['omarchy', 'pkg', 'add', 'syncthing'], calls)
-        self.assertIn(['sudo', 'loginctl', 'enable-linger', os.environ.get('USER') or subprocess.check_output(['id', '-un'], text=True).strip()], calls)
+        self.assertIn(['sudo', 'loginctl', 'enable-linger', subprocess.check_output(['id', '-un'], text=True).strip()], calls)
         self.assertIn('waiting for Tailscale', result.stderr)
         # Nothing is enabled until Tailscale has an address to bind.
         self.assertFalse(any(call[:3] == ['systemctl', '--user', 'enable'] and 'syncthing.service' in call for call in calls))
@@ -1410,7 +1410,6 @@ raise SystemExit(os.WEXITSTATUS(status))
         result = self.run_update()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.privileged_calls(), [])
-        self.assertNotIn('loginctl', [call[1] for call in self.privileged_calls() if len(call) > 1])
 
     def test_update_primes_sudo_when_linger_is_missing(self):
         self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
@@ -1425,6 +1424,26 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.env['FIXTURE_LINGER_STATUS'] = '1'
         result = self.run_install()
         self.assertIn('Could not enable lingering', result.stderr)
+        marker = self.root / 'home/.local/state/groundwork/syncthing-pending'
+        self.assertIn('Lingering is not enabled', marker.read_text())
+
+    def test_waiting_for_tailscale_leaves_a_marker(self):
+        self.run_install()
+        marker = self.root / 'home/.local/state/groundwork/syncthing-pending'
+        self.assertIn('waiting for Tailscale', marker.read_text())
+
+    def test_a_machine_with_a_battery_does_not_linger(self):
+        battery = self.root / 'sys/class/power_supply/BAT0'
+        battery.mkdir(parents=True)
+        self.run_install()
+        self.assertFalse(any(call[1:3] == ['loginctl', 'enable-linger'] for call in self.calls()))
+        self.assertFalse((self.root / 'var/lib/systemd/linger').exists())
+        # And a routine update does not need sudo for lingering.
+        (self.root / 'calls.jsonl').unlink()
+        self.env['FIXTURE_SUDO_CACHED'] = '0'
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.privileged_calls(), [])
 
     def test_misaligned_syncthing_is_not_enabled(self):
         binary = self.bin / 'syncthing'
@@ -1443,6 +1462,9 @@ raise SystemExit(os.WEXITSTATUS(status))
         result = self.run_install(success=False)
         self.assertIn('older than 2.1.2', result.stderr)
         self.assertFalse((self.root / 'home/Shared').exists())
+        # The update commands exist so the retry is possible.
+        self.assertTrue((self.root / 'home/.local/bin/groundwork-update').exists())
+        self.assertIn('could not be applied', result.stderr)
 
 
 if __name__ == '__main__':

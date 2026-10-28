@@ -188,7 +188,7 @@ def register(source, keyd, screen_sharing, vault, blip='0', local_inference='0')
         atomic_write(Path.home() / '.local/bin' / command, launcher, 0o755, owned=True)
 
 
-MARKERS = {'ufw-screen-share-rule'}
+MARKERS = {'ufw-screen-share-rule', 'syncthing-pending'}
 STOP_SIGNALS = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
 
 
@@ -960,6 +960,16 @@ def update_blip(completed):
         remind_blip_setup(completed, 'Blip changed files under bridge/.')
 
 
+def syncthing_pending():
+    """What apply-layer.sh left unfinished for Syncthing, or None. Never follows a symlink."""
+    path = STATE / 'syncthing-pending'
+    try:
+        check_path(path)
+        return path.read_text().strip() or None if path.is_file() else None
+    except (UpdateError, OSError):
+        return None
+
+
 def update(scope, check=False):
     if platform.system() != 'Linux' or platform.machine() != 'aarch64' or not shutil.which('omarchy'):
         raise UpdateError('This updater requires Apple Silicon Omarchy. Use your platform entry point on other systems.')
@@ -1008,6 +1018,9 @@ def update(scope, check=False):
             if scope == 'all':
                 apply_args.append('--update-plugins')
             run(apply_args, deadline=900, capture=False, lock_fd=lock.fileno())
+            pending = syncthing_pending()
+            if pending:
+                warnings.append(pending)
             value = settings()
             if value['keyd']:
                 value['keyd_sha256'] = hashlib.sha256((source / 'keyd/default.conf').read_bytes()).hexdigest()

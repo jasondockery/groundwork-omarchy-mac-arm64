@@ -9,7 +9,7 @@ This Mac mini is the always-on peer, so Syncthing is a default here, not an opt-
 | Step | Where |
 |---|---|
 | `omarchy pkg add syncthing`, then `readelf` LOAD alignment check on the binary (16 KiB pages) | `scripts/apply-layer.sh` |
-| `sudo loginctl enable-linger` once, so the user service starts at boot | `scripts/apply-layer.sh` |
+| `sudo loginctl enable-linger` once, on a machine with no battery (Mac mini, iMac, Studio), so the user service starts at boot | `scripts/apply-layer.sh` |
 | Refuse a binary older than 2.1.2, `syncthing generate` with `STNODEFAULTFOLDER=1` when `config.xml` is missing, user drop-in `~/.config/systemd/user/syncthing.service.d/groundwork.conf` | `scripts/groundwork-syncthing.py apply` |
 | Create `~/Shared` and `~/Shared/FreeTube`; `/FreeTube` is the first line of `~/Shared/.stignore` and `*~` is in `~/Shared/FreeTube/.stignore`, before either folder exists | same |
 | Before the first start, write the tailnet listen list and turn off relays, global and local announce, and NAT in `config.xml`. On a serving machine, `PATCH /rest/config/options` and restart only when the list changed | same |
@@ -18,7 +18,9 @@ This Mac mini is the always-on peer, so Syncthing is a default here, not an opt-
 
 ## Choices that are this repo's
 
-- **Tailscale is not signed in on a first install.** Setup finishes the rest, leaves the service disabled, and prints that Syncthing is waiting. `groundwork-update` after `sudo tailscale up` completes it. Syncthing never starts on the upstream `default` listen addresses while it waits.
+- **Tailscale is not signed in on a first install.** Setup finishes the rest, leaves the service disabled, and prints that Syncthing is waiting. `groundwork-update` after `sudo tailscale up` completes it. Syncthing never starts on the upstream `default` listen addresses while it waits. A waiting or linger-less run writes `~/.local/state/groundwork/syncthing-pending`; `groundwork-update` and `update-all` then finish as `completed_with_warnings` (exit 1) until a run clears it. A real apply failure still registers the update commands first, then exits 1.
+- **Linger follows the battery, not the model.** The contract enables linger on the always-on mini only. A MacBook starts Syncthing at login. Absence of `/sys/class/power_supply/BAT*` is the test, so an Apple Silicon desktop lingers and a laptop does not.
+- **The binary and state directory are the service's.** The helper reads `ExecStart` and the user manager's `XDG_STATE_HOME` from `systemctl --user`, refuses a different `syncthing` earlier on `PATH`, and stops and disables a service that does not answer with the key from the config it edited. It checks `GET /rest/system/version` as well as the binary, because pacman does not restart a running user service.
 - **Folders are created over REST after the first start**, not written into `config.xml` by hand. The contract's ordering invariant still holds: both ignore files exist before either folder is added, so nothing is scanned unignored. This avoids hand-writing a full folder element that Syncthing would otherwise fill with defaults.
 - **No Syncthing preference.** There is no `--with-syncthing`; the contract makes it a default. Remove it by hand (`systemctl --user disable --now syncthing.service`, `sudo pacman -Rns syncthing`) and note that the next apply reinstalls it.
 - **`groundwork syncthing-pair`** is a launcher at `~/.local/bin/groundwork` that handles only `syncthing-pair`; `groundwork-syncthing pair ...` is the same command. An existing `groundwork` file that is not ours is left alone with a warning. Nothing in this repo installs `groundwork-mac`.
@@ -30,4 +32,4 @@ The FreeTube wrapper (lock, `lstat` classification, symlink migration, receive-o
 
 ## Proof that fixtures cannot give
 
-Tests use a fake local Syncthing. They do not show that the real 2.1.x REST API accepts these bodies, that the pacman binary maps on 16 KiB pages, that `quic://` listeners bind to the tailscale address, or that two machines converge. See the hand-over note for the on-device checklist.
+Tests use a fake local Syncthing. They do not show that the real 2.1.x REST API accepts these bodies, that the pacman binary maps on 16 KiB pages, that `quic://` listeners bind to the tailscale address, or that two machines converge. The pull request's Not proved list is the on-device checklist.

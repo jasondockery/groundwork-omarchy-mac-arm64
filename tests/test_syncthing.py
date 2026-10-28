@@ -17,6 +17,7 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'scripts/groundwork-syncthing.py'
 spec = importlib.util.spec_from_file_location('groundwork_syncthing', SCRIPT)
 gs = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gs)
+REAL_LISTENING = gs.listening_on_gui
 
 API_KEY = 'fixture-api-key-not-real'
 ME = 'AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG-AAAAAAA'
@@ -67,6 +68,10 @@ esac
 '''
 
 TAILSCALE = '''#!/bin/bash
+if [ "$1" = status ]; then
+  echo "{\\"BackendState\\":\\"${FAKE_TS_STATE:-Running}\\",\\"Self\\":{\\"Online\\":true}}"
+  exit 0
+fi
 case "$2" in
   -4) [ -n "${FAKE_TS4:-}" ] && echo "$FAKE_TS4" || exit 1 ;;
   -6) [ -n "${FAKE_TS6:-}" ] && echo "$FAKE_TS6" || exit 1 ;;
@@ -85,6 +90,9 @@ class FakeSyncthing:
                         'localAnnounceEnabled': True, 'natEnabled': True}
         self.gui = {'address': '127.0.0.1:8384', 'user': 'jason', 'password': 'hash'}
         self.browse = []
+        self.version = 'v2.1.7'
+        self.listener_errors = {}
+        self.status_override = None
         self.writes = []
         self.requests = []
         fake = self
@@ -139,8 +147,14 @@ class FakeSyncthing:
         self.server.server_close()
 
     def route(self, method, path, body):
+        if path == '/rest/system/version':
+            return 200, {'version': self.version}
+        if path.startswith('/rest/db/status'):
+            return 200, {'state': 'idle'}
         if path == '/rest/system/status':
-            return 200, {'myID': ME, 'connectionServiceStatus': {url: {'error': None} for url in self.options['listenAddresses']}}
+            listeners = self.status_override if self.status_override is not None else {
+                url: {'error': self.listener_errors.get(url)} for url in self.options['listenAddresses']}
+            return 200, {'myID': ME, 'connectionServiceStatus': listeners}
         if path == '/rest/config/defaults/folder':
             return 200, {'id': '', 'label': '', 'path': '~', 'type': 'sendreceive', 'paused': False, 'devices': [],
                          'versioning': {'type': '', 'params': {}, 'cleanupIntervalS': 3600, 'fsPath': '', 'fsType': 'basic'}}
@@ -214,12 +228,18 @@ class SyncthingCase(unittest.TestCase):
         for target, value in (('GUI_ADDRESS', self.server.address), ('listening_on_gui', lambda: True)):
             patch.object(gs, target, value).start()
         original = gs.systemctl
+        self.at_enable = None
+        self.real_listening = REAL_LISTENING
+        real_wait = gs.wait_for
+        patch.object(gs, 'wait_for', lambda check, seconds, pause=0.5: real_wait(check, min(seconds, 1), 0.05)).start()
 
         def systemctl(*args, **kwargs):
+            if args[:1] == ('enable',) and self.config.exists():
+                self.at_enable = (self.config.read_text(), dict(self.server.folders), list(self.systemctl_log()))
             result = original(*args, **kwargs)
             if args[:1] == ('enable',):
                 # The started process reads the options the helper wrote.
-                self.server.load_options(self.config)
+                self.server.load_options(gs.config_dir() / 'config.xml')
             return result
         patch.object(gs, 'systemctl', systemctl).start()
         self.addCleanup(patch.stopall)
@@ -322,6 +342,14 @@ class ApplyTests(SyncthingCase):
         self.assertNotIn('>default<', text)
         self.assertIn(f'<listenAddress>quic://[{V6}]:22000</listenAddress>', text)
         self.assertIn('--user enable --now syncthing.service', self.systemctl_log())
+        # At the moment of the first start the config already carried the tailnet
+        # list and the four flags, no folder existed yet, and no restart was needed.
+        before, folders_then, log_then = self.at_enable
+        self.assertNotIn('>default<', before)
+        for flag in gs.OPTION_FLAGS:
+            self.assertIn(f'<{flag}>false</{flag}>', before)
+        self.assertEqual(folders_then, {})
+        self.assertEqual([line for line in self.systemctl_log() if 'restart' in line], [])
         self.assertFalse((self.home / 'Sync').exists())
         folders = self.server.folders
         self.assertEqual(sorted(folders), ['groundwork-freetube', 'groundwork-shared'])
@@ -456,6 +484,119 @@ class ApplyTests(SyncthingCase):
         self.assertEqual(order.index(('PUT', '/rest/config/folders/groundwork-shared')) < order.index(('POST', '/rest/system/reset')), True)
         self.assertEqual([d['deviceID'] for d in self.server.folders['groundwork-shared']['devices']], [ME])
         self.assertTrue((self.home / 'Shared/.stignore').read_text().startswith('/FreeTube\n'))
+
+
+class ReviewRepairTests(SyncthingCase):
+    """Cases a fake that always agrees would hide."""
+
+    def test_running_daemon_older_than_2_1_2_is_refused_before_any_write(self):
+        self.seed_config()
+        self.mark_active()
+        self.server.version = 'v2.1.1'
+        self.server.folders['groundwork-freetube'] = {
+            'id': 'groundwork-freetube', 'path': str(self.home / 'Shared/FreeTube'), 'versioning': {'type': ''}, 'paused': True}
+        with self.assertRaises(gs.SyncthingError):
+            gs.apply()
+        self.assertEqual(self.server.writes, [])
+        with self.assertRaises(gs.SyncthingError):
+            gs.pair_add(PEER, 'macbook', 'macbook.tailnet.example')
+        self.assertEqual(self.server.writes, [])
+
+    def test_state_home_follows_the_user_manager_not_this_shell(self):
+        other = self.root / 'manager-state'
+        (self.state / 'manager-env').write_text(f'XDG_STATE_HOME={other}\n')
+        self.assertEqual(gs.config_dir(), other / 'syncthing')
+        code, output = self.run_apply()
+        self.assertEqual(code, 0, output)
+        self.assertTrue((other / 'syncthing/config.xml').exists())
+        self.assertFalse(self.config.exists())
+
+    def test_a_different_syncthing_on_path_is_refused(self):
+        unit = self.root / 'unit-bin'
+        unit.write_text('#!/bin/sh\n')
+        unit.chmod(0o755)
+        (self.state / 'unit-show').write_text(f'ExecStart={{ path={unit} ; argv[]={unit} serve }}\n')
+        with self.assertRaises(gs.SyncthingError) as caught:
+            gs.syncthing_command()
+        self.assertIn('two peers', str(caught.exception))
+
+    def test_a_service_that_does_not_answer_is_stopped_and_disabled(self):
+        with patch.object(gs, 'wait_for_api', side_effect=gs.SyncthingError('no answer')):
+            with self.assertRaises(gs.SyncthingError) as caught:
+                gs.apply()
+        self.assertIn('--user disable --now syncthing.service', self.systemctl_log())
+        self.assertIn('stopped and disabled', str(caught.exception))
+
+    def test_a_listener_that_failed_to_bind_is_not_finished(self):
+        self.seed_config()
+        self.mark_active()
+        self.server.options['listenAddresses'] = gs.listen_addresses(V4, None)
+        self.server.listener_errors = {f'quic://{V4}:22000': 'bind: cannot assign requested address'}
+        with self.assertRaises(gs.SyncthingError):
+            gs.apply()
+
+    def test_equal_config_but_wrong_running_listeners_restarts_once(self):
+        # An earlier run died between the PATCH and the restart.
+        self.seed_config()
+        self.mark_active()
+        self.server.options['listenAddresses'] = gs.listen_addresses(V4, None)
+        for flag in gs.OPTION_FLAGS:
+            self.server.options[flag] = False
+        self.server.status_override = {'default': {'error': None}}
+        with self.assertRaises(gs.SyncthingError):
+            gs.apply()
+        self.assertEqual([line for line in self.systemctl_log() if 'restart' in line], ['--user restart syncthing.service'])
+
+    def test_stopped_tailscale_is_waiting_even_if_it_prints_an_address(self):
+        os.environ['FAKE_TS_STATE'] = 'Stopped'
+        with self.assertRaises(gs.Waiting):
+            gs.tailscale_addresses()
+        code, _ = self.run_apply()
+        self.assertEqual(code, gs.EXIT_WAITING)
+
+    def test_environment_file_override_is_refused(self):
+        override = self.root / 'syncthing.env'
+        override.write_text('STGUIADDRESS=0.0.0.0:8384\n')
+        (self.state / 'unit-show').write_text(f'EnvironmentFiles={override} (ignore_errors=no)\n')
+        with self.assertRaises(gs.SyncthingError):
+            gs.apply()
+        self.assertEqual([line for line in self.systemctl_log() if 'enable' in line], [])
+
+    def test_gui_socket_check_reads_the_real_socket_and_its_owner(self):
+        self.assertTrue(self.real_listening())
+        with patch.object(os, 'getuid', return_value=os.getuid() + 1):
+            self.assertFalse(self.real_listening())
+        patch.object(gs, 'GUI_ADDRESS', '127.0.0.1:1').start()
+        self.assertFalse(self.real_listening())
+
+    def test_the_api_key_never_follows_a_redirect(self):
+        api = gs.Api(API_KEY)
+        self.assertTrue(any(isinstance(handler, gs.NoRedirect) for handler in api.opener.handlers))
+
+    def test_pair_add_writes_the_ignore_files_before_it_creates_missing_folders(self):
+        self.seed_config()
+        self.mark_active()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            gs.pair_add(PEER, 'macbook', 'macbook.tailnet.example')
+        self.assertTrue((self.home / 'Shared/.stignore').read_text().startswith('/FreeTube\n'))
+        self.assertEqual((self.home / 'Shared/FreeTube/.stignore').read_text(), '*~\n')
+        self.assertEqual(sorted(self.server.folders), ['groundwork-freetube', 'groundwork-shared'])
+
+    def test_reset_waits_for_the_rescan_and_announces_the_removal_first(self):
+        self.seed_config()
+        self.mark_active()
+        self.run_apply()
+        self.server.browse = [{'name': 'history.db'}]
+        self.server.requests.clear()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            gs.apply()
+        paths = [path.split('?')[0] for _, path, _ in self.server.requests]
+        self.assertIn('/rest/db/status', paths)
+        self.assertLess(paths.index('/rest/system/reset'), len(paths) - paths[::-1].index('/rest/db/status') - 1)
+        self.assertIn('Pair again', out.getvalue())
+        self.assertLess(out.getvalue().index('Pair again'), len(out.getvalue()))
 
 
 class PairTests(SyncthingCase):

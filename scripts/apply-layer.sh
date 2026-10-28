@@ -207,10 +207,18 @@ local_inference_ready() {
   [[ -d $vulkan_dir ]] || return 1
   compgen -G "$vulkan_dir/*" >/dev/null
 }
-# Lingering lets the user service start at boot without a graphical login.
-syncthing_user=${USER:-$(id -un)}
+# Lingering lets the user service start at boot without a graphical login. Only
+# a machine with no battery (Mac mini, iMac, Studio) is the always-on peer; a
+# MacBook starts Syncthing at login like every other machine.
+syncthing_user=$(id -un)
+syncthing_always_on() {
+  ! compgen -G "$test_root/sys/class/power_supply/BAT*" >/dev/null
+}
 syncthing_linger_enabled() {
   [[ -e $test_root/var/lib/systemd/linger/$syncthing_user ]]
+}
+syncthing_linger_needed() {
+  syncthing_always_on && ! syncthing_linger_enabled
 }
 privileged_changes_needed() {
   local executable
@@ -225,7 +233,7 @@ privileged_changes_needed() {
     return 0
   fi
   service_ready tailscaled || return 0
-  syncthing_linger_enabled || return 0
+  ! syncthing_linger_needed || return 0
   if command -v chromium >/dev/null; then
     chromium_extension_current || return 0
   fi
@@ -278,7 +286,7 @@ fi
 if [[ "$EUID" -ne 0 && $needs_privilege -eq 1 ]]; then
   if [[ $updating -eq 0 ]] && ! sudo -n true 2>/dev/null; then
     if [[ -r /dev/tty && -w /dev/tty ]] && : </dev/tty >/dev/null; then
-      echo "This install needs an administrator password for Tailscale, the browser extension, and keyd."
+      echo "This install needs an administrator password for Tailscale, the browser extension, keyd, and lingering."
       echo "Enter your password when asked. This approval covers the privileged steps in this run."
       sudo_status=0
       # sudo -v reads the password on its own standard input. Point that prompt
@@ -939,37 +947,53 @@ fi
 # The helper holds the contract: tailnet-only listen addresses, the two shared
 # folders, and groundwork syncthing-pair. It waits, rather than failing setup,
 # when Tailscale has no address yet.
+syncthing_problem=""
 install_syncthing() {
-  local bin status=0 apply_status=0
+  local bin status=0 apply_status=0 pending=""
   install_package syncthing
   bin=$(command -v syncthing)
-  # Apple Silicon kernels use 16 KiB pages. A non-ELF wrapper is skipped here
-  # and fails on its own when the helper runs it.
+  # Apple Silicon kernels use 16 KiB pages. A non-ELF wrapper is skipped here;
+  # the helper refuses a PATH copy that is not the one the service runs.
   python3 "$root/scripts/groundwork-update.py" check-elf-alignment "$bin" || status=$?
   if [[ $status -ne 0 && $status -ne 2 ]]; then
     echo "Refusing to treat Syncthing as installed. syncthing.service was not enabled." >&2
-    echo "Remove the package with: sudo pacman -Rns syncthing" >&2
+    echo "If the reason above is the package itself, remove it with: sudo pacman -Rns syncthing" >&2
     exit 1
   fi
-  if ! syncthing_linger_enabled; then
+  if syncthing_linger_needed; then
     if ! sudo loginctl enable-linger "$syncthing_user"; then
-      echo "Could not enable lingering for $syncthing_user; Syncthing will start at login until you rerun groundwork-update." >&2
+      pending="Lingering is not enabled, so Syncthing starts at login instead of boot."
+      echo "Could not enable lingering for $syncthing_user. $pending Rerun groundwork-update." >&2
     fi
   fi
   python3 "$root/scripts/groundwork-syncthing.py" apply || apply_status=$?
   case $apply_status in
     0) ;;
-    75) echo "Syncthing is waiting for Tailscale; rerun groundwork-update after tailnet sign-in." >&2 ;;
+    75)
+      pending="${pending:+$pending }Syncthing is waiting for Tailscale to have an address."
+      echo "Syncthing is waiting for Tailscale to have an address. Rerun groundwork-update after tailnet sign-in." >&2
+      ;;
     *)
-      echo "Syncthing could not be applied (exit $apply_status). Fix the message above and rerun." >&2
-      exit 1
+      # Register first so the update commands exist for the retry.
+      syncthing_problem="Syncthing could not be applied (exit $apply_status). Fix the message above and rerun."
+      pending="${pending:+$pending }$syncthing_problem"
       ;;
   esac
+  # An update reads this to report a warning instead of a clean success.
+  if [[ -n $pending ]]; then
+    python3 "$root/scripts/groundwork-update.py" marker write syncthing-pending "$pending"
+  else
+    python3 "$root/scripts/groundwork-update.py" marker remove syncthing-pending
+  fi
 }
 install_syncthing
 
 python3 "$root/scripts/groundwork-update.py" register "$root" "$with_keyd" "$with_screen_sharing" \
   "${GROUNDWORK_OBSIDIAN_VAULT:-$HOME/Documents/Obsidian/my_obsidian_vault}" "$with_blip" "$with_local_inference"
+if [[ -n $syncthing_problem ]]; then
+  echo "$syncthing_problem" >&2
+  exit 1
+fi
 if [[ $updating -eq 1 ]]; then
   echo "Groundwork settings applied. Saved keyd, screen-sharing, Blip, local inference, and vault choices were preserved."
   exit 0
