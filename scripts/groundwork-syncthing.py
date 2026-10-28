@@ -165,10 +165,28 @@ def gui_override():
 
 
 def state_pinned():
-    """Where the unit itself chooses the state directory, or None. Groundwork follows the user manager's."""
-    unit = systemctl('show', SERVICE, '-p', 'Environment', '-p', 'ExecStart', check=False, capture=True)
-    found = re.search(r'XDG_STATE_HOME=|STHOME=|STCONFDIR=|--home\b|--config\b|-home\b', unit.stdout or '')
-    return found.group(0) if found else None
+    """Where the unit or the manager chooses a Syncthing home, or None. Groundwork edits the manager's XDG_STATE_HOME."""
+    pattern = re.compile(r'XDG_STATE_HOME=|STHOME=|STCONFDIR=|(?<![\w/.-])--home\b|(?<![\w/.-])--config\b')
+    unit = systemctl('show', SERVICE, '-p', 'Environment', '-p', 'ExecStart', '-p', 'EnvironmentFiles',
+                     check=False, capture=True)
+    found = pattern.search(unit.stdout or '')
+    if found:
+        return found.group(0)
+    manager = systemctl('show-environment', check=False, capture=True)
+    found = re.search(r'^(STHOME|STCONFDIR)=', manager.stdout or '', re.MULTILINE)
+    if found:
+        return found.group(0)
+    for line in (unit.stdout or '').splitlines():
+        if line.startswith('EnvironmentFiles='):
+            words = line.split('=', 1)[1].split()
+            try:
+                text = Path(words[0].lstrip('-')).read_text(errors='replace') if words else ''
+            except OSError:
+                continue
+            for entry in text.splitlines():
+                if not entry.lstrip().startswith(('#', ';')) and re.match(r'\s*(XDG_STATE_HOME|STHOME|STCONFDIR)=', entry):
+                    return words[0]
+    return None
 
 
 def dropin_path():
@@ -535,16 +553,24 @@ def separate_freetube_from_parent(api):
 
 
 def restarted_since(api, started):
+    # Never send the key while the port is free or owned by someone else.
+    if not listening_on_gui():
+        return True
     try:
         return (api.get('/rest/system/status') or {}).get('startTime') != started
+    except ApiError:
+        # The old process answering an error is not a restart.
+        return False
     except SyncthingError:
-        # Down mid-restart counts: it is not the old process.
         return True
 
 
 def folder_idle(api):
+    if not listening_on_gui():
+        return False
     try:
-        return (api.get('/rest/db/status?folder=' + SHARED['id']) or {}).get('state') == 'idle'
+        # A paused folder (the manual recovery step) reports paused and cannot scan.
+        return (api.get('/rest/db/status?folder=' + SHARED['id']) or {}).get('state') in ('idle', 'paused')
     except SyncthingError:
         return False
 

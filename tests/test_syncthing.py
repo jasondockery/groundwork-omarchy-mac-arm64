@@ -45,7 +45,9 @@ CONFIG_XML = '''<configuration version="51">
 SYNCTHING = '''#!/bin/bash
 case "$1" in
   --version) echo "${FAKE_SYNCTHING_VERSION:-syncthing v2.1.7 \\"Hafnium Hornet\\" (go1.25 linux-arm64)}" ;;
-  device-id) echo "%(me)s" ;;
+  device-id)
+    # The ID comes from the config the service reads, which the helper selects with XDG_STATE_HOME.
+    if [ "$XDG_STATE_HOME" = "${FAKE_STATE_EXPECTED:-$XDG_STATE_HOME}" ]; then echo "%(me)s"; else echo "%(other)s"; fi ;;
   generate)
     [ "${STNODEFAULTFOLDER:-}" = 1 ] || { echo "generate would create ~/Sync" >&2; exit 1; }
     mkdir -p "$XDG_STATE_HOME/syncthing"
@@ -54,7 +56,7 @@ case "$1" in
     : > "$XDG_STATE_HOME/syncthing/key.pem"; chmod 600 "$XDG_STATE_HOME/syncthing/key.pem"
     ;;
 esac
-''' % {'me': ME}
+''' % {'me': ME, 'other': 'ZZZZZZZ-YYYYYYY-XXXXXXX-WWWWWWW-VVVVVVV-UUUUUUU-TTTTTTT-SSSSSSS'}
 
 SYSTEMCTL = '''#!/bin/bash
 echo "$*" >> "$FAKE_STATE/systemctl.log"
@@ -667,7 +669,78 @@ class ReviewRepairTests(SyncthingCase):
 
     def test_show_reads_the_id_from_the_services_state_directory(self):
         (self.state / 'manager-env').write_text(f'XDG_STATE_HOME={self.root / "manager-state"}\n')
+        # The shell's XDG_STATE_HOME differs, so only the helper's override yields ME.
+        os.environ['FAKE_STATE_EXPECTED'] = str(self.root / 'manager-state')
         self.assertEqual(gs.device_id_from_binary(), ME)
+
+
+class ReviewRoundThreeTests(SyncthingCase):
+    def reset_scenario(self):
+        self.seed_config()
+        self.mark_active()
+        self.run_apply()
+        self.server.browse = [{'name': 'history.db'}]
+
+    def test_a_reset_that_does_not_restart_still_waits_and_proceeds(self):
+        self.reset_scenario()
+        self.server.start_time = 'boot-1'
+        # The fake bumps startTime on reset; simulate a Syncthing that does not restart.
+        original = self.server.route
+
+        def route(method, path, body):
+            result = original(method, path, body)
+            if path.startswith('/rest/system/reset'):
+                self.server.start_time = 'boot-1'
+            return result
+        self.server.route = route
+        with contextlib.redirect_stdout(io.StringIO()):
+            gs.apply()
+        self.assertEqual(self.server.browse, [])
+
+    def test_an_error_from_the_old_process_is_not_a_restart(self):
+        api = gs.Api(API_KEY)
+        with patch.object(api, 'get', side_effect=gs.ApiError(503, '/rest/system/status')):
+            self.assertFalse(gs.restarted_since(api, 'boot-1'))
+        with patch.object(api, 'get', side_effect=gs.SyncthingError('Cannot reach')):
+            self.assertTrue(gs.restarted_since(api, 'boot-1'))
+
+    def test_restart_and_idle_checks_send_no_key_to_a_foreign_socket(self):
+        patch.object(gs, 'listening_on_gui', lambda: False).start()
+        api = gs.Api(API_KEY)
+        self.assertTrue(gs.restarted_since(api, 'boot-1'))
+        self.assertFalse(gs.folder_idle(api))
+        self.assertEqual(self.server.requests, [])
+
+    def test_a_paused_folder_counts_as_done_scanning_for_the_manual_recovery_rerun(self):
+        self.reset_scenario()
+        original = self.server.route
+
+        def route(method, path, body):
+            if path.startswith('/rest/db/status'):
+                return 200, {'state': 'paused'}
+            return original(method, path, body)
+        self.server.route = route
+        with contextlib.redirect_stdout(io.StringIO()):
+            gs.apply()
+        self.assertEqual(self.server.browse, [])
+
+    def test_pinned_state_is_found_in_every_place_a_unit_can_set_it(self):
+        env = self.root / 'syncthing.env'
+        env.write_text('STCONFDIR=/x\n')
+        for text in ('Environment=XDG_STATE_HOME=/x\n', 'ExecStart={ argv[]=/usr/bin/syncthing serve --home=/x }\n',
+                     f'EnvironmentFiles={env} (ignore_errors=no)\n'):
+            (self.state / 'unit-show').write_text(text)
+            self.assertTrue(gs.state_pinned(), text)
+        (self.state / 'unit-show').unlink()
+        (self.state / 'manager-env').write_text('STHOME=/x\n')
+        self.assertTrue(gs.state_pinned())
+
+    def test_ordinary_paths_that_contain_home_are_not_a_pinned_state(self):
+        (self.state / 'unit-show').write_text('ExecStart={ argv[]=/usr/bin/syncthing serve --data=/srv/my-home --no-browser }\n')
+        self.assertIsNone(gs.state_pinned())
+        # The manager's own XDG_STATE_HOME is followed, not refused.
+        (self.state / 'manager-env').write_text('XDG_STATE_HOME=/somewhere\n')
+        self.assertIsNone(gs.state_pinned())
 
 
 class PairTests(SyncthingCase):

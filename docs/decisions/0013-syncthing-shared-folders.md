@@ -9,7 +9,7 @@ This Mac mini is the always-on peer, so Syncthing is a default here, not an opt-
 | Step | Where |
 |---|---|
 | `omarchy pkg add syncthing`, then `readelf` LOAD alignment check on the binary (16 KiB pages) | `scripts/apply-layer.sh` |
-| `sudo loginctl enable-linger` once, on a machine with no battery (Mac mini, iMac, Studio), so the user service starts at boot | `scripts/apply-layer.sh` |
+| `sudo loginctl enable-linger` once, on a machine with no system battery (a desktop such as the Mac mini), so the user service starts at boot | `scripts/apply-layer.sh` |
 | Refuse a binary older than 2.1.2, `syncthing generate` with `STNODEFAULTFOLDER=1` when `config.xml` is missing, user drop-in `~/.config/systemd/user/syncthing.service.d/groundwork.conf` | `scripts/groundwork-syncthing.py apply` |
 | Create `~/Shared` and `~/Shared/FreeTube`; `/FreeTube` is the first line of `~/Shared/.stignore` and `*~` is in `~/Shared/FreeTube/.stignore`, before either folder exists | same |
 | Before the first start, write the tailnet listen list and turn off relays, global and local announce, and NAT in `config.xml`. On a serving machine, `PATCH /rest/config/options` and restart only when the list changed | same |
@@ -25,7 +25,6 @@ This Mac mini is the always-on peer, so Syncthing is a default here, not an opt-
 - **No Syncthing preference.** There is no `--with-syncthing`; the contract makes it a default. Remove it by hand (`systemctl --user disable --now syncthing.service`, `sudo pacman -Rns syncthing`) and note that the next apply reinstalls it.
 - **`groundwork syncthing-pair`** is a launcher at `~/.local/bin/groundwork` that handles only `syncthing-pair`; `groundwork-syncthing pair ...` is the same command. An existing `groundwork` file that is not ours is left alone with a warning. Nothing in this repo installs `groundwork-mac`.
 - **Package source:** pacman `syncthing` from the Omarchy feed or Arch Linux ARM `extra`. Do not add a second copy through Flatpak or Homebrew.
-
 - **Rebuilding a parent that already indexed FreeTube** follows the contract: remove other devices, reset, and re-browse. Syncthing may refuse to reset a folder that is not paused; the contract has the apply never pause `groundwork-shared`, so the helper stops with the one manual step (pause it in the GUI, rerun, resume). The devices are already gone by then, so nothing leaks. Whether a pause is required is unproven and is a question for the contract.
 
 ## Not implemented yet

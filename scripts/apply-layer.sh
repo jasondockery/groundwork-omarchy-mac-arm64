@@ -208,8 +208,8 @@ local_inference_ready() {
   compgen -G "$vulkan_dir/*" >/dev/null
 }
 # Lingering lets the user service start at boot without a graphical login. Only
-# a machine with no system battery (Mac mini, iMac, Studio) is the always-on
-# peer; a MacBook (the Asahi SMC registers macsmc-battery) starts Syncthing at
+# a machine with no system battery (a desktop such as the Mac mini) is the
+# always-on peer; a MacBook (the Asahi SMC registers macsmc-battery) starts Syncthing at
 # login like every other machine.
 syncthing_user=$(id -un)
 syncthing_always_on() {
