@@ -1,5 +1,6 @@
 """Exercise installer effects with fake package/service commands and a private /etc."""
 import json
+import re
 import fcntl
 import os
 from pathlib import Path
@@ -298,6 +299,9 @@ class InstallKeydTests(unittest.TestCase):
         self.env.pop('T3CODE_INSTALL_BIN_DIR', None)
         self.env.pop('GROUNDWORK_OBSIDIAN_VAULT', None)
         self.env.pop('WAYLAND_DISPLAY', None)
+        # A host XDG or mise directory would point the shim checks at the real home.
+        for key in ('XDG_DATA_HOME', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME', 'MISE_DATA_DIR'):
+            self.env.pop(key, None)
 
     def run_install(self, *args, success=True):
         result = subprocess.run(['bash', str(REPO / 'install.sh'), *args],
@@ -1096,7 +1100,10 @@ raise SystemExit(os.WEXITSTATUS(status))
     def blip_mentions(self, calls):
         needles = ('bun', 'socat', 'nixfred', 'blip', 'omarchy-install-dev-env', 'jq', 'openssh',
                    'libnotify', 'wl-clipboard', 'xdg-utils', 'notify-send', 'wl-copy', 'xdg-open', 'ffmpeg', 'mpv')
-        return [call for call in calls if any(needle in arg for arg in call for needle in needles)]
+        # Whole words only: a random mktemp name such as tmp.jq2MOwqXUk is not jq.
+        def words(arg):
+            return set(re.split(r'[^A-Za-z0-9-]+', arg)) | set(re.split(r'[^A-Za-z0-9]+', arg))
+        return [call for call in calls if any(needle in words(arg) for arg in call for needle in needles)]
 
     def test_default_install_leaves_blip_off_and_an_existing_copy_alone(self):
         self.env['FIXTURE_PLUGIN_LIST'] = '[{"id": "nixfred.blip", "enabled": true}]'

@@ -3,6 +3,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from contextlib import redirect_stdout
 from pathlib import Path
 import subprocess
@@ -99,17 +100,31 @@ class ModelPinTests(unittest.TestCase):
             self.assertEqual(verify.pinned_model_status(link), 'symlink')
 
 
-class CommandTests(unittest.TestCase):
-    def script(self, *args):
-        return subprocess.run(
-            [sys.executable, str(REPO / 'scripts/verify-local-inference.py'), *args],
-            capture_output=True, text=True, timeout=10,
-        )
+# Report another architecture, so the refusal is tested on any host. On the
+# Apple Silicon machine itself the real command would download the model.
+FOREIGN_MACHINE = """
+import os, runpy, sys
+real = os.uname()
+os.uname = lambda: os.uname_result((real.sysname, real.nodename, real.release, real.version, 'x86_64'))
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name='__main__')
+"""
 
-    def test_this_machine_is_refused_before_download_or_inference(self):
-        preflight = self.script('preflight')
-        download = self.script('download')
-        run = self.script('run')
+
+class CommandTests(unittest.TestCase):
+    def script(self, *args, prefix=()):
+        with tempfile.TemporaryDirectory() as temporary:
+            env = dict(os.environ, XDG_DATA_HOME=f'{temporary}/data', XDG_STATE_HOME=f'{temporary}/state')
+            return subprocess.run(
+                [sys.executable, *prefix, str(REPO / 'scripts/verify-local-inference.py'), *args],
+                capture_output=True, text=True, timeout=10, env=env,
+            )
+
+    def test_a_foreign_machine_is_refused_before_download_or_inference(self):
+        foreign = ('-c', FOREIGN_MACHINE)
+        preflight = self.script('preflight', prefix=foreign)
+        download = self.script('download', prefix=foreign)
+        run = self.script('run', prefix=foreign)
         for result in (preflight, download, run):
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             self.assertIn('aarch64', result.stderr)

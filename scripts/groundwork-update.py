@@ -16,6 +16,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 import uuid
 import zipfile
@@ -204,15 +205,19 @@ def signal_group(process, signum):
     return True
 
 
-def group_alive(process):
+def group_alive(process, warned=None):
+    # `warned` is a per-stop set, so a polling loop reports an unreadable group once.
     try:
         os.killpg(process.pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
-        print(f'Could not check the remaining processes started by {process.args[0]}; continuing.',
-              file=sys.stderr, flush=True)
-        return False
+        if warned is None or process.pid not in warned:
+            if warned is not None:
+                warned.add(process.pid)
+            print(f'Could not check the remaining processes started by {process.args[0]}; '
+                  'waiting for them as if they were still running.', file=sys.stderr, flush=True)
+        return True
     return True
 
 
@@ -237,13 +242,14 @@ def stop(process, grace=0):
 def stop_group(process, grace):
     # On a deadline or an interrupt, forward SIGINT first so interactive tools
     # (omarchy update, pacman, sudo) can clean up, as if Ctrl+C was pressed.
+    warned = set()
     if grace:
         if not signal_group(process, signal.SIGINT):
             reap(process)
             return
         ends = time.monotonic() + grace
         while time.monotonic() < ends:
-            if process.poll() is not None and not group_alive(process):
+            if process.poll() is not None and not group_alive(process, warned):
                 return
             if STOP_SIGNALS & signal.sigpending():
                 # A second interrupt asks to stop now: skip the rest of the grace.
@@ -359,19 +365,38 @@ def page_size():
     return os.sysconf('SC_PAGESIZE')
 
 
+class HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urllib.parse.urlsplit(newurl).scheme != 'https':
+            raise UpdateError(f'Refusing a non-https redirect from {req.full_url}.')
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+https_opener = urllib.request.build_opener(HttpsOnlyRedirects)
+
+
 def fetch(url, deadline=60):
-    # urlopen's timeout bounds each socket operation, not the whole transfer.
     ends = time.monotonic() + deadline
     request = urllib.request.Request(url, headers={'User-Agent': 'groundwork-omarchy-updater'})
     chunks = []
-    with urllib.request.urlopen(request, timeout=min(deadline, 30)) as response:
-        while True:
-            if time.monotonic() > ends:
-                raise UpdateError(f'Downloading {url} exceeded {deadline} seconds.')
-            chunk = response.read(1 << 20)
-            if not chunk:
-                return b''.join(chunks)
-            chunks.append(chunk)
+    try:
+        with https_opener.open(request, timeout=min(deadline, 30)) as response:
+            # urllib exposes no public socket. If a later Python moves this
+            # private attribute, fall back to the opener's fixed timeout.
+            sock = getattr(getattr(getattr(response, 'fp', None), 'raw', None), '_sock', None)
+            # The response closes itself on the last byte.
+            while not response.isclosed():
+                # A socket timeout bounds one recv, not the transfer. Bound each
+                # read by the time left, so a stalled read cannot pass the deadline.
+                left = ends - time.monotonic()
+                if left <= 0:
+                    raise UpdateError(f'Downloading {url} exceeded {deadline} seconds.')
+                if sock is not None:
+                    sock.settimeout(left)
+                chunks.append(response.read1(1 << 20))
+    except TimeoutError as error:
+        raise UpdateError(f'Downloading {url} exceeded {deadline} seconds.') from error
+    return b''.join(chunks)
 
 
 def reported_t3_version(reported):

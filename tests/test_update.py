@@ -9,10 +9,12 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -859,7 +861,15 @@ class T3CandidateTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('readelf'), 'readelf is not installed')
     def test_load_alignments_parse_real_readelf_output(self):
-        self.assertTrue(updater.load_alignments(os.path.realpath(sys.executable)))
+        binary = os.path.realpath(sys.executable)
+        listing = subprocess.run(['readelf', '-lW', binary], capture_output=True, text=True, check=True).stdout
+        expected = [int(line.split()[-1], 16) for line in listing.splitlines() if line.split()[:1] == ['LOAD']]
+        alignments = updater.load_alignments(binary)
+        self.assertTrue(alignments)
+        self.assertEqual(alignments, expected)
+        for alignment in alignments:
+            self.assertGreater(alignment, 0)
+            self.assertEqual(alignment & (alignment - 1), 0, hex(alignment))
 
     def test_download_is_checksum_verified_and_every_elf_is_checked(self):
         archive = t3_archive(CANDIDATE)
@@ -881,17 +891,88 @@ class T3CandidateTests(unittest.TestCase):
                 updater.t3_download(CANDIDATE, directory)
 
     def test_fetch_enforces_a_total_deadline(self):
+        class Raw:
+            _sock = socket.socket()
         class Slow:
+            fp = type('Fp', (), {'raw': Raw})()
             def __enter__(self):
                 return self
             def __exit__(self, *args):
                 return False
-            def read(self, size):
+            def isclosed(self):
+                return False
+            def read1(self, size):
                 time.sleep(0.05)
                 return b'x'
-        with patch.object(updater.urllib.request, 'urlopen', return_value=Slow()):
+        self.addCleanup(Raw._sock.close)
+        with patch.object(updater.https_opener, 'open', return_value=Slow()):
             with self.assertRaisesRegex(updater.UpdateError, 'exceeded'):
                 updater.fetch('https://example.invalid/archive', deadline=0.2)
+
+    def test_fetch_works_without_the_private_socket_attribute(self):
+        class Response:
+            fp = object()
+            def __init__(self):
+                self.chunks = [b'ab', b'cd']
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def isclosed(self):
+                return not self.chunks
+            def read1(self, size):
+                return self.chunks.pop(0)
+        with patch.object(updater.https_opener, 'open', return_value=Response()):
+            self.assertEqual(updater.fetch('https://example.invalid/archive'), b'abcd')
+
+    def serve_once(self, respond):
+        server = socket.socket()
+        server.bind(('127.0.0.1', 0))
+        server.listen(1)
+        def handle():
+            connection, _ = server.accept()
+            with connection:
+                connection.recv(4096)
+                respond(connection)
+        thread = threading.Thread(target=handle, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(server.close)
+        return f'http://127.0.0.1:{server.getsockname()[1]}/archive'
+
+    def test_fetch_stalled_read_ends_at_the_deadline_not_after_it(self):
+        def respond(connection):
+            connection.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n')
+            time.sleep(1.2)
+            connection.sendall(b'x')
+            # Stall here until the client gives up.
+            connection.settimeout(5)
+            try:
+                connection.recv(1)
+            except OSError:
+                pass
+        url = self.serve_once(respond)
+        started = time.monotonic()
+        with self.assertRaisesRegex(updater.UpdateError, 'exceeded 2 seconds'):
+            updater.fetch(url, deadline=2)
+        # With a fixed per-read timeout the stall would end near 3.2 seconds.
+        self.assertLess(time.monotonic() - started, 2.6)
+
+    def test_fetch_refuses_a_redirect_to_http(self):
+        url = self.serve_once(lambda connection: connection.sendall(
+            b'HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/elsewhere\r\nContent-Length: 0\r\n\r\n'))
+        with self.assertRaisesRegex(updater.UpdateError, 'non-https redirect'):
+            updater.fetch(url)
+
+    def test_redirect_handler_allows_https_and_refuses_other_schemes(self):
+        handler = updater.HttpsOnlyRedirects()
+        request = updater.urllib.request.Request('https://example.invalid/a')
+        headers = {}
+        followed = handler.redirect_request(request, None, 302, 'Found', headers, 'https://example.invalid/b')
+        self.assertEqual(followed.full_url, 'https://example.invalid/b')
+        for target in ('http://example.invalid/b', 'ftp://example.invalid/b', 'file:///etc/passwd'):
+            with self.assertRaises(updater.UpdateError):
+                handler.redirect_request(request, None, 302, 'Found', headers, target)
 
     def test_latest_nightly_matches_the_upstream_installer_selection(self):
         releases = [{'tag_name': 'v0.2.0'}, {'tag_name': 'v0.1.3-preview.1.2'},
@@ -1133,11 +1214,21 @@ class ProcessTests(unittest.TestCase):
     def test_second_interrupt_during_the_grace_period_still_stops_the_child(self):
         previous = signal.signal(signal.SIGINT, signal.default_int_handler)
         self.addCleanup(signal.signal, signal.SIGINT, previous)
-        # A separate process interrupts this one during the 30-second grace.
-        interrupter = subprocess.Popen(['sh', '-c', f'sleep 1.5; kill -INT {os.getpid()}'])
+        # A separate process interrupts this one during the 30-second grace, but
+        # only once the forwarded first SIGINT has been sent, so the second
+        # cannot arrive before the grace loop starts.
+        sent = Path(str(self.report) + '.sigint-sent')
+        interrupter = subprocess.Popen(['sh', '-c', f'until [ -e {sent} ]; do sleep 0.02; done; kill -INT {os.getpid()}'])
         self.addCleanup(interrupter.wait)
+        self.addCleanup(interrupter.kill)
+        real_signal_group = updater.signal_group
+        def signal_group(process, signum):
+            alive = real_signal_group(process, signum)
+            if signum == signal.SIGINT:
+                sent.touch()
+            return alive
         started = time.monotonic()
-        with patch.object(updater, 'INTERRUPT_GRACE_SECONDS', 30):
+        with patch.object(updater, 'INTERRUPT_GRACE_SECONDS', 30), patch.object(updater, 'signal_group', signal_group):
             with self.assertRaises(KeyboardInterrupt):
                 updater.run(self.child('ignore-sigint'), deadline=1)
         self.assertLess(time.monotonic() - started, 10)
@@ -1151,6 +1242,25 @@ class ProcessTests(unittest.TestCase):
                 patch('sys.stderr', new_callable=io.StringIO) as errors:
             updater.stop(process, grace=0.2)
         self.assertIn('Could not send SIGINT', errors.getvalue())
+
+    def test_unreadable_process_group_is_still_stopped(self):
+        process = subprocess.Popen([sys.executable, '-c', 'pass'], start_new_session=True)
+        process.wait()
+        with patch.object(updater.os, 'killpg', side_effect=PermissionError), \
+                patch('sys.stderr', new_callable=io.StringIO) as errors:
+            self.assertTrue(updater.group_alive(process))
+        self.assertIn('Could not check the remaining processes', errors.getvalue())
+        checked = []
+        def killpg(group, signum):
+            checked.append(signum)
+            if signum == 0:
+                raise PermissionError
+        # The leader has exited, so only group_alive decides whether TERM follows.
+        with patch.object(updater.os, 'killpg', killpg), patch('sys.stderr', new_callable=io.StringIO) as stopped:
+            updater.stop(process, grace=0.2)
+        self.assertIn(signal.SIGTERM, checked)
+        self.assertGreater(checked.count(0), 1)
+        self.assertEqual(stopped.getvalue().count('Could not check the remaining processes'), 1)
 
     def test_terminal_less_interactive_stage_keeps_its_heartbeat(self):
         with patch.object(updater, 'HEARTBEAT_SECONDS', 0.1), patch('sys.stdout', new_callable=io.StringIO) as output, \
