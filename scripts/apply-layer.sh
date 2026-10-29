@@ -1438,6 +1438,10 @@ fi
 migrate_brave_to_omarchy() {
   if brave_package_command; then
     assess_brave
+  elif python3 "$root/scripts/groundwork-update.py" brave-rejected; then
+    echo "The brave-bin version available here already failed on this $(brave_page_kib) KiB-page kernel, so it was not installed again. Chromium stays the default." >&2
+    brave_usable=0
+    return 1
   else
     add_and_assess_brave || true
   fi
@@ -1466,6 +1470,11 @@ if brave_installer_supports && ! brave_package_command; then
     brave_current="the user Flatpak $brave_flatpak"
   elif brave_foreign=$(command -v brave 2>/dev/null); then
     brave_current="$brave_foreign, which brave-bin does not own"
+  fi
+  if [[ -n $brave_current ]] && python3 "$root/scripts/groundwork-update.py" brave-rejected; then
+    # Same rule as a missing Brave: a version that already failed is not installed again.
+    echo "The brave-bin version available here already failed on this $(brave_page_kib) KiB-page kernel, so it was not installed again. Chromium stays the default." >&2
+    brave_current=
   fi
   if [[ -n $brave_current ]]; then
     offer_omarchy_migration brave-flatpak "Brave" "$brave_current" \
@@ -1524,6 +1533,9 @@ if [[ $freetube_ready -eq 1 ]]; then
 else
   echo "Trackpad configuration, T3 Code, Herdr, Tailscale, Obsidian, and Bitwarden are installed."
   echo "FreeTube was not installed."
+fi
+if [[ $brave_usable -eq 1 ]]; then
+  echo "Brave is installed, and Chromium stays. See docs/apps.md."
 fi
 echo "Next time, run update-all for maintenance or groundwork-update for configuration only."
 echo "Open Obsidian with Super+Shift+O; finish vault, sync, and Bitwarden sign-in using docs/apps.md."

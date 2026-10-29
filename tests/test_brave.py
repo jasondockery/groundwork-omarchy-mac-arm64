@@ -94,6 +94,7 @@ class BraveInstallTests(unittest.TestCase):
         self.assertNotIn(SET_DEFAULT, self.calls())
         self.assertNotIn('[y/N]', result.stdout + result.stderr)
         self.assertIn('migration default-browser-brave', result.stdout)
+        self.assertIn('Brave is installed, and Chromium stays.', result.stdout)
         self.assertIn('not the default browser', result.stdout)
         self.assertFalse((self.root / 'default-browser').exists())
         self.assertEqual(self.remembered('brave-accepted.json'), ['1.73.91-1'])
@@ -152,6 +153,7 @@ class BraveInstallTests(unittest.TestCase):
         self.assertNotIn(INSTALL_BRAVE, self.calls())
         self.assertIn('already failed', result.stderr)
         self.assertIn('was not installed again', result.stderr)
+        self.assertNotIn('Brave is installed, and Chromium stays.', result.stdout)
         self.assertFalse((self.bin / 'brave').exists())
 
     def test_preinstalled_misaligned_brave_is_remembered_and_not_removed(self):
@@ -224,6 +226,25 @@ class BraveInstallTests(unittest.TestCase):
         result = self.run_update()
         self.assertNotIn('default-browser-brave', result.stdout + result.stderr)
         self.assertNotIn(SET_DEFAULT, self.calls())
+
+    def test_rejected_version_is_not_installed_when_migrating_a_flatpak(self):
+        self.env['FIXTURE_LOAD_ALIGN'] = '0x100'
+        self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertIn('1.73.91-1', self.remembered('brave-rejected.json'))
+        marker = self.flatpak_data()
+        self.env['FIXTURE_LOAD_ALIGN'] = '0x10000'
+        self.reset_calls()
+        result = self.run_install('--migrate-to-omarchy-installers', '--without-keyd', '--without-screen-sharing')
+        self.assertNotIn(INSTALL_BRAVE, self.calls())
+        self.assertNotIn(REMOVE_BRAVE, self.calls())
+        self.assertIn('already failed', result.stderr)
+        self.assertIn('was not installed again', result.stderr)
+        self.assertNotIn('migration brave-flatpak', result.stdout)
+        self.assertNotIn('[y/N]', result.stdout + result.stderr)
+        self.assertTrue((self.root / 'brave-flatpak').exists())
+        self.assertEqual(marker.read_text(), 'flatpak data\n')
+        self.assertFalse((self.bin / 'brave').exists())
+        self.assertTrue((self.bin / 'chromium').exists())
 
     def test_flatpak_is_offered_and_migration_keeps_its_data(self):
         marker = self.flatpak_data()
