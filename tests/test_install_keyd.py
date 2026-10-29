@@ -409,7 +409,12 @@ elif name == 'omarchy-default-browser':
         sys.exit(0)
     sys.exit(1)
 elif name == 'brave':
-    sys.exit(int(os.environ.get('FIXTURE_BRAVE_LAUNCH_STATUS', '0')))
+    status = os.environ.get('FIXTURE_BRAVE_LAUNCH_STATUS', '0')
+    if status == 'sleep':
+        import time
+        time.sleep(60)
+        sys.exit(0)
+    sys.exit(int(status))
 elif name == 'omarchy' and args[1:3] == ['add', 'bitwarden'] and args[:1] == ['pkg']:
     # A package whose bundled Electron ELF and bitwarden command pacman owns.
     status = int(os.environ.get('FIXTURE_BITWARDEN_ADD_STATUS', '0'))

@@ -417,6 +417,105 @@ class UpdateTests(unittest.TestCase):
         self.assertFalse(any(args[:2] == ('submodule', 'update') for args in calls))
         self.assertEqual((self.source / 'core/browser/brave.json').read_text(), spec)
 
+    def main_updater_text(self):
+        """The updater update-all still execs until a successful apply replaces it."""
+        spec = 'origin/main:scripts/groundwork-update.py'
+        show = subprocess.run(['git', '-C', str(REPO), 'show', spec], capture_output=True, text=True)
+        if show.returncode != 0:
+            subprocess.run(
+                ['git', '-C', str(REPO), 'fetch', '--no-tags', '--depth=1', 'origin',
+                 '+refs/heads/main:refs/remotes/origin/main'],
+                check=True, timeout=120, env=dict(os.environ, GIT_TERMINAL_PROMPT='0'))
+            show = subprocess.run(['git', '-C', str(REPO), 'show', spec], capture_output=True, text=True)
+            show.check_returncode()
+        if 'def checkout_core' in show.stdout:
+            raise AssertionError('origin/main now checks out core; point this fixture at the pre-change updater')
+        return show.stdout
+
+    def test_update_all_from_mains_installed_updater_checks_out_core(self):
+        # Protects: an already-set-up machine whose update-all is still main's
+        # program. That program fast-forwards and runs apply-layer.sh, and it
+        # never calls checkout_core. Distinct value: the test above calls this
+        # revision's checkout_core directly, so a missing spec in apply still passes.
+        os.environ['GIT_CONFIG_COUNT'] = '1'
+        os.environ['GIT_CONFIG_KEY_0'] = 'protocol.file.allow'
+        os.environ['GIT_CONFIG_VALUE_0'] = 'always'
+        production = (REPO / 'scripts/apply-layer.sh').read_text()
+        checkout_at = production.index('submodule update --init -- core')
+        incomplete_at = production.index('The checkout is incomplete:')
+        register_at = production.index('register_choices() {')
+        self.assertLess(checkout_at, incomplete_at)
+        self.assertLess(incomplete_at, register_at)
+        start = production.index('if [[ ! -f "$root/core/browser/brave.json"')
+        end = production.index('\n# Ask once', start)
+        script = (
+            '#!/bin/bash\nset -euo pipefail\n'
+            'root=$(cd "$(dirname "$0")/.." && pwd)\n'
+            'cd "$root"\n'
+            + production[start:end]
+            + 'exit 0\n')
+        sub = self.root / 'core.git'
+        work = self.root / 'core-src'
+        self.command('git', 'init', '--bare', '--initial-branch=main', str(sub))
+        self.command('git', 'clone', str(sub), str(work))
+        (work / 'README').write_text('main pin, no browser spec\n')
+        self.commit(work)
+        self.command('git', '-C', str(work), 'push', 'origin', 'main')
+        old = self.command('git', '-C', str(work), 'rev-parse', 'HEAD')
+        spec = '{"schemaVersion": 1, "marker": "checked-out-by-apply"}\n'
+        (work / 'browser').mkdir()
+        (work / 'browser/brave.json').write_text(spec)
+        self.commit(work)
+        self.command('git', '-C', str(work), 'push', 'origin', 'main')
+        new = self.command('git', '-C', str(work), 'rev-parse', 'HEAD')
+        self.command('git', '-C', str(self.seed), 'submodule', 'add', '--', str(sub), 'core')
+        self.command('git', '-C', str(self.seed / 'core'), 'checkout', old)
+        self.commit(self.seed)
+        self.command('git', '-C', str(self.seed), 'push', 'origin', 'main')
+        self.command('git', '-C', str(self.source), 'pull', '--ff-only', 'origin', 'main')
+        self.command('git', '-C', str(self.source), 'submodule', 'update', '--init', '--', 'core')
+        self.assertFalse((self.source / 'core/browser/brave.json').exists())
+        pinned = self.git('rev-parse', 'HEAD')
+        installed_path = self.home / '.local/lib/groundwork/omarchy-update.py'
+        installed_path.write_text(self.main_updater_text())
+        launcher = (self.home / '.local/bin/update-all').read_text()
+        self.assertIn('"$HOME/.local/lib/groundwork/omarchy-update.py" all', launcher)
+        self.command('git', '-C', str(self.seed / 'core'), 'checkout', new)
+        (self.seed / 'scripts/apply-layer.sh').write_text(script)
+        for name in ('seed-obsidian.py', 'groundwork-screen-share.py',
+                     'groundwork-syncthing.py', 'omarchy-plugins.py'):
+            (self.seed / 'scripts' / name).write_text('# fixture\n')
+        self.commit(self.seed)
+        self.command('git', '-C', str(self.seed), 'push', 'origin', 'main')
+        self.assertEqual(self.git('rev-parse', 'HEAD'), pinned)
+        self.assertFalse((self.source / 'core/browser/brave.json').exists())
+        spec_loader = importlib.util.spec_from_file_location('installed_main_updater', installed_path)
+        installed = importlib.util.module_from_spec(spec_loader)
+        spec_loader.loader.exec_module(installed)
+        self.assertFalse(hasattr(installed, 'checkout_core'))
+        patches = [
+            patch.object(installed, 'CONFIG', self.config),
+            patch.object(installed, 'STATE', self.state),
+            patch.object(installed, 'page_size', return_value=4096),
+            patch.object(installed.platform, 'system', return_value='Linux'),
+            patch.object(installed.platform, 'machine', return_value='aarch64'),
+            patch.object(installed.shutil, 'which', side_effect=lambda name: '/fixture/' + name),
+            patch.object(installed, 'run', side_effect=self.run_command),
+        ]
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+        installed.preflight(self.source)
+        self.execute_apply = True
+        self.assertEqual(installed.update('all'), 'completed')
+        self.assertNotEqual(self.git('rev-parse', 'HEAD'), pinned)
+        self.assertEqual((self.source / 'core/browser/brave.json').read_text(), spec)
+        self.assertFalse((self.source / 'browser/brave.json').exists())
+        self.assertEqual(installed_path.read_text(), self.main_updater_text())
+        installed.preflight(self.source)
+        self.assertIn(['bash', str(self.source / 'scripts/apply-layer.sh'), '--update', '--update-plugins'],
+                      self.machine_calls)
+
     def test_detached_missing_upstream_and_ahead_source_preserve_work(self):
         self.git('checkout', '--detach')
         with self.assertRaises(updater.UpdateError):

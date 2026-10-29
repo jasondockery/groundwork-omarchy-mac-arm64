@@ -1,7 +1,8 @@
 #!/bin/bash
 # Link the personal Hyprland override into $HOME.
-# For any Apple Silicon Omarchy Mac (aarch64). Does not touch Git, SSH,
-# groundwork-core, groundwork-mac, or /usr/share/omarchy.
+# For any Apple Silicon Omarchy Mac (aarch64). Reads the core/ checkout and
+# does not write it. Does not touch Git config, SSH, groundwork-mac, or
+# /usr/share/omarchy.
 set -euo pipefail
 
 usage() {
@@ -146,9 +147,15 @@ if [[ -n $stored ]]; then
   declined_migrations=${preferences[5]-}
 fi
 
+# An updater installed before the Brave spec fast-forwards and then runs this
+# script. That copy does not check out submodules, and register_choices (which
+# replaces it) is below this check. Check out core first when the spec is missing.
+if [[ ! -f "$root/core/browser/brave.json" || -L "$root/core/browser/brave.json" ]]; then
+  PATH="/usr/bin:/bin${PATH:+:$PATH}" git --no-optional-locks -C "$root" submodule update --init -- core
+fi
+
 # Fail before installing packages or moving files when the checkout is incomplete.
-# setup and update run `git submodule update --init -- core` before this script.
-# The Bitwarden extension id and Brave policies are read from that checkout, not a copy here.
+# The Bitwarden extension id and Brave policies are read from core, not a copy here.
 [[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$root/core/browser/brave.json" && ! -L "$root/core/browser/brave.json" ]] || {
   echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, or Brave spec is missing." >&2
   exit 1
@@ -350,6 +357,19 @@ brave_changes_needed() {
   brave_policy_current && return 1
   return 0
 }
+# Say what the default actually is. A later brave-bin that fails its checks
+# stays installed when this run did not add it, and the default stays Brave.
+brave_default_sentence() {
+  local current=
+  if command -v omarchy-default-browser >/dev/null 2>&1; then
+    current=$(omarchy-default-browser 2>/dev/null) || current=
+  fi
+  if [[ "$current" == brave ]]; then
+    echo "Brave stays the default. To put Chromium back, run omarchy-default-browser chromium."
+  else
+    echo "Chromium stays the default."
+  fi
+}
 brave_fail() {
   local remember=$1
   local reason=$2
@@ -360,7 +380,7 @@ brave_fail() {
   # already rejected, or that never put brave-bin's command on PATH).
   local remove=${3:-$remember}
   local version
-  echo "$reason Chromium stays the default." >&2
+  echo "$reason $(brave_default_sentence)" >&2
   brave_usable=0
   if [[ $remember -eq 1 ]]; then
     if version=$(python3 "$root/scripts/groundwork-update.py" reject-brave); then
@@ -398,6 +418,11 @@ assess_brave() {
     brave_usable=1
     return 0
   fi
+  # 1 is a remembered Brave crash. 2 is a retryable launch result. Anything
+  # above 128 is this process being cancelled (Ctrl+C is 130); stop setup.
+  if [[ $launch_status -gt 128 ]]; then
+    exit "$launch_status"
+  fi
   if [[ $launch_status -eq 1 ]]; then
     brave_fail 1 "$launch_reason"
   else
@@ -429,7 +454,7 @@ install_missing_brave() {
     return 0
   fi
   if brave_remembered brave-rejected; then
-    echo "The brave-bin version available here already failed on this $(brave_page_kib) KiB-page kernel, so it was not installed again. Chromium stays the default." >&2
+    echo "The brave-bin version available here already failed on this $(brave_page_kib) KiB-page kernel, so it was not installed again. $(brave_default_sentence)" >&2
     return 0
   fi
   brave_remembered brave-accepted || true
@@ -1467,7 +1492,7 @@ migrate_brave_to_omarchy() {
   if brave_package_command; then
     assess_brave
   elif brave_remembered brave-rejected; then
-    echo "The brave-bin version available here already failed on this $(brave_page_kib) KiB-page kernel, so it was not installed again. Chromium stays the default." >&2
+    echo "The brave-bin version available here already failed on this $(brave_page_kib) KiB-page kernel, so it was not installed again. $(brave_default_sentence)" >&2
     brave_usable=0
     return 1
   else
@@ -1502,7 +1527,7 @@ if brave_installer_supports && ! brave_package_command; then
   fi
   if [[ -n $brave_current ]] && brave_remembered brave-rejected; then
     # Same rule as a missing Brave: a version that already failed is not installed again.
-    echo "The brave-bin version available here already failed on this $(brave_page_kib) KiB-page kernel, so it was not installed again. Chromium stays the default." >&2
+    echo "The brave-bin version available here already failed on this $(brave_page_kib) KiB-page kernel, so it was not installed again. $(brave_default_sentence)" >&2
     brave_current=
   fi
   if [[ -n $brave_current ]]; then

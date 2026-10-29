@@ -753,7 +753,7 @@ def brave_launch_result(binary):
         ]
         process = subprocess.Popen(
             argv, env=env, cwd=parent, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True)
+            start_new_session=True, preexec_fn=disable_core_dumps)
         try:
             process.communicate(timeout=BRAVE_LAUNCH_SECONDS)
         except subprocess.TimeoutExpired:
@@ -1559,7 +1559,12 @@ def main(args):
             return 1
         return 0
     if args and args[0] == 'check-brave-launch' and len(args) == 2:
-        kind, message = brave_launch_result(args[1])
+        try:
+            kind, message = brave_launch_result(args[1])
+        except (OSError, UpdateError) as error:
+            # A full disk or a binary that vanishes is not a page-size crash.
+            print(error, file=sys.stderr)
+            return 2
         if kind != 'ok':
             print(message, file=sys.stderr)
         return {'ok': 0, 'remember': 1, 'transient': 2}[kind]

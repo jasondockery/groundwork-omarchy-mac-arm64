@@ -4,16 +4,19 @@ The installer fixture is the one in test_install_keyd. These tests do not run
 pacman, flatpak, omarchy, or sudo on the host, and they do not launch a real
 Brave. A passing fixture is not acceptance on the 16 KiB-page mini.
 """
+from contextlib import redirect_stderr
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from unittest.mock import patch
 
@@ -319,6 +322,81 @@ class BraveInstallTests(unittest.TestCase):
         self.assertIn('1.74.0-1', self.remembered('brave-rejected.json'))
         self.assertTrue((self.bin / 'brave').exists())
 
+    def test_a_failed_recheck_does_not_say_chromium_stays_the_default(self):
+        self.run_install('--without-keyd', '--without-screen-sharing')
+        (self.root / 'default-browser').write_text('brave\n')
+        (self.root / 'pacman-installed/brave-bin.version').write_text('1.74.0-1\n')
+        self.env['FIXTURE_LOAD_ALIGN'] = '0x100'
+        self.reset_calls()
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        text = result.stdout + result.stderr
+        self.assertIn('Brave stays the default.', text)
+        self.assertIn('omarchy-default-browser chromium', text)
+        self.assertNotIn('Chromium stays the default.', text)
+        self.assertNotIn(REMOVE_BRAVE, self.calls())
+        self.assertEqual((self.root / 'default-browser').read_text().strip(), 'brave')
+        self.assertTrue((self.bin / 'brave').exists())
+
+    def test_ctrl_c_during_launch_stops_setup(self):
+        self.env['FIXTURE_BRAVE_LAUNCH_STATUS'] = 'sleep'
+        out = tempfile.TemporaryFile(mode='w+')
+        err = tempfile.TemporaryFile(mode='w+')
+        process = subprocess.Popen(
+            ['bash', str(REPO / 'install.sh'), '--without-keyd', '--without-screen-sharing'],
+            env=self.env, stdout=out, stderr=err, text=True, start_new_session=True)
+        checker = None
+        try:
+            deadline = time.monotonic() + 40
+            needle = str(self.bin / 'brave').encode()
+            while time.monotonic() < deadline and process.poll() is None:
+                for entry in Path('/proc').iterdir():
+                    if not entry.name.isdigit():
+                        continue
+                    try:
+                        raw = (entry / 'cmdline').read_bytes()
+                    except OSError:
+                        continue
+                    if b'check-brave-launch' in raw and needle in raw:
+                        checker = int(entry.name)
+                        break
+                if checker is not None:
+                    break
+                time.sleep(0.05)
+            self.assertIsNotNone(checker, 'launch check did not start')
+            os.kill(checker, signal.SIGINT)
+            process.wait(timeout=30)
+        finally:
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=10)
+            root_bytes = str(self.root).encode()
+            for entry in Path('/proc').iterdir():
+                if not entry.name.isdigit() or int(entry.name) == os.getpid():
+                    continue
+                try:
+                    raw = (entry / 'cmdline').read_bytes()
+                except OSError:
+                    continue
+                if root_bytes in raw:
+                    try:
+                        os.kill(int(entry.name), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+            out.seek(0)
+            err.seek(0)
+            stdout, stderr = out.read(), err.read()
+            out.close()
+            err.close()
+        self.assertEqual(process.returncode, 130, stdout + stderr)
+        self.assertIn('Update cancelled.', stderr)
+        self.assertNotIn('Remembered', stderr)
+        self.assertNotIn('Chromium stays the default.', stdout + stderr)
+        self.assertEqual(self.remembered('brave-rejected.json'), [])
+        self.assertTrue((self.bin / 'brave').exists())
+
     def test_update_does_not_install_brave_without_a_terminal_and_cached_sudo(self):
         for name in ('omarchy-install-browser', 'omarchy-remove-browser', 'omarchy-default-browser'):
             (self.bin / name).unlink()
@@ -518,9 +596,13 @@ class BraveSpecTests(unittest.TestCase):
             binary = root / 'brave'
             seen = root / 'env'
             binary.write_text(textwrap.dedent(f"""\
-                #!/bin/sh
-                env > {seen}
-                exit 0
+                #!/usr/bin/env python3
+                import os, resource
+                soft, hard = resource.getrlimit(resource.RLIMIT_CORE)
+                with open({str(seen)!r}, 'w') as handle:
+                    for key, value in os.environ.items():
+                        handle.write(f'{{key}}={{value}}\\n')
+                    handle.write(f'RLIMIT_CORE={{soft}},{{hard}}\\n')
                 """))
             binary.chmod(0o755)
             saved = {key: os.environ.get(key) for key in (
@@ -543,6 +625,7 @@ class BraveSpecTests(unittest.TestCase):
             self.assertIn('PATH=/usr/bin:/bin', dumped)
             self.assertIn('FIXTURE_BRAVE_LAUNCH_STATUS=0', dumped)
             self.assertIn('groundwork-brave-launch-', dumped)
+            self.assertIn('RLIMIT_CORE=1,1', dumped)
             binary.write_text('#!/bin/sh\nexit 139\n')
             kind, message = updater.brave_launch_result(binary)
             self.assertEqual(kind, 'remember')
@@ -569,6 +652,20 @@ class BraveSpecTests(unittest.TestCase):
                 kind, message = updater.brave_launch_result(binary)
             self.assertEqual(kind, 'transient')
             self.assertIn('within 1 seconds', message)
+
+    def test_launch_checker_oserror_is_not_a_remembered_crash(self):
+        with patch.object(updater.tempfile, 'mkdtemp', side_effect=OSError(28, 'No space left on device')):
+            with redirect_stderr(io.StringIO()) as err:
+                status = updater.main(['check-brave-launch', '/bin/true'])
+        self.assertEqual(status, 2)
+        self.assertIn('No space left on device', err.getvalue())
+        with patch.object(updater, 'brave_launch_result', side_effect=updater.UpdateError('temporary directory')):
+            with redirect_stderr(io.StringIO()):
+                status = updater.main(['check-brave-launch', '/bin/true'])
+        self.assertEqual(status, 2)
+        with patch.object(updater, 'brave_launch_result', side_effect=KeyboardInterrupt(signal.SIGINT)):
+            with self.assertRaises(KeyboardInterrupt):
+                updater.main(['check-brave-launch', '/bin/true'])
 
 
 if __name__ == '__main__':
