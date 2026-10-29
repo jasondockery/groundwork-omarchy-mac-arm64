@@ -364,6 +364,24 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
         # An unreadable marker is reported, not treated as absent.
         self.assertIn('cannot be read', updater.syncthing_pending())
 
+    def test_an_exported_but_empty_config_home_means_unset(self):
+        home = self.home / 'empty-config-home'
+        config = home / '.config/groundwork'
+        config.mkdir(parents=True)
+        (config / 'omarchy.json').write_text(json.dumps({
+            'schema': 1, 'keyd': True, 'screen_sharing': False,
+            'source': str(self.source), 'obsidian_vault': str(home / 'vault'),
+        }))
+        work = self.root / 'empty-config-cwd'
+        work.mkdir()
+        env = dict(os.environ, HOME=str(home), XDG_CONFIG_HOME='')
+        result = subprocess.run(['python3', '-B', str(REPO / 'scripts/groundwork-update.py'),
+                                 'preferences', 'update'],
+                                env=env, cwd=str(work), capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[0], '1')
+        self.assertFalse((work / 'groundwork').exists())
+
     def test_an_exported_but_empty_state_home_means_unset(self):
         home = self.home / 'empty-state-home'
         home.mkdir()

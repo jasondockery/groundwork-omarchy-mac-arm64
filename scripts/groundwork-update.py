@@ -22,9 +22,22 @@ import uuid
 import zipfile
 
 MARKER = '# Groundwork Omarchy updater'
-CONFIG = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config')) / 'groundwork/omarchy.json'
-# An exported but empty XDG_STATE_HOME means unset, as it does for the shell side of apply-layer.sh.
-STATE = Path(os.environ.get('XDG_STATE_HOME') or Path.home() / '.local/state') / 'groundwork'
+
+
+def xdg_base(name, default):
+    """Directory for one XDG_* variable. Empty or unset means the default.
+
+    This matches the shell's ${VAR:-default}, which is how apply-layer.sh
+    reads the same variables. A value of only spaces is still set.
+    """
+    value = os.environ.get(name)
+    if not value:
+        return Path(default)
+    return Path(value)
+
+
+CONFIG = xdg_base('XDG_CONFIG_HOME', Path.home() / '.config') / 'groundwork/omarchy.json'
+STATE = xdg_base('XDG_STATE_HOME', Path.home() / '.local/state') / 'groundwork'
 KEYD_CONFIG = Path('/etc/keyd/default.conf')
 T3_REPO = 'pingdotgg/t3code'
 T3_RELEASES = f'https://api.github.com/repos/{T3_REPO}/releases?per_page=100'
