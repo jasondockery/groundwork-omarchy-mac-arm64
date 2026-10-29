@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import resource
 import shutil
 import signal
 import subprocess
@@ -332,7 +333,21 @@ def foreground(fd, group):
         signal.signal(signal.SIGTTOU, previous)
 
 
-def run(args, cwd=None, deadline=20, capture=True, lock_fd=None, extra_env=None, stdin=None, env=None):
+def disable_core_dumps():
+    """Give this process RLIMIT_CORE 1 before it execs.
+
+    Linux dumps to a pipe for every core limit except exactly 1. That is the
+    limit systemd-coredump's piped core_pattern still honors; 0 is replaced
+    with infinity and the pipe still runs. A file pattern writes nothing when
+    the limit is below the page size, so 1 writes nothing there either. Exec
+    resets the dumpable flag, so this cannot clear it for a binary this
+    process did not write. A fixture that signals itself clears the flag.
+    """
+    resource.setrlimit(resource.RLIMIT_CORE, (1, 1))
+
+
+def run(args, cwd=None, deadline=20, capture=True, lock_fd=None, extra_env=None, stdin=None, env=None,
+        limit_core=False):
     terminal = None
     original_group = None
     process = None
@@ -361,7 +376,8 @@ def run(args, cwd=None, deadline=20, capture=True, lock_fd=None, extra_env=None,
                                    pass_fds=() if lock_fd is None else (lock_fd,),
                                    stdout=subprocess.PIPE if capture else None,
                                    stderr=subprocess.PIPE if capture else None,
-                                   env=environment)
+                                   env=environment,
+                                   preexec_fn=disable_core_dumps if limit_core else None)
         if terminal is not None:
             try:
                 foreground(terminal, process.pid)
@@ -871,7 +887,7 @@ def t3_candidate_check(installed, page, warnings=None):
         try:
             reported = run(t3_sandbox_command(binary, directory), cwd=str(binary.parent),
                            deadline=T3_CANDIDATE_SMOKE_SECONDS, stdin=subprocess.DEVNULL,
-                           env=t3_smoke_environment(directory))
+                           env=t3_smoke_environment(directory), limit_core=True)
             got = reported_t3_version(reported)
         except (UpdateError, OSError, ValueError) as error:
             if t3_candidate_rejected(error):

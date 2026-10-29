@@ -17,6 +17,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # ubuntu-26.04 can configure loopback inside a new network namespace.
+      # ubuntu-24.04 fails that with "bwrap: loopback: Failed RTM_NEWADDR:
+      # Operation not permitted". Install bubblewrap only when the probe
+      # works. Otherwise remove it so the smoke tests stay skipped.
+      - name: Install bubblewrap when --unshare-net works
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bubblewrap
+          if ! bwrap --unshare-net --ro-bind / / --proc /proc --dev /dev /usr/bin/true; then
+            sudo DEBIAN_FRONTEND=noninteractive apt-get remove -y bubblewrap
+            if command -v bwrap >/dev/null 2>&1; then
+              echo "bubblewrap stayed on PATH after --unshare-net failed" >&2
+              exit 1
+            fi
+            echo "bubblewrap cannot configure loopback here, so the T3 smoke tests stay skipped"
+          fi
       - name: Check shell syntax
         run: bash -n install.sh scripts/apply-layer.sh scripts/migrate-from-groundwork.sh
       - name: Exercise isolated installer fixtures
