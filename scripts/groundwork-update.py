@@ -334,14 +334,16 @@ def foreground(fd, group):
 
 
 def disable_core_dumps():
-    """Give this process RLIMIT_CORE 0 before it execs.
+    """Give this process RLIMIT_CORE 1 before it execs.
 
-    A file core_pattern then writes nothing. A piped pattern, which is what
-    systemd-coredump uses, ignores every limit except 1, and exec resets the
-    dumpable flag, so this cannot stop that collector for a binary this
+    Linux dumps to a pipe for every core limit except exactly 1. That is the
+    limit systemd-coredump's piped core_pattern still honors; 0 is replaced
+    with infinity and the pipe still runs. A file pattern writes nothing when
+    the limit is below the page size, so 1 writes nothing there either. Exec
+    resets the dumpable flag, so this cannot clear it for a binary this
     process did not write. A fixture that signals itself clears the flag.
     """
-    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    resource.setrlimit(resource.RLIMIT_CORE, (1, 1))
 
 
 def run(args, cwd=None, deadline=20, capture=True, lock_fd=None, extra_env=None, stdin=None, env=None,

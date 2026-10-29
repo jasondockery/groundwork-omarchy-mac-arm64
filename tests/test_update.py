@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import resource
 import shutil
 import signal
 import socket
@@ -58,17 +59,80 @@ Program Headers:
 '''
 
 
-# A real SIGSEGV death, with the kernel told not to dump this process. RLIMIT_CORE
-# does not help: with a piped core_pattern systemd-coredump still logs the death
-# and Omarchy shows a "Process crashed" notification. Dumpable is reset by exec,
-# so the stub sets it itself (PR_SET_DUMPABLE = 4) just before signalling.
-# RLIMIT_CORE 0 is also set here so a file core_pattern writes nothing.
+# A real SIGSEGV death. Exec resets the dumpable flag, so this process clears
+# it (PR_SET_DUMPABLE = 4) immediately before signalling. That is what stops a
+# piped core_pattern. The script does not lower RLIMIT_CORE: the smoke run sets
+# that limit to 1, and the regression test raises it so only this prctl can
+# explain a missing core file.
 CRASH_WITHOUT_DUMP = '''#!/usr/bin/python3
-import ctypes, os, resource, signal
-resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+import ctypes, os, signal
 ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)
 os.kill(os.getpid(), signal.SIGSEGV)
 '''
+
+
+def core_ceiling():
+    """A core limit large enough that a file pattern would write a core."""
+    _soft, hard = resource.getrlimit(resource.RLIMIT_CORE)
+    if hard == 0 or (hard != resource.RLIM_INFINITY and hard <= 1):
+        raise AssertionError(f'hard RLIMIT_CORE is {hard}, so the fixture cannot prove prctl stops the core')
+    if hard == resource.RLIM_INFINITY or hard > 1 << 20:
+        return 1 << 20
+    return hard
+
+
+def _allow_file_core(ceiling):
+    resource.setrlimit(resource.RLIMIT_CORE, (ceiling, ceiling))
+
+
+def _predicted_core(pattern, pid, cwd):
+    """Path a file core_pattern would use, or None when it is a pipe or unknown."""
+    if pattern.startswith('|'):
+        return None
+    comm = Path(sys.executable).name[:15]
+    text = pattern.replace('%%', '\0')
+    for spec in ('%h', '%t', '%s', '%c', '%d', '%P', '%i', '%I', '%u', '%g', '%E', '%f'):
+        if spec in text:
+            return None
+    text = text.replace('%e', comm).replace('%p', str(pid)).replace('\0', '%')
+    if '%' in text:
+        return None
+    path = Path(text)
+    if not path.is_absolute():
+        path = Path(cwd) / path
+    return path
+
+
+def run_dump_child(source, ceiling):
+    """Run source with a raised core limit. Return status, stdout, and core paths."""
+    temporary = tempfile.TemporaryDirectory(prefix='groundwork-core-')
+    try:
+        directory = temporary.name
+        path = Path(directory) / 'fixture.py'
+        path.write_text(source)
+        path.chmod(0o755)
+        process = subprocess.Popen(
+            [sys.executable, str(path)], cwd=directory,
+            preexec_fn=lambda: _allow_file_core(ceiling),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        stdout, _stderr = process.communicate(timeout=30)
+        cores = []
+        predicted = _predicted_core(Path('/proc/sys/kernel/core_pattern').read_text().strip(), process.pid, directory)
+        if predicted is not None:
+            cores.append(predicted)
+        cores.extend(Path('/tmp').glob(f'core.*{process.pid}*'))
+        cores.extend(Path(directory).glob(f'core.*{process.pid}*'))
+        found = []
+        for core in cores:
+            if core.is_file() and core not in found:
+                found.append(core)
+        try:
+            return process.returncode, stdout, found
+        finally:
+            for core in found:
+                core.unlink(missing_ok=True)
+    finally:
+        temporary.cleanup()
 
 
 class UpdateTests(unittest.TestCase):
@@ -1046,12 +1110,17 @@ class T3CandidateTests(unittest.TestCase):
         with patch.object(updater, 'fetch', return_value=json.dumps(releases).encode()):
             self.assertEqual(updater.t3_latest_nightly(), '0.1.3-nightly.20261024.3604')
 
-    def test_a_core_limited_child_reports_rlimit_core_zero(self):
+    def test_a_core_limited_child_reports_rlimit_core_one(self):
         reported = updater.run(
             [sys.executable, '-c',
-             'import resource; soft, hard = resource.getrlimit(resource.RLIMIT_CORE); print(f"{soft} {hard}")'],
+             'import ctypes, resource\n'
+             'dumpable = ctypes.CDLL(None).prctl(3, 0, 0, 0, 0)\n'
+             'soft, hard = resource.getrlimit(resource.RLIMIT_CORE)\n'
+             'print(f"{dumpable} {soft} {hard}")'],
             limit_core=True)
-        self.assertEqual(reported, '0 0')
+        # Exec resets dumpable to 1. The limit stays 1, which is what a piped
+        # core pattern treats as do-not-dump.
+        self.assertEqual(reported, '1 1 1')
 
     def test_run_replacement_env_drops_the_caller_environment(self):
         reported = updater.run([sys.executable, '-c', 'import os; print("\\n".join(sorted(os.environ)))'],
@@ -1114,11 +1183,30 @@ class T3CandidateTests(unittest.TestCase):
         reason, rejected = check(CRASH_WITHOUT_DUMP, updater.T3_CANDIDATE_SMOKE_SECONDS, 0.2)
         self.assertIn('crashed (SIGSEGV)', reason)
         self.assertTrue(rejected)
+        # The rejection string above still passes if the fixture goes back to
+        # `kill -SEGV`. This is the check that does not: the same script prints
+        # PR_GET_DUMPABLE 0 and its raised core limit, and the SIGSEGV itself
+        # leaves no core file. Removing the prctl fails both.
+        ceiling = core_ceiling()
+        printer = CRASH_WITHOUT_DUMP.replace(
+            'os.kill(os.getpid(), signal.SIGSEGV)\n',
+            'import resource\n'
+            'dumpable = ctypes.CDLL(None).prctl(3, 0, 0, 0, 0)\n'
+            'soft, hard = resource.getrlimit(resource.RLIMIT_CORE)\n'
+            'print(f"{dumpable} {soft} {hard}")\n')
+        status, stdout, cores = run_dump_child(printer, ceiling)
+        self.assertEqual(status, 0, stdout)
+        self.assertEqual(stdout.strip(), f'0 {ceiling} {ceiling}')
+        self.assertEqual(cores, [])
+        status, _stdout, cores = run_dump_child(CRASH_WITHOUT_DUMP, ceiling)
+        self.assertEqual(status, -signal.SIGSEGV)
+        self.assertEqual(cores, [])
         limited = (
             '#!/usr/bin/python3\n'
-            'import resource\n'
+            'import ctypes, resource\n'
+            'dumpable = ctypes.CDLL(None).prctl(3, 0, 0, 0, 0)\n'
             'soft, hard = resource.getrlimit(resource.RLIMIT_CORE)\n'
-            f'print("t3 v{CANDIDATE}" if soft == 0 and hard == 0 else "t3 vunlimited")\n'
+            f'print("t3 v{CANDIDATE}" if dumpable == 1 and soft == 1 and hard == 1 else "t3 vunlimited")\n'
         )
         reason, rejected = check(limited, updater.T3_CANDIDATE_SMOKE_SECONDS, 0.2)
         self.assertIsNone(reason)
