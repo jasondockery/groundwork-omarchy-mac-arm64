@@ -213,10 +213,13 @@ honeykrisp_icd_present() {
 }
 # Omarchy's Install > Service > Bitwarden adds the bitwarden package. The
 # aarch64 feed first had it on 2026-10-28; before that only the Flatpak worked.
-# pacman -Si reads the local sync database and needs no sudo.
+# pacman -Si reads the local sync database and needs no sudo. A version that
+# already failed setup's checks on this kernel counts as unavailable, so it is
+# not retried, offered, or asked sudo for until the feed has another version.
 bitwarden_flatpak=com.bitwarden.desktop
 bitwarden_native_available() {
-  command -v pacman >/dev/null && pacman -Si bitwarden >/dev/null 2>&1
+  command -v pacman >/dev/null && pacman -Si bitwarden >/dev/null 2>&1 &&
+    ! python3 "$root/scripts/groundwork-update.py" bitwarden-rejected
 }
 bitwarden_flatpak_installed() {
   command -v flatpak >/dev/null && flatpak --user info "$bitwarden_flatpak" >/dev/null 2>&1
@@ -556,13 +559,13 @@ ensure_user_flatpak() {
 bitwarden_package_command() {
   local executable
   executable=$(command -v bitwarden) || return 1
-  pacman -Q bitwarden >/dev/null 2>&1 && pacman -Qo "$executable" >/dev/null 2>&1
+  [[ $(pacman -Qoq "$executable" 2>/dev/null) == bitwarden ]]
 }
 # Keep Omarchy's bitwarden package only when it provides that command and every
 # ELF file it installed loads on this kernel's pages (the local-inference check).
 # A package this call added is dropped again when either check fails.
 install_native_bitwarden() {
-  local added=0
+  local added=0 version
   if ! pacman -Q bitwarden >/dev/null 2>&1; then
     if ! omarchy pkg add bitwarden; then
       echo "omarchy pkg add bitwarden failed." >&2
@@ -575,6 +578,9 @@ install_native_bitwarden() {
     echo "Omarchy's bitwarden package did not put its bitwarden command first on PATH." >&2
   elif python3 "$root/scripts/groundwork-update.py" check-package-alignment bitwarden; then
     return 0
+  fi
+  if version=$(python3 "$root/scripts/groundwork-update.py" reject-bitwarden); then
+    echo "Remembered bitwarden $version as unusable here. Setup will not try it again until the feed has another version." >&2
   fi
   if [[ $added -eq 1 ]]; then
     if omarchy pkg drop bitwarden; then
@@ -1116,16 +1122,27 @@ print_migration_notice() {
   printf -v command 'cd %q && ./install.sh --migrate-to-omarchy-installers' "$root"
   echo "$app is installed as $current; Omarchy's preferred method is $preferred (migration $id). To migrate, run: $command"
 }
-# Seconds the prompt may wait: at most 300, and two minutes inside the apply
-# deadline that setup passes in. Tests may shorten it.
+# Seconds the prompt may wait, or 0 to skip it. A yes must leave the move at
+# least 180 seconds of the apply deadline that setup passes in, so under 300
+# seconds left there is no prompt. The wait is at most 300 seconds. Tests may
+# lower the deadline and shorten the wait.
 migration_prompt_seconds() {
-  local deadline=${GROUNDWORK_APPLY_DEADLINE_SECONDS:-900} budget
+  local deadline=${GROUNDWORK_APPLY_DEADLINE_SECONDS:-900} remaining budget
+  if [[ ${GROUNDWORK_TESTING:-} == 1 && ${GROUNDWORK_TEST_APPLY_DEADLINE_SECONDS:-} =~ ^[0-9]+$ ]]; then
+    deadline=$GROUNDWORK_TEST_APPLY_DEADLINE_SECONDS
+  fi
   [[ $deadline =~ ^[0-9]+$ ]] || deadline=900
-  budget=$((deadline - SECONDS - 120))
+  remaining=$((deadline - SECONDS))
+  if ((remaining < 300)); then
+    echo 0
+    return 0
+  fi
+  budget=$((remaining - 180))
   if ((budget > 300)); then
     budget=300
   fi
-  if [[ ${GROUNDWORK_TESTING:-} == 1 && ${GROUNDWORK_MIGRATION_PROMPT_SECONDS:-} =~ ^[0-9]+$ ]]; then
+  if [[ ${GROUNDWORK_TESTING:-} == 1 && ${GROUNDWORK_MIGRATION_PROMPT_SECONDS:-} =~ ^[0-9]+$ ]] &&
+    ((GROUNDWORK_MIGRATION_PROMPT_SECONDS < budget)); then
     budget=$GROUNDWORK_MIGRATION_PROMPT_SECONDS
   fi
   echo "$budget"
@@ -1144,10 +1161,13 @@ offer_omarchy_migration() {
       print_migration_notice "$id" "$app" "$current" "$preferred"
       return 0
     fi
-    printf '%s\n' "$app is installed as $current. Omarchy's preferred method is $preferred." "$plan"
+    seconds=$(migration_prompt_seconds)
+    if ((seconds > 0)); then
+      printf '%s\n' "$app is installed as $current. Omarchy's preferred method is $preferred." "$plan"
+    fi
     while true; do
-      seconds=$(migration_prompt_seconds)
       if ((seconds < 1)); then
+        echo "Too little of this setup run is left to move $app safely, so it was not offered now."
         print_migration_notice "$id" "$app" "$current" "$preferred"
         return 0
       fi
@@ -1170,7 +1190,10 @@ offer_omarchy_migration() {
           echo "Kept $app as $current. Setup will not ask again. To migrate later, run: $command"
           return 0
           ;;
-        *) echo "Answer y or n." ;;
+        *)
+          echo "Answer y or n."
+          seconds=$(migration_prompt_seconds)
+          ;;
       esac
     done
   fi

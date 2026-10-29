@@ -629,8 +629,12 @@ def rejected_t3_path():
     return STATE / 't3-rejected.json'
 
 
-def rejected_t3(page):
-    path = rejected_t3_path()
+def rejected_bitwarden_path():
+    """Bitwarden package versions that failed setup's checks, by page size."""
+    return STATE / 'bitwarden-rejected.json'
+
+
+def rejected_versions(path, page):
     try:
         check_path(path)
         value = json.loads(path.read_text())
@@ -640,8 +644,7 @@ def rejected_t3(page):
     return [version for version in versions if isinstance(version, str)] if isinstance(versions, list) else []
 
 
-def reject_t3(page, version):
-    path = rejected_t3_path()
+def reject_version(path, page, version):
     try:
         check_path(path)
         value = json.loads(path.read_text()) if path.exists() else {}
@@ -649,9 +652,49 @@ def reject_t3(page, version):
         value = {}
     if not isinstance(value, dict):
         value = {}
-    versions = [*rejected_t3(page), version][-50:]
+    versions = [*rejected_versions(path, page), version][-50:]
     value[str(page)] = sorted(set(versions))
     atomic_write(path, json.dumps(value, indent=2) + '\n')
+
+
+def rejected_t3(page):
+    return rejected_versions(rejected_t3_path(), page)
+
+
+def reject_t3(page, version):
+    reject_version(rejected_t3_path(), page, version)
+
+
+def bitwarden_version():
+    """Installed bitwarden version, else the one the sync database offers, else None.
+
+    That is the version a migration or new install would check.
+    """
+    try:
+        fields = run(['pacman', '-Q', 'bitwarden'], deadline=30).split()
+        if len(fields) == 2:
+            return fields[1]
+    except (UpdateError, OSError):
+        pass
+    try:
+        for line in run(['pacman', '-Si', 'bitwarden'], deadline=30).splitlines():
+            key, _, value = line.partition(':')
+            if key.strip() == 'Version' and value.strip():
+                return value.strip()
+    except (UpdateError, OSError):
+        pass
+    return None
+
+
+def bitwarden_package_command():
+    """True only when Omarchy's bitwarden package owns the bitwarden on PATH."""
+    executable = shutil.which('bitwarden')
+    if not executable:
+        return False
+    try:
+        return run(['pacman', '-Qoq', executable], deadline=30) == 'bitwarden'
+    except (UpdateError, OSError):
+        return False
 
 
 def page_size_reason(page):
@@ -1104,7 +1147,7 @@ def update(scope, check=False):
                     ):
                         if app not in installed:
                             # A native Bitwarden desktop is the expected state, not a skip.
-                            if app != 'com.bitwarden.desktop' or not shutil.which('bitwarden'):
+                            if app != 'com.bitwarden.desktop' or not bitwarden_package_command():
                                 completed.append(f'{label} user Flatpak not installed; skipped')
                             continue
                         print(f'Updating the installed {label} user Flatpak…', flush=True)
@@ -1171,6 +1214,18 @@ def main(args):
         if problem:
             print(problem, file=sys.stderr)
             return 1
+        return 0
+    if args and args[0] == 'bitwarden-rejected' and len(args) == 1:
+        # Exit 0 when the version setup would check already failed on this kernel.
+        version = bitwarden_version()
+        return 0 if version and version in rejected_versions(rejected_bitwarden_path(), page_size()) else 1
+    if args and args[0] == 'reject-bitwarden' and len(args) == 1:
+        version = bitwarden_version()
+        if not version:
+            print('The bitwarden package version could not be read, so it was not remembered.', file=sys.stderr)
+            return 1
+        reject_version(rejected_bitwarden_path(), page_size(), version)
+        print(version)
         return 0
     if args and args[0] == 'check-elf-alignment' and len(args) == 2:
         problem = elf_alignment_problem(args[1])

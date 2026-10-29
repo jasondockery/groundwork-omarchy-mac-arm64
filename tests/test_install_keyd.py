@@ -211,15 +211,28 @@ elif name == 'syncthing':
         print(os.environ.get('FIXTURE_SYNCTHING_VERSION', 'syncthing v2.1.7 "Hafnium Hornet" (go1.25.1 linux-arm64) builder 2026-10-20'))
 elif name == 'pacman':
     # Read-only queries. FIXTURE_FEED lists packages the sync database has.
-    # pacman-installed/<pkg> lists a fixture package's files; pacman-owned
-    # lists paths that package files own.
-    owned = root / 'pacman-owned'
+    # pacman-installed/<pkg> lists a fixture package's files and <pkg>.version
+    # its version. Each pacman-owned line is a path and the package owning it.
+    owned_file = root / 'pacman-owned'
+    owners = dict(line.split(' ', 1) for line in owned_file.read_text().splitlines() if ' ' in line) if owned_file.exists() else {}
     if args[:1] == ['-Si'] and len(args) == 2:
-        sys.exit(0 if args[1] in os.environ.get('FIXTURE_FEED', '').split() else 1)
+        if args[1] not in os.environ.get('FIXTURE_FEED', '').split():
+            sys.exit(1)
+        print('Repository      : omarchy')
+        print('Name            : ' + args[1])
+        print('Version         : ' + os.environ.get('FIXTURE_FEED_VERSION', '2026.10.1-1'))
+        sys.exit(0)
     if args[:1] == ['-Q'] and len(args) == 2:
-        sys.exit(0 if (root / 'pacman-installed' / args[1]).exists() else 1)
-    if args[:1] == ['-Qo'] and len(args) == 2:
-        sys.exit(0 if owned.exists() and args[1] in owned.read_text().splitlines() else 1)
+        version = root / 'pacman-installed' / (args[1] + '.version')
+        if not version.exists():
+            sys.exit(1)
+        print(args[1] + ' ' + version.read_text().strip())
+        sys.exit(0)
+    if args[:1] in (['-Qo'], ['-Qoq']) and len(args) == 2:
+        if args[1] not in owners:
+            sys.exit(1)
+        print(owners[args[1]] if args[0] == '-Qoq' else args[1] + ' is owned by ' + owners[args[1]])
+        sys.exit(0)
     if args[:1] == ['-Qlq'] and len(args) == 2:
         listing = root / 'pacman-installed' / args[1]
         if not listing.exists():
@@ -281,9 +294,10 @@ elif name == 'omarchy' and args[1:3] == ['add', 'bitwarden'] and args[:1] == ['p
             command.symlink_to(root / 'bin' / 'stub')
         files.append(str(command))
         with (root / 'pacman-owned').open('a') as owned:
-            owned.write(str(command) + '\\n')
+            owned.write(str(command) + ' bitwarden\\n')
     (root / 'pacman-installed').mkdir(exist_ok=True)
     (root / 'pacman-installed' / 'bitwarden').write_text('\\n'.join(files) + '\\n')
+    (root / 'pacman-installed' / 'bitwarden.version').write_text(os.environ.get('FIXTURE_FEED_VERSION', '2026.10.1-1') + '\\n')
 elif name == 'omarchy' and args[:3] == ['pkg', 'drop', 'bitwarden']:
     listing = root / 'pacman-installed' / 'bitwarden'
     if listing.exists():
@@ -293,9 +307,10 @@ elif name == 'omarchy' and args[:3] == ['pkg', 'drop', 'bitwarden']:
             if path.is_symlink() or path.is_file():
                 path.unlink()
         listing.unlink()
+        (root / 'pacman-installed' / 'bitwarden.version').unlink(missing_ok=True)
         owned = root / 'pacman-owned'
         if owned.exists():
-            owned.write_text(''.join(line + '\\n' for line in owned.read_text().splitlines() if line not in files))
+            owned.write_text(''.join(line + '\\n' for line in owned.read_text().splitlines() if line.split(' ', 1)[0] not in files))
 elif name == 'omarchy':
     if args[:2] == ['pkg', 'add'] and len(args) > 2 and args[2] in ('ollama', 'ollama-vulkan', 'vulkan-tools'):
         if args[2] == 'ollama':
