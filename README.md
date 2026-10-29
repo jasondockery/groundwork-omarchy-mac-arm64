@@ -250,7 +250,7 @@ Start T3 Code with `t3`. It opens the local web UI. Sign in to at least one prov
 
 The installer is a one-time OS install. Ongoing fixes come from `omarchy update` on the edge channel. Before a later reinstall, read the upstream installer releases again. The signed edge catalog may select a newer image, and an existing install still has to be removed first.
 
-This README records what the reference M1 Mac mini installed on 2026-10-17; the latest observed catalog selection is in [status](docs/status.md). File desktop bugs on [omacom/omarchy](https://github.com/omacom/omarchy), installer or image bugs on [omacom/omarchy-mac-installer](https://github.com/omacom/omarchy-mac-installer), and hardware bugs on [omacom/omarchy-mac](https://github.com/omacom/omarchy-mac).
+This README records what the reference M1 Mac mini installed on 2026-10-17; the latest observed catalog selection is in [status](docs/status.md). File desktop, shell, binding, and shared-helper bugs on [omacom/omarchy](https://github.com/omacom/omarchy). File Apple Silicon package bugs, including the Mac's hardware services and boot chain, on [omacom/omarchy-mac-pkgs](https://github.com/omacom/omarchy-mac-pkgs). File package recipes, signing, and publication on [omacom/omarchy-pkgs](https://github.com/omacom/omarchy-pkgs). File installer or image bugs on [omacom/omarchy-mac-installer](https://github.com/omacom/omarchy-mac-installer). Send a hardware qualification report to [omarchy-m-testing.org](https://omarchy-m-testing.org). [omacom/omarchy-mac](https://github.com/omacom/omarchy-mac) is the legacy fork and is not where new package or hardware bugs go; reports already filed there stay there.
 
 Notes for people and agents are in `AGENTS.md`, `docs/status.md`, and `docs/decisions/`.
 
