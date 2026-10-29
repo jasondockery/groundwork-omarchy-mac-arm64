@@ -119,6 +119,15 @@ if action == 'list' and args[2:] == ['--json']:
     if settings.get('fail_list'):
         sys.exit(1)
     states = shell_states()
+    counter = fixture / 'list-count'
+    count = (int(counter.read_text()) if counter.is_file() else 0) + 1
+    counter.write_text(str(count))
+    # The user turns a widget off after the given number of listings.
+    for plugin_id, after in settings.get('user_off_after_lists', {}).items():
+        if count > after and states.get(plugin_id, [False])[0]:
+            states[plugin_id][0] = False
+            save_states(states)
+            layout_remove(plugin_id)
     if plugins_root().is_dir():
         for directory in plugins_root().iterdir():
             states.setdefault(directory.name, [False, False])
@@ -126,9 +135,10 @@ if action == 'list' and args[2:] == ['--json']:
     sys.exit(0)
 if action == 'disable' and len(args) == 3:
     plugin_id = args[2]
-    if plugin_id in settings.get('die_on_disable', []):
+    # The applier is killed while this command runs: before the widget changes, or after.
+    if plugin_id in settings.get('die_before_disable', []):
         os.kill(os.getppid(), 9)
-        time.sleep(5)
+        sys.exit(1)
     if plugin_id in settings.get('fail_disable', []):
         sys.stderr.write('fixture disable failed\n')
         sys.exit(1)
@@ -139,6 +149,12 @@ if action == 'disable' and len(args) == 3:
     states.setdefault(plugin_id, [False, False])[0] = False
     save_states(states)
     layout_remove(plugin_id)
+    if plugin_id in settings.get('disable_then_fail', []):
+        sys.stderr.write('fixture disable failed\n')
+        sys.exit(1)
+    if plugin_id in settings.get('die_after_disable', []):
+        os.kill(os.getppid(), 9)
+        sys.exit(0)
     print(f'Disabled {plugin_id}')
     sys.exit(0)
 if action == 'add' and args[3:] == ['--yes']:
@@ -495,8 +511,12 @@ class PluginApplyTests(unittest.TestCase):
         self.set_control(listed={'example.spaces': [True, False], 'omarchy.workspaces': [True, True]})
         self.write_list([plugin('example.spaces', replaces=['omarchy.workspaces'])], version=2)
         self.invoke()
-        self.assertEqual(self.omarchy_calls(), [['plugin', 'list', '--json'], ['plugin', 'disable', 'omarchy.workspaces']])
-        self.assertEqual(self.record()['plugins']['example.spaces']['replaced'], ['omarchy.workspaces'])
+        # The second listing reads the widget's state right before this layer's own disable.
+        self.assertEqual(self.omarchy_calls(), [['plugin', 'list', '--json'], ['plugin', 'list', '--json'],
+                                                ['plugin', 'disable', 'omarchy.workspaces']])
+        entry = self.record()['plugins']['example.spaces']
+        self.assertEqual(entry['replaced'], ['omarchy.workspaces'])
+        self.assertEqual(entry['disabledHere'], ['omarchy.workspaces'])
 
     def test_replacement_the_user_turned_off_keeps_the_original(self):
         self.seed_directory('example.spaces')
@@ -512,7 +532,29 @@ class PluginApplyTests(unittest.TestCase):
         self.write_list([plugin('example.spaces', replaces=['omarchy.workspaces'])], version=2)
         result = self.invoke()
         self.assertIn('Omarchy plugin omarchy.workspaces disable failed', result.stdout)
-        self.assertNotIn('replaced', self.record()['plugins']['example.spaces'])
+        # The command may have turned the widget off before failing, so the intent stays for the next run.
+        self.assertEqual(self.record()['plugins']['example.spaces'].get('disabling'), ['omarchy.workspaces'])
+        # Still on: the intent is let go of and the disable is tried again, once.
+        self.set_control(listed={'omarchy.workspaces': [True, True]})
+        self.clear_calls()
+        self.invoke()
+        self.assertEqual([call for call in self.omarchy_calls() if call[1] == 'disable'],
+                         [['plugin', 'disable', 'omarchy.workspaces']])
+        self.assertEqual(self.record()['plugins']['example.spaces'].get('disabledHere'), ['omarchy.workspaces'])
+
+    def test_a_disable_that_fails_after_turning_the_widget_off_is_still_this_layers(self):
+        # The command turned the widget off and then exited non-zero.
+        self.set_control(listed={'omarchy.workspaces': [True, True]}, disable_then_fail=['omarchy.workspaces'])
+        self.write_list([plugin('example.spaces', replaces=['omarchy.workspaces'])], version=2)
+        self.invoke()
+        self.set_control(listed={'omarchy.workspaces': [True, True]})
+        self.clear_calls()
+        self.invoke()
+        self.assertFalse([call for call in self.omarchy_calls() if call[1] in ('enable', 'disable')])
+        self.assertEqual(self.record()['plugins']['example.spaces'].get('disabledHere'), ['omarchy.workspaces'])
+        self.retire('example.spaces')
+        self.invoke()
+        self.assertIn(['plugin', 'enable', 'omarchy.workspaces'], self.omarchy_calls())
 
     def retire(self, plugin_id='omarchy.agents'):
         self.write_list([], retired=[{'id': plugin_id, 'reason': 'Fixture'}], version=2)
@@ -560,7 +602,8 @@ class PluginApplyTests(unittest.TestCase):
 
     def test_retired_replacement_re_enables_what_it_turned_off(self):
         self.seed_directory('example.spaces')
-        self.write_record({'example.spaces': {'repo': 'https://github.com/example/spaces.git', 'replaced': ['omarchy.workspaces', 'omarchy.gone']}})
+        self.write_record({'example.spaces': {'repo': 'https://github.com/example/spaces.git', 'replaced': ['omarchy.workspaces', 'omarchy.gone'],
+                                              'disabledHere': ['omarchy.workspaces', 'omarchy.gone']}})
         self.set_control(listed={'example.spaces': [True, False], 'omarchy.workspaces': [False, True]})
         self.retire('example.spaces')
         self.invoke()
@@ -655,14 +698,18 @@ class PluginApplyTests(unittest.TestCase):
 
     def test_slot_is_saved_before_the_next_widget_is_disabled(self):
         self.prepare_two_widgets()
-        # The applier is killed while disabling the second widget.
+        # The applier is killed as it starts disabling the second widget.
         self.set_control(listed={'omarchy.alpha': [True, True], 'omarchy.beta': [True, True]}, sim_layout=True,
-                         die_on_disable=['omarchy.beta'])
+                         die_before_disable=['omarchy.beta'])
         self.write_list([plugin('example.spaces', replaces=['omarchy.alpha', 'omarchy.beta'])], version=2)
         self.invoke()
         entry = self.record()['plugins']['example.spaces']
-        self.assertEqual(entry['replaced'], ['omarchy.alpha'])
-        self.assertEqual(entry['replacedAt'], [{'id': 'omarchy.alpha', 'section': 'left', 'index': 1}])
+        # The first widget is confirmed; the second is saved, with its slot, as about to be disabled.
+        self.assertEqual(entry['replaced'], ['omarchy.alpha', 'omarchy.beta'])
+        self.assertEqual(entry['replacedAt'], [{'id': 'omarchy.alpha', 'section': 'left', 'index': 1},
+                                               {'id': 'omarchy.beta', 'section': 'left', 'index': 1}])
+        self.assertEqual(entry['disabledHere'], ['omarchy.alpha'])
+        self.assertEqual(entry['disabling'], ['omarchy.beta'])
 
     def dropped_setup(self, *, on=()):
         """Two widgets this layer replaced, now off, with their slots recorded."""
@@ -743,6 +790,8 @@ class PluginApplyTests(unittest.TestCase):
         entry = record['plugins']['example.spaces']
         entry['replaced'] = ['omarchy.alpha', 'omarchy.beta']
         entry['replacedAt'] = [{'id': 'omarchy.beta', 'section': 'left', 'index': 1}]
+        # This layer disabled both; alpha's slot could not be read at the time.
+        entry['disabledHere'] = ['omarchy.alpha', 'omarchy.beta']
         self.write_record(record['plugins'])
         self.write_list([plugin('example.spaces')], version=2)
         self.invoke()
@@ -959,9 +1008,11 @@ class PluginApplyTests(unittest.TestCase):
         self.seed_directory('example.spaces')
         self.seed_directory('example.zeta')
         self.write_record({
-            'example.spaces': {'repo': 'https://github.com/example/spaces.git', 'replaced': ['omarchy.alpha', 'omarchy.beta']},
+            'example.spaces': {'repo': 'https://github.com/example/spaces.git', 'replaced': ['omarchy.alpha', 'omarchy.beta'],
+                               'disabledHere': ['omarchy.alpha', 'omarchy.beta']},
             'example.zeta': {'repo': 'https://github.com/example/zeta.git', 'replaced': ['omarchy.beta'],
-                             'replacedAt': [{'id': 'omarchy.beta', 'section': 'left', 'index': 1}]}})
+                             'replacedAt': [{'id': 'omarchy.beta', 'section': 'left', 'index': 1}],
+                             'disabledHere': ['omarchy.beta']}})
         self.set_control(listed={'example.spaces': [True, False], 'example.zeta': [True, False],
                                  'omarchy.alpha': [False, True], 'omarchy.beta': [False, True]}, sim_layout=True)
         self.write_list([plugin('example.spaces')], version=2)
@@ -1013,10 +1064,168 @@ class PluginApplyTests(unittest.TestCase):
 
     def test_restore_without_a_remembered_slot_uses_the_default_placement(self):
         self.set_control(listed={'example.spaces': [True, False], 'omarchy.workspaces': [False, True]})
-        self.spaces_record()
+        # This layer disabled the widget while shell.json gave no slot.
+        self.spaces_record(disabledHere=['omarchy.workspaces'])
         self.retire('example.spaces')
         self.invoke()
         self.assertIn(['plugin', 'enable', 'omarchy.workspaces'], self.omarchy_calls())
+
+    def off_before_swap_setup(self):
+        """The user turned alpha off before example.spaces, which replaces it, was installed."""
+        self.write_shell_layout({'left': [{'id': 'omarchy.menu'}, {'id': 'omarchy.clock'}]})
+        self.set_control(listed={'omarchy.menu': [True, True], 'omarchy.clock': [True, True],
+                                 'omarchy.alpha': [False, True]}, sim_layout=True)
+        self.write_list([plugin('example.spaces', replaces=['omarchy.alpha'])], version=2)
+        self.invoke()
+        entry = self.record()['plugins']['example.spaces']
+        # Held so the swap is not repeated, but not marked as this layer's own change.
+        self.assertEqual(entry['replaced'], ['omarchy.alpha'])
+        self.assertEqual(entry.get('disabledHere'), [])
+        self.assertFalse(self.toggles())
+        self.clear_calls()
+
+    def test_a_widget_off_before_its_swap_stays_off_after_retirement(self):
+        self.off_before_swap_setup()
+        self.retire('example.spaces')
+        self.invoke()
+        self.assertFalse(self.toggles())
+        self.assertNotIn('omarchy.alpha', self.ids('left'))
+        self.assertFalse(self.record()['plugins'])
+
+    def test_a_widget_off_before_its_swap_stays_off_after_a_drop(self):
+        self.off_before_swap_setup()
+        self.write_list([plugin('example.spaces')], version=2)
+        self.invoke()
+        self.assertFalse(self.toggles())
+        self.assertNotIn('omarchy.alpha', self.ids('left'))
+        entry = self.record()['plugins']['example.spaces']
+        self.assertNotIn('replaced', entry)
+        self.assertNotIn('disabledHere', entry)
+
+    def interrupted_setup(self, **control):
+        self.write_shell_layout({'left': [{'id': 'omarchy.menu'}, {'id': 'omarchy.alpha'}, {'id': 'omarchy.clock'}]})
+        self.listed = {'omarchy.menu': [True, True], 'omarchy.clock': [True, True], 'omarchy.alpha': [True, True]}
+        self.set_control(listed=self.listed, sim_layout=True, **control)
+        self.write_list([plugin('example.spaces', replaces=['omarchy.alpha'])], version=2)
+        self.invoke()
+
+    def test_an_interrupted_disable_is_still_restored_in_its_slot(self):
+        # The applier is killed after the widget went off, before it saved the confirmation.
+        self.interrupted_setup(die_after_disable=['omarchy.alpha'])
+        self.assertEqual(self.ids('left'), ['omarchy.menu', 'omarchy.clock'])
+        self.assertEqual(self.record()['plugins']['example.spaces'].get('disabling'), ['omarchy.alpha'])
+        # The next run confirms the mark without touching the widget.
+        self.set_control(listed=self.listed, sim_layout=True)
+        self.clear_calls()
+        self.invoke()
+        self.assertFalse(self.toggles())
+        entry = self.record()['plugins']['example.spaces']
+        self.assertEqual(entry.get('disabledHere'), ['omarchy.alpha'])
+        self.assertNotIn('disabling', entry)
+        self.assertEqual(entry.get('replacedAt'), [self.SLOT])
+        # Undoing the swap turns it on again in its slot.
+        self.retire('example.spaces')
+        self.invoke()
+        self.assertIn(self.RESTORE, self.omarchy_calls())
+        self.assertEqual(self.ids('left'), self.RESTORED)
+
+    def test_a_crash_before_the_disable_leaves_the_widget_on_and_retries_the_swap(self):
+        # The applier is killed after saving its intent, before the disable changed anything.
+        self.interrupted_setup(die_before_disable=['omarchy.alpha'])
+        self.assertEqual(self.ids('left'), self.RESTORED)
+        self.assertEqual(self.record()['plugins']['example.spaces'].get('disabling'), ['omarchy.alpha'])
+        # The next run finds it still on: nothing is turned on, and the swap runs once.
+        self.set_control(listed=self.listed, sim_layout=True)
+        self.clear_calls()
+        self.invoke()
+        self.assertEqual(self.toggles(), [['plugin', 'disable', 'omarchy.alpha']])
+        entry = self.record()['plugins']['example.spaces']
+        self.assertEqual(entry.get('disabledHere'), ['omarchy.alpha'])
+        self.assertNotIn('disabling', entry)
+        self.assertEqual(entry.get('replacedAt'), [self.SLOT])
+
+    def test_a_widget_the_user_turns_off_just_before_the_disable_is_left_to_the_user(self):
+        # The first listing shows alpha on; the user turns it off before the read right before the disable.
+        self.interrupted_setup(user_off_after_lists={'omarchy.alpha': 1})
+        self.assertFalse(self.toggles())
+        entry = self.record()['plugins']['example.spaces']
+        self.assertEqual(entry['replaced'], ['omarchy.alpha'])
+        self.assertEqual(entry.get('disabledHere'), [])
+        self.retire('example.spaces')
+        self.invoke()
+        self.assertFalse(self.toggles())
+        self.assertEqual(self.ids('left'), ['omarchy.menu', 'omarchy.clock'])
+
+    def hand_over_with(self, mark):
+        """example.spaces lets go of alpha, which example.other (applied and on) takes over."""
+        self.heir_setup(other={}, listed={'example.other': [True, False]})
+        recorded = self.record()['plugins']
+        recorded['example.spaces']['disabledHere'] = mark
+        self.write_record(recorded)
+        self.seed_directory('example.other')
+        self.write_list([plugin('example.spaces'), plugin('example.other', replaces=['omarchy.alpha'])], version=2)
+        self.invoke()
+        self.assertFalse(self.toggles())
+        self.assertEqual(self.holders('omarchy.alpha'), ['example.other'])
+        self.assertEqual(self.record()['plugins']['example.other'].get('disabledHere'), mark)
+        self.write_list([plugin('example.spaces'), plugin('example.other')], version=2)
+        self.invoke()
+        self.assertFalse(self.holders('omarchy.alpha'))
+
+    def test_the_mark_travels_with_a_hand_over(self):
+        self.hand_over_with(['omarchy.alpha'])
+        self.assertEqual(self.toggles(), [self.RESTORE])
+
+    def test_an_unmarked_id_stays_unmarked_through_a_hand_over(self):
+        self.hand_over_with([])
+        self.assertFalse(self.toggles())
+
+    def test_an_old_record_counts_only_slotted_ids_as_disabled_here(self):
+        # A record written before the marks: only this layer's own disable stored a slot.
+        self.write_shell_layout({'left': [{'id': 'omarchy.menu'}, {'id': 'omarchy.clock'}]})
+        self.seed_directory('example.spaces')
+        self.write_record({'example.spaces': {'repo': 'https://github.com/example/spaces.git',
+                                              'replaced': ['omarchy.alpha', 'omarchy.beta'], 'replacedAt': [self.SLOT]}})
+        self.set_control(listed={'example.spaces': [True, False], 'omarchy.menu': [True, True], 'omarchy.clock': [True, True],
+                                 'omarchy.alpha': [False, True], 'omarchy.beta': [False, True]}, sim_layout=True)
+        self.write_list([plugin('example.spaces', replaces=['omarchy.beta'])], version=2)
+        self.invoke()
+        self.assertEqual(self.enables(), [self.RESTORE])
+        entry = self.record()['plugins']['example.spaces']
+        self.assertEqual(entry['replaced'], ['omarchy.beta'])
+        self.assertEqual(entry.get('disabledHere'), [])
+        # The id without a slot may have been off already, so its undo leaves it off.
+        self.write_list([plugin('example.spaces')], version=2)
+        self.clear_calls()
+        self.invoke()
+        self.assertFalse(self.enables())
+        self.assertNotIn('replaced', self.record()['plugins']['example.spaces'])
+
+    def test_malformed_marks_invalidate_the_record(self):
+        bad = {
+            'disabledHere not a list': {'disabledHere': 'omarchy.workspaces'},
+            'disabledHere id not replaced': {'disabledHere': ['omarchy.other']},
+            'disabledHere bad id': {'disabledHere': ['bad id!']},
+            'disabledHere duplicate id': {'disabledHere': ['omarchy.workspaces', 'omarchy.workspaces']},
+            'disabling not a list': {'disabledHere': [], 'disabling': {}},
+            'disabling id not replaced': {'disabledHere': [], 'disabling': ['omarchy.other']},
+            'disabling without disabledHere': {'disabling': ['omarchy.workspaces']},
+            'marked twice': {'disabledHere': ['omarchy.workspaces'], 'disabling': ['omarchy.workspaces']},
+        }
+        for label, value in bad.items():
+            for builtin in (False, True):
+                with self.subTest(label, builtin=builtin):
+                    shutil.rmtree(self.plugin_dir('example.spaces'), ignore_errors=True)
+                    self.clear_calls()
+                    if builtin:
+                        self.write_record({'omarchy.agents': {'builtIn': True, 'replaced': ['omarchy.workspaces'], **value}})
+                    else:
+                        self.spaces_record(**value)
+                    self.set_control(listed={'example.spaces': [True, False], 'omarchy.workspaces': [False, True]})
+                    self.write_list([plugin('example.spaces')], version=2)
+                    result = self.invoke()
+                    self.assertIn('install record is invalid', result.stdout)
+                    self.assertFalse([call for call in self.omarchy_calls() if call[1] in ('enable', 'disable', 'add', 'remove')])
 
     def test_builtin_record_may_hold_replaced_slots(self):
         self.write_record({'omarchy.agents': {'builtIn': True, 'replaced': ['omarchy.workspaces'],
