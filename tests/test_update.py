@@ -58,6 +58,19 @@ Program Headers:
 '''
 
 
+# A real SIGSEGV death, with the kernel told not to dump this process. RLIMIT_CORE
+# does not help: with a piped core_pattern systemd-coredump still logs the death
+# and Omarchy shows a "Process crashed" notification. Dumpable is reset by exec,
+# so the stub sets it itself (PR_SET_DUMPABLE = 4) just before signalling.
+# RLIMIT_CORE 0 is also set here so a file core_pattern writes nothing.
+CRASH_WITHOUT_DUMP = '''#!/usr/bin/python3
+import ctypes, os, resource, signal
+resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)
+os.kill(os.getpid(), signal.SIGSEGV)
+'''
+
+
 class UpdateTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='groundwork-update-')
@@ -1033,6 +1046,13 @@ class T3CandidateTests(unittest.TestCase):
         with patch.object(updater, 'fetch', return_value=json.dumps(releases).encode()):
             self.assertEqual(updater.t3_latest_nightly(), '0.1.3-nightly.20261024.3604')
 
+    def test_a_core_limited_child_reports_rlimit_core_zero(self):
+        reported = updater.run(
+            [sys.executable, '-c',
+             'import resource; soft, hard = resource.getrlimit(resource.RLIMIT_CORE); print(f"{soft} {hard}")'],
+            limit_core=True)
+        self.assertEqual(reported, '0 0')
+
     def test_run_replacement_env_drops_the_caller_environment(self):
         reported = updater.run([sys.executable, '-c', 'import os; print("\\n".join(sorted(os.environ)))'],
                                env={'FOO': 'bar', 'PATH': '/usr/bin:/bin'})
@@ -1091,9 +1111,18 @@ class T3CandidateTests(unittest.TestCase):
             self.assertTrue(paths)
             self.assertFalse(Path(paths[-1]).exists())
             return reason, rejected
-        reason, rejected = check('#!/bin/sh\nkill -SEGV $$\n', updater.T3_CANDIDATE_SMOKE_SECONDS, 0.2)
+        reason, rejected = check(CRASH_WITHOUT_DUMP, updater.T3_CANDIDATE_SMOKE_SECONDS, 0.2)
         self.assertIn('crashed (SIGSEGV)', reason)
         self.assertTrue(rejected)
+        limited = (
+            '#!/usr/bin/python3\n'
+            'import resource\n'
+            'soft, hard = resource.getrlimit(resource.RLIMIT_CORE)\n'
+            f'print("t3 v{CANDIDATE}" if soft == 0 and hard == 0 else "t3 vunlimited")\n'
+        )
+        reason, rejected = check(limited, updater.T3_CANDIDATE_SMOKE_SECONDS, 0.2)
+        self.assertIsNone(reason)
+        self.assertFalse(rejected)
         reason, rejected = check('#!/bin/sh\nsleep 30\n', 0.2, 0.2)
         self.assertIn('deadline', reason)
         self.assertFalse(rejected)

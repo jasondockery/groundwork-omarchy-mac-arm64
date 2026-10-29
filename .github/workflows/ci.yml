@@ -17,6 +17,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Install bubblewrap for the T3 smoke fixture
+        run: sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bubblewrap
       - name: Check shell syntax
         run: bash -n install.sh scripts/apply-layer.sh scripts/migrate-from-groundwork.sh
       - name: Exercise isolated installer fixtures
