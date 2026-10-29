@@ -1286,6 +1286,18 @@ def checkout_core(source):
     parts = line.split()
     if len(parts) < 4 or parts[0] != '160000' or parts[-1] != 'core':
         raise UpdateError('The core entry is not a submodule, so its browser spec cannot be checked out.')
+    recorded = parts[2]
+    core = Path(source) / 'core'
+    # A worktree already at that commit, with no local edits, does not need
+    # git-submodule. That script fetches and is what made a routine setup
+    # rerun slow enough to hit the CI job limit.
+    if (core / '.git').exists():
+        try:
+            checked_out = git(core, 'rev-parse', 'HEAD')
+        except UpdateError:
+            checked_out = ''
+        if checked_out == recorded and not git(core, 'status', '--porcelain', '--untracked-files=all'):
+            return
     # git-submodule is a shell script. It needs basename and sed. A setup
     # fixture PATH that only contains installer stubs must not hide those.
     git_path = '/usr/bin:/bin'

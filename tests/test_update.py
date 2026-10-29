@@ -405,6 +405,17 @@ class UpdateTests(unittest.TestCase):
         updater.checkout_core(self.source)
         self.assertEqual((self.source / 'core/browser/brave.json').read_text(), spec)
         self.assertFalse((REPO / 'browser/brave.json').exists())
+        calls = []
+        real_git = updater.git
+
+        def spy(source, *args, **kwargs):
+            calls.append(args)
+            return real_git(source, *args, **kwargs)
+
+        with patch.object(updater, 'git', side_effect=spy):
+            updater.checkout_core(self.source)
+        self.assertFalse(any(args[:2] == ('submodule', 'update') for args in calls))
+        self.assertEqual((self.source / 'core/browser/brave.json').read_text(), spec)
 
     def test_detached_missing_upstream_and_ahead_source_preserve_work(self):
         self.git('checkout', '--detach')
