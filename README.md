@@ -52,6 +52,7 @@ Only enable SSH after reviewing that guide and your effective tailnet policy. No
 - Check that `t3 --version` identifies a Nightly build, then run `t3`, open its local interface, authenticate a provider already installed on this machine, and complete one small task in a disposable project. Installing the UI does not authenticate Codex or Claude.
 - Open Obsidian with `Super+Shift+O` and select the local vault printed by setup. A new vault has Vim mode enabled; existing settings are preserved. Verify your notes and the chosen sync path using the [apps guide](docs/apps.md).
 - Launch Bitwarden from the app menu and finish sign-in/MFA. Restart Chromium to load the registered official extension, approve/enable it if prompted in each profile, and test autofill. `bw --version` checks CLI availability; it does not prove vault sign-in. A new install uses Omarchy's `bitwarden` package when the feed has it and it passes setup's checks, and otherwise the user Flatpak. User Flatpak updates use `flatpak --user update` separately from Omarchy updates.
+- When setup installed Brave and you answered yes, `omarchy-default-browser` prints `brave`. Open one page, then `brave://policy`, and confirm the groundwork-core `v0.7.0` rows. Approve Bitwarden if Brave offers it. Open one web app with `omarchy-launch-webapp` and confirm it opens in Brave; a sign-in that exists only in Chromium stays in Chromium. Chromium itself stays installed. If Brave failed the page-size or launch check, Chromium remains the default and setup says so. See the [apps guide](docs/apps.md#brave).
 - Launch FreeTube from the app menu. It opens with upstream defaults. Subscriptions and history stay in `~/.var/app/io.freetubeapp.FreeTube/config/FreeTube`. See the [apps guide](docs/apps.md).
 - From another approved computer in the same tailnet, run `ssh LOCAL_USER@MACHINE` using this machine's local login and MagicDNS name. Confirm the hostname and attach to tmux or Herdr. Test the reverse direction too using the destination's supported SSH setup.
 - From a Mac, connect to `vnc://MACHINE` with the generated local VNC password. Verify the screen and input, including after logout/login or reboot. Command+1 selects a workspace, and Option+1 selects a multiplexer window. Tailscale visibility alone does not prove a desktop server is running or permitted by policy.
@@ -123,14 +124,19 @@ does not disable its service or remove Blip.
 When an app this layer manages was installed another way than Omarchy's own
 installer, and Omarchy has one, setup offers to move it and never forces it
 ([decision 0014](docs/decisions/0014-offer-migration-to-omarchy-installers.md)).
-Today that is a Bitwarden user Flatpak once the feed has the `bitwarden`
-package. `./install.sh` in a terminal saves the other setup choices first,
+That covers a Bitwarden user Flatpak once the feed has the `bitwarden`
+package, a Brave Flatpak or other non-`brave-bin` Brave, and making a Brave
+that passed setup's checks the default browser
+([decision 0015](docs/decisions/0015-brave-via-omarchy-installer.md)).
+`./install.sh` in a terminal saves the other setup choices first,
 then asks `[y/N]` for up to five minutes and saves a no with them.
 `groundwork-update`, `update-all`, and runs without a terminal print one line
 naming the current and preferred methods and the migration id. Run
 `./install.sh --migrate-to-omarchy-installers` to migrate without a prompt,
-including after an earlier no. App data is kept; see the
-[apps guide](docs/apps.md#moving-from-the-flatpak-to-omarchys-package).
+including after an earlier no. The flag runs every offer that is still pending.
+App data is kept; see the
+[apps guide](docs/apps.md#moving-from-the-flatpak-to-omarchys-package)
+and [Brave](docs/apps.md#brave).
 A `cursor` that no pacman package owns is only reported, with
 [manual steps](docs/apps.md#cursor).
 

@@ -15,7 +15,7 @@ When Omarchy has its own installer for an app this layer manages, a new install 
 
 ### One flag, no dry run
 
-Compass `terminal-program-ux` §3 asks for a per-migration `--migrate=<id>` and a `--dry-run`. This layer has one flag, `--migrate-to-omarchy-installers`, for every offer, and no dry run. With a single offer, a per-id flag would select the same thing. The prompt and the notice already state the plan and change nothing. The notice prints the id so a later per-id flag can use it. Revisit this when a second app gets an offer.
+Compass `terminal-program-ux` §3 asks for a per-migration `--migrate=<id>` and a `--dry-run`. This layer has one flag, `--migrate-to-omarchy-installers`, for every offer, and no dry run. Brave adds `brave-flatpak` and `default-browser-brave` beside `bitwarden-flatpak` ([decision 0015](0015-brave-via-omarchy-installer.md)). The same flag still migrates every pending offer in one run. The prompt and the notice name the id and state the plan. A per-id flag is not added: saying yes, or passing the flag, runs each offer that is still pending.
 
 ## Bitwarden desktop
 
@@ -32,6 +32,10 @@ When either check fails, a package that this run added is removed again with `om
 - **Sudo on updates.** With no Bitwarden desktop at all and the package in the feed, a routine update now needs administrator permission to add it. A run without a terminal and without cached sudo stops with the command to run, where it previously installed the user Flatpak without sudo.
 - **Migration** (id `bitwarden-flatpak`). Offered when the user Flatpak is installed and the feed has the package. It is refused, with nothing changed, in three cases: `flatpak ps` fails, the app is running, or a `bitwarden` on `PATH` is not the package's. Otherwise it adds the package unless it is already installed, and checks it as above. Only then does it run `flatpak --user uninstall --noninteractive com.bitwarden.desktop`, without `--delete-data`. `~/.var/app/com.bitwarden.desktop` stays for recovery, and one launcher entry remains. Flathub and the shared runtimes stay for other apps.
 - The vault stays in the Bitwarden account. Sign in again in the native app. To undo, run `flatpak --user install flathub com.bitwarden.desktop` and then `omarchy pkg drop bitwarden`.
+
+## Brave
+
+Brave's two offers, the page-size and launch checks, and the policy file are [decision 0015](0015-brave-via-omarchy-installer.md). The Flatpak `com.brave.Browser` and a `brave` command that `brave-bin` does not own use id `brave-flatpak`. A Brave that passed the checks and is not already the default uses id `default-browser-brave`. Migration installs `brave-bin` through `omarchy-install-browser brave`. It does not uninstall the Flatpak and does not pass `--delete-data`. `~/.var/app/com.brave.Browser` stays. Chromium stays.
 
 ## Cursor: report only
 

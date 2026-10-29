@@ -3,7 +3,9 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    # feat/brave-via-omarchy is listed so CI runs on that branch before a pull
+    # request exists. Drop the name when the branch merges.
+    branches: [main, feat/brave-via-omarchy]
   workflow_dispatch:
 
 permissions:
@@ -17,6 +19,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          submodules: true
       # ubuntu-26.04 can configure loopback inside a new network namespace.
       # ubuntu-24.04 fails that with "bwrap: loopback: Failed RTM_NEWADDR:
       # Operation not permitted". Install bubblewrap only when the probe
