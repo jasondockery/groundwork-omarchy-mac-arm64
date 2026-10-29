@@ -36,6 +36,10 @@ BUN_PAGE_SIZE_ISSUE = 'oven-sh/bun#17627'
 BUN_PAGE_SIZE_URL = 'https://github.com/oven-sh/bun/issues/17627'
 BUN_LINUX_ARCHIVE = 'bun-linux-aarch64.zip'
 BLIP_ID = 'nixfred.blip'
+# Setup's apply stage, including any migration prompt, must finish within this.
+SETUP_APPLY_SECONDS = 900
+# Ids in declined_migrations: lowercase letters, digits, and hyphens.
+MIGRATION_ID_CHARACTERS = frozenset('abcdefghijklmnopqrstuvwxyz0123456789-')
 # Last nightly whose ELF files all load on 16 KiB pages (pingdotgg/t3code#23433).
 T3_KNOWN_GOOD_LARGE_PAGE = '0.1.2-nightly.20261021.3499'
 # A downloaded candidate must finish --version inside its temp directory.
@@ -129,9 +133,37 @@ def settings(required=True):
             or not isinstance(value.get('obsidian_vault'), str)
             or '\n' in value['obsidian_vault']
             or ('blip' in value and type(value['blip']) is not bool)
-            or ('local_inference' in value and type(value['local_inference']) is not bool)):
+            or ('local_inference' in value and type(value['local_inference']) is not bool)
+            or ('declined_migrations' in value and not valid_migration_ids(value['declined_migrations']))):
         raise UpdateError(f'Invalid updater settings in {CONFIG}; preserve and repair that file before updating.')
     return value
+
+
+def valid_migration_id(name):
+    return (isinstance(name, str) and 0 < len(name) <= 64 and name[0].isalnum()
+            and all(character in MIGRATION_ID_CHARACTERS for character in name))
+
+
+def valid_migration_ids(names):
+    return isinstance(names, list) and all(valid_migration_id(name) for name in names)
+
+
+def declined_migrations(value):
+    """Migration offers the person declined (decision 0014). Older setups have none."""
+    if value is None or 'declined_migrations' not in value:
+        return []
+    names = value['declined_migrations']
+    if not valid_migration_ids(names):
+        raise UpdateError(f'Invalid updater settings in {CONFIG}; preserve and repair that file before updating.')
+    return list(dict.fromkeys(names))
+
+
+def parse_declined_migrations(text):
+    """Comma-separated ids from apply-layer.sh. An empty string means none."""
+    names = [name for name in text.split(',') if name]
+    if not valid_migration_ids(names):
+        raise UpdateError('Declined migration ids must be lowercase letters, digits, and hyphens.')
+    return list(dict.fromkeys(names))
 
 
 def blip_enabled(value):
@@ -167,7 +199,7 @@ def validate_registration(source):
     return previous
 
 
-def register(source, keyd, screen_sharing, vault, blip='0', local_inference='0'):
+def register(source, keyd, screen_sharing, vault, blip='0', local_inference='0', declined=None):
     source = Path(source).resolve()
     previous = validate_registration(source)
     if blip not in ('0', '1'):
@@ -177,6 +209,13 @@ def register(source, keyd, screen_sharing, vault, blip='0', local_inference='0')
     value = dict(previous or {}, schema=1, source=str(source), keyd=keyd == '1',
                  screen_sharing=screen_sharing == '1', obsidian_vault=vault, blip=blip == '1',
                  local_inference=local_inference == '1')
+    # None keeps whatever was saved. apply-layer.sh always passes the full list.
+    if declined is not None:
+        names = parse_declined_migrations(declined)
+        if names:
+            value['declined_migrations'] = names
+        else:
+            value.pop('declined_migrations', None)
     if value['keyd']:
         value['keyd_sha256'] = hashlib.sha256((source / 'keyd/default.conf').read_bytes()).hexdigest()
     value.pop('pending_keyd', None)
@@ -521,6 +560,33 @@ def elf_alignment_problem(binary):
     return None
 
 
+def package_alignment_problem(package):
+    """Reason an installed pacman package's ELF files cannot load here, or None.
+
+    Lists the package with `pacman -Qlq` and checks every ELF file with
+    `elf_alignment_problem`, the same readelf -lW check as local inference.
+    A package with no ELF file is a refusal: nothing was shown to load.
+    """
+    try:
+        listed = run(['pacman', '-Qlq', package], deadline=60)
+    except (UpdateError, OSError) as error:
+        return f'Could not list the files of {package} ({error}).'
+    checked = 0
+    for line in listed.splitlines():
+        path = Path(line)
+        if not line or line.endswith('/') or path.is_symlink() or not path.is_file():
+            continue
+        problem = elf_alignment_problem(path)
+        if problem == 'not-elf':
+            continue
+        if problem:
+            return problem
+        checked += 1
+    if not checked:
+        return f'{package} installed no ELF file, so it was not shown to start on this kernel.'
+    return None
+
+
 def bun_alignment_problem(binary):
     """Reason `binary` cannot be mapped on this kernel, or None.
 
@@ -563,8 +629,12 @@ def rejected_t3_path():
     return STATE / 't3-rejected.json'
 
 
-def rejected_t3(page):
-    path = rejected_t3_path()
+def rejected_bitwarden_path():
+    """Bitwarden package versions that failed setup's checks, by page size."""
+    return STATE / 'bitwarden-rejected.json'
+
+
+def rejected_versions(path, page):
     try:
         check_path(path)
         value = json.loads(path.read_text())
@@ -574,8 +644,7 @@ def rejected_t3(page):
     return [version for version in versions if isinstance(version, str)] if isinstance(versions, list) else []
 
 
-def reject_t3(page, version):
-    path = rejected_t3_path()
+def reject_version(path, page, version):
     try:
         check_path(path)
         value = json.loads(path.read_text()) if path.exists() else {}
@@ -583,9 +652,49 @@ def reject_t3(page, version):
         value = {}
     if not isinstance(value, dict):
         value = {}
-    versions = [*rejected_t3(page), version][-50:]
+    versions = [*rejected_versions(path, page), version][-50:]
     value[str(page)] = sorted(set(versions))
     atomic_write(path, json.dumps(value, indent=2) + '\n')
+
+
+def rejected_t3(page):
+    return rejected_versions(rejected_t3_path(), page)
+
+
+def reject_t3(page, version):
+    reject_version(rejected_t3_path(), page, version)
+
+
+def bitwarden_version():
+    """Installed bitwarden version, else the one the sync database offers, else None.
+
+    That is the version a migration or new install would check.
+    """
+    try:
+        fields = run(['pacman', '-Q', 'bitwarden'], deadline=30).split()
+        if len(fields) == 2:
+            return fields[1]
+    except (UpdateError, OSError):
+        pass
+    try:
+        for line in run(['pacman', '-Si', 'bitwarden'], deadline=30).splitlines():
+            key, _, value = line.partition(':')
+            if key.strip() == 'Version' and value.strip():
+                return value.strip()
+    except (UpdateError, OSError):
+        pass
+    return None
+
+
+def bitwarden_package_command():
+    """True only when Omarchy's bitwarden package owns the bitwarden on PATH."""
+    executable = shutil.which('bitwarden')
+    if not executable:
+        return False
+    try:
+        return run(['pacman', '-Qoq', executable], deadline=30) == 'bitwarden'
+    except (UpdateError, OSError):
+        return False
 
 
 def page_size_reason(page):
@@ -1037,7 +1146,9 @@ def update(scope, check=False):
                         ('io.freetubeapp.FreeTube', 'FreeTube'),
                     ):
                         if app not in installed:
-                            completed.append(f'{label} user Flatpak not installed; skipped')
+                            # A native Bitwarden desktop is the expected state, not a skip.
+                            if app != 'com.bitwarden.desktop' or not bitwarden_package_command():
+                                completed.append(f'{label} user Flatpak not installed; skipped')
                             continue
                         print(f'Updating the installed {label} user Flatpak…', flush=True)
                         try:
@@ -1098,6 +1209,24 @@ def main(args):
             print(problem, file=sys.stderr)
             return 1
         return 0
+    if args and args[0] == 'check-package-alignment' and len(args) == 2:
+        problem = package_alignment_problem(args[1])
+        if problem:
+            print(problem, file=sys.stderr)
+            return 1
+        return 0
+    if args and args[0] == 'bitwarden-rejected' and len(args) == 1:
+        # Exit 0 when the version setup would check already failed on this kernel.
+        version = bitwarden_version()
+        return 0 if version and version in rejected_versions(rejected_bitwarden_path(), page_size()) else 1
+    if args and args[0] == 'reject-bitwarden' and len(args) == 1:
+        version = bitwarden_version()
+        if not version:
+            print('The bitwarden package version could not be read, so it was not remembered.', file=sys.stderr)
+            return 1
+        reject_version(rejected_bitwarden_path(), page_size(), version)
+        print(version)
+        return 0
     if args and args[0] == 'check-elf-alignment' and len(args) == 2:
         problem = elf_alignment_problem(args[1])
         if problem == 'not-elf':
@@ -1120,9 +1249,13 @@ def main(args):
         source, *options = args[1:]
         valid = {'--with-keyd', '--without-keyd', '--with-screen-sharing', '--without-screen-sharing',
                  '--with-blip', '--without-blip', '--with-local-inference', '--without-local-inference',
-                 '--update', '--help', '-h'}
+                 '--migrate-to-omarchy-installers', '--update', '--help', '-h'}
         if any(option not in valid for option in options):
             print('Unknown setup argument; nothing changed.', file=sys.stderr)
+            return 64
+        if {'--migrate-to-omarchy-installers', '--update'} <= set(options):
+            print('--migrate-to-omarchy-installers is a setup option. Run ./install.sh --migrate-to-omarchy-installers; nothing changed.',
+                  file=sys.stderr)
             return 64
         if ({'--with-keyd', '--without-keyd'} <= set(options)
                 or {'--with-screen-sharing', '--without-screen-sharing'} <= set(options)
@@ -1131,8 +1264,9 @@ def main(args):
             print('Choose only one option for each setup preference; nothing changed.', file=sys.stderr)
             return 64
         if '--help' in options or '-h' in options:
-            print('Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip] [--with-local-inference|--without-local-inference]')
+            print('Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip] [--with-local-inference|--without-local-inference] [--migrate-to-omarchy-installers]')
             print('Saved setup choices are reused. Explicit options change those choices.')
+            print('--migrate-to-omarchy-installers moves apps installed another way to Omarchy\'s own installer, even after an earlier no. See docs/decisions/0014-offer-migration-to-omarchy-installers.md.')
             print('Blip is off unless --with-blip is set. --without-blip leaves an existing Blip install unchanged.')
             print('Local inference is off unless --with-local-inference is set. --without-local-inference records that preference as off. See docs/local-inference.md for package and model removal.')
             return 0
@@ -1141,8 +1275,10 @@ def main(args):
         validate_registration(source)
         with transaction() as lock:
             validate_registration(source)
+            # The apply child bounds the migration prompt by this deadline.
             run(['bash', str(Path(source) / 'scripts/apply-layer.sh'), *options],
-                deadline=900, capture=False, lock_fd=lock.fileno())
+                deadline=SETUP_APPLY_SECONDS, capture=False, lock_fd=lock.fileno(),
+                extra_env=dict(GROUNDWORK_APPLY_DEADLINE_SECONDS=str(SETUP_APPLY_SECONDS)))
         return 0
     if args and args[0] == 'marker' and len(args) >= 3 and args[2] in MARKERS:
         # Setup records state it cannot read back without root, using the same
@@ -1161,13 +1297,19 @@ def main(args):
     if args and args[0] == 'preferences' and len(args) == 2 and args[1] in ('setup', 'update'):
         value = settings(args[1] == 'update')
         if value:
-            print(f"{int(value['keyd'])}\n{int(value['screen_sharing'])}\n{value['obsidian_vault']}\n{int(blip_enabled(value))}\n{int(local_inference_enabled(value))}")
+            lines = [int(value['keyd']), int(value['screen_sharing']), value['obsidian_vault'],
+                     int(blip_enabled(value)), int(local_inference_enabled(value))]
+            # A sixth line only when an offer was declined, so older readers see five.
+            declined = declined_migrations(value)
+            if declined:
+                lines.append(','.join(declined))
+            print('\n'.join(str(line) for line in lines))
         return 0
-    if args and args[0] == 'register' and len(args) in (5, 6, 7) and args[2] in ('0', '1') and args[3] in ('0', '1'):
+    if args and args[0] == 'register' and len(args) in (5, 6, 7, 8) and args[2] in ('0', '1') and args[3] in ('0', '1'):
         if len(args) >= 6 and args[5] not in ('0', '1'):
             print('Invalid Blip choice; nothing changed.', file=sys.stderr)
             return 64
-        if len(args) == 7 and args[6] not in ('0', '1'):
+        if len(args) >= 7 and args[6] not in ('0', '1'):
             print('Invalid local inference choice; nothing changed.', file=sys.stderr)
             return 64
         register(*args[1:])
