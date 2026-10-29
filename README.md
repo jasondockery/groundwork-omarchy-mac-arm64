@@ -2,7 +2,7 @@
 
 Personal settings for Omarchy on Apple Silicon. The desktop comes from [omacom/omarchy](https://github.com/omacom/omarchy) (`quattro`), packaged as `omarchy-dev` from `pkgs.omarchy.org/edge`. Apple Silicon support is the `omarchy-mac` and `omarchy-mac-boot` packages from [omacom/omarchy-mac-pkgs](https://github.com/omacom/omarchy-mac-pkgs). [omacom/omarchy-mac](https://github.com/omacom/omarchy-mac) is the legacy fork, and its `quattro` branch is not what the installer uses; shared Mac hardware support has lived in [omacom/omarchy](https://github.com/omacom/omarchy) since [omacom/omarchy#14431](https://github.com/omacom/omarchy/pull/14431). The upstream [omarchy-mac-installer](https://github.com/omacom/omarchy-mac-installer) installs the OS. This repo only keeps personal settings that Omarchy does not provide.
 
-The learning curriculum stays in [Groundwork](https://jasondockery.github.io/groundwork/) for now. Use [this repo's shortcut guide](docs/keybindings.md) for the Omarchy keys when an older lesson uses Groundwork-specific bindings. The `core/` submodule remains a read-only reference from the initial family split; it is not needed to install this layer. Do not copy the curriculum into this repo. [groundwork-mac](https://github.com/jasondockery/groundwork-mac) provisions a personal Mac development environment (and Linux/WSL/headless environments); it is not the Omarchy OS installer and must not be applied here.
+The learning curriculum stays in [Groundwork](https://jasondockery.github.io/groundwork/) for now. Use [this repo's shortcut guide](docs/keybindings.md) for the Omarchy keys when an older lesson uses Groundwork-specific bindings. The `core/` submodule is the read-only groundwork-core checkout this layer reads, including the Brave spec. `./install.sh` and `update-all` run `git submodule update --init -- core` so that checkout matches the pinned gitlink. Do not copy the curriculum, or `core/browser/brave.json`, into this repo. [groundwork-mac](https://github.com/jasondockery/groundwork-mac) provisions a personal Mac development environment (and Linux/WSL/headless environments); it is not the Omarchy OS installer and must not be applied here.
 
 It is for any Apple Silicon Mac running Omarchy: Mac mini, MacBook Air, and MacBook Pro, M1 and later, aarch64. Machine notes live in `docs/machines/`. Nothing in `packages/` or `install.sh` is specific to one model.
 
@@ -22,7 +22,7 @@ less install.sh
 ./install.sh
 ```
 
-For an existing checkout, use `git status` and review local edits before updating it; do not clone over it or reset it. Public HTTPS clones need no GitHub login. For a private copy, use an authorized account or your chosen SSH host alias/key instead. The installer does not configure GitHub credentials. A recursive submodule clone is unnecessary for setup.
+For an existing checkout, use `git status` and review local edits before updating it; do not clone over it or reset it. Public HTTPS clones need no GitHub login. For a private copy, use an authorized account or your chosen SSH host alias/key instead. The installer does not configure GitHub credentials. `./install.sh` checks out the pinned `core` submodule; a separate recursive clone is unnecessary.
 
 The default installs T3 Code Nightly, Herdr, Tailscale, keyd, Obsidian, Bitwarden (desktop and CLI), and FreeTube, starts `tailscaled` and keyd, applies the trackpad preferences, and makes Caps Lock Escape on tap and Control while held. Different existing input/keyd files are backed up. `--without-keyd` skips keyd setup. Omarchy continues to own the desktop shortcuts, tmux, shell, editor, and terminal configuration. T3 Code and agent providers still need your local authentication. Follow the [desktop apps guide](docs/apps.md) for Bitwarden sign-in, the local Obsidian vault, previous plugin choices, and free cross-platform sync. Existing notes are never moved automatically.
 
@@ -257,7 +257,7 @@ omarchy update
 
 `omarchy-channel-current` should print `edge`. Do not run `omarchy-channel-set`. Reboot if `omarchy update` asks. Later system updates stay on this desktop and use `omarchy update`, which applies the `aarch64-apple` edge pacman config (`[omarchy]` at `https://pkgs.omarchy.org/edge/$arch`, then `[asahi-alarm]`, then Arch Linux ARM). A bare `pacman -Syu` skips that policy.
 
-Personal settings come from this repo, in an Omarchy terminal, after the base system is up. A recursive submodule clone is unnecessary for setup:
+Personal settings come from this repo, in an Omarchy terminal, after the base system is up. `./install.sh` checks out the pinned `core` submodule, so a separate recursive clone is unnecessary:
 
 ```bash
 git clone https://github.com/jasondockery/groundwork-omarchy-mac-arm64.git ~/code/groundwork-omarchy-mac-arm64

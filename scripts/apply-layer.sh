@@ -147,7 +147,8 @@ if [[ -n $stored ]]; then
 fi
 
 # Fail before installing packages or moving files when the checkout is incomplete.
-# The Bitwarden extension id and Brave policies are read from core, not a copy here.
+# setup and update run `git submodule update --init -- core` before this script.
+# The Bitwarden extension id and Brave policies are read from that checkout, not a copy here.
 [[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$root/core/browser/brave.json" && ! -L "$root/core/browser/brave.json" ]] || {
   echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, or Brave spec is missing." >&2
   exit 1
@@ -305,12 +306,27 @@ brave_page_kib() {
   fi
   echo $((page / 1024))
 }
+# Exit 0 when the version is listed, 1 when it is not. Any other status is a
+# damaged brave-rejected or brave-accepted file: stop before installing Brave.
+brave_remembered() {
+  local status=0
+  python3 "$root/scripts/groundwork-update.py" "$1" || status=$?
+  if [[ $status -ne 0 && $status -ne 1 ]]; then
+    exit "$status"
+  fi
+  return "$status"
+}
+brave_root_owned() {
+  [[ $(stat -c '%U:%G' "$1" 2>/dev/null) == root:root ]]
+}
 brave_policy_current() {
   local dir
   for dir in "$brave_policy_root" "$brave_policy_root/policies" "$brave_policy_dir"; do
     [[ -d $dir && ! -L $dir && $(stat -c %a "$dir" 2>/dev/null) == 755 ]] || return 1
+    brave_root_owned "$dir" || return 1
   done
   [[ -f $brave_policy_file && ! -L $brave_policy_file && $(stat -c %a "$brave_policy_file" 2>/dev/null) == 644 ]] || return 1
+  brave_root_owned "$brave_policy_file" || return 1
   cmp -s "$brave_policy_source" "$brave_policy_file"
 }
 brave_changes_needed() {
@@ -318,15 +334,19 @@ brave_changes_needed() {
   if ! brave_package_command; then
     # Someone else's Brave is an offer, not an install, and needs no sudo.
     if brave_flatpak_installed || command -v brave >/dev/null 2>&1; then
+      brave_remembered brave-rejected || true
+      brave_remembered brave-accepted || true
       return 1
     fi
-    python3 "$root/scripts/groundwork-update.py" brave-rejected && return 1
+    if brave_remembered brave-rejected; then
+      return 1
+    fi
+    brave_remembered brave-accepted || true
     return 0
   fi
-  if ! python3 "$root/scripts/groundwork-update.py" brave-accepted &&
-    ! python3 "$root/scripts/groundwork-update.py" brave-rejected; then
-    return 0
-  fi
+  # An installed brave-bin needs sudo only to repair policy. A launch retry does not.
+  brave_remembered brave-rejected || true
+  brave_remembered brave-accepted || true
   brave_policy_current && return 1
   return 0
 }
@@ -359,11 +379,11 @@ brave_fail() {
 }
 assess_brave() {
   local launch_status launch_reason align_reason
-  if python3 "$root/scripts/groundwork-update.py" brave-rejected; then
+  if brave_remembered brave-rejected; then
     brave_fail 0 "This brave-bin version already failed on this $(brave_page_kib) KiB-page kernel, so it was not tried again." 1
     return 0
   fi
-  if python3 "$root/scripts/groundwork-update.py" brave-accepted; then
+  if brave_remembered brave-accepted; then
     brave_usable=1
     return 0
   fi
@@ -408,10 +428,11 @@ install_missing_brave() {
   if brave_flatpak_installed || command -v brave >/dev/null 2>&1; then
     return 0
   fi
-  if python3 "$root/scripts/groundwork-update.py" brave-rejected; then
+  if brave_remembered brave-rejected; then
     echo "The brave-bin version available here already failed on this $(brave_page_kib) KiB-page kernel, so it was not installed again. Chromium stays the default." >&2
     return 0
   fi
+  brave_remembered brave-accepted || true
   add_and_assess_brave || true
 }
 write_brave_policy() {
@@ -430,8 +451,15 @@ write_brave_policy() {
   sudo install -d -m 0755 -o root -g root "$dir" "$policies" "$managed"
   if ! sudo cmp -s "$brave_policy_source" "$dest"; then
     sudo install -o root -g root -m 0644 -T "$brave_policy_source" "$dest"
-  elif [[ $(stat -c %a "$dest") != 644 ]]; then
-    sudo chmod 644 "$dest"
+  else
+    # install -d fixes the directories. A byte-identical file still needs root:root
+    # so browser_policy_purge_dir does not delete it, and 0644 when the mode drifted.
+    if ! brave_root_owned "$dir" || ! brave_root_owned "$policies" || ! brave_root_owned "$managed" || ! brave_root_owned "$dest"; then
+      sudo chown root:root "$dir" "$policies" "$managed" "$dest"
+    fi
+    if [[ $(stat -c %a "$dest" 2>/dev/null) != 644 ]]; then
+      sudo chmod 644 "$dest"
+    fi
   fi
 }
 publish_brave_policy() {
@@ -457,8 +485,8 @@ privileged_changes_needed() {
   if ! command -v bitwarden >/dev/null && ! bitwarden_flatpak_installed && bitwarden_native_available; then
     return 0
   fi
-  # A missing Brave install, a version that still needs the page-size and launch
-  # checks, or a stale policy file needs administrator permission.
+  # A missing Brave install or a policy that is not root:root and current needs
+  # administrator permission. Retrying a launch of an installed brave-bin does not.
   brave_changes_needed && return 0
   service_ready tailscaled || return 0
   ! syncthing_linger_needed || return 0
@@ -1438,11 +1466,12 @@ fi
 migrate_brave_to_omarchy() {
   if brave_package_command; then
     assess_brave
-  elif python3 "$root/scripts/groundwork-update.py" brave-rejected; then
+  elif brave_remembered brave-rejected; then
     echo "The brave-bin version available here already failed on this $(brave_page_kib) KiB-page kernel, so it was not installed again. Chromium stays the default." >&2
     brave_usable=0
     return 1
   else
+    brave_remembered brave-accepted || true
     add_and_assess_brave || true
   fi
   if [[ $brave_usable -ne 1 ]]; then
@@ -1471,7 +1500,7 @@ if brave_installer_supports && ! brave_package_command; then
   elif brave_foreign=$(command -v brave 2>/dev/null); then
     brave_current="$brave_foreign, which brave-bin does not own"
   fi
-  if [[ -n $brave_current ]] && python3 "$root/scripts/groundwork-update.py" brave-rejected; then
+  if [[ -n $brave_current ]] && brave_remembered brave-rejected; then
     # Same rule as a missing Brave: a version that already failed is not installed again.
     echo "The brave-bin version available here already failed on this $(brave_page_kib) KiB-page kernel, so it was not installed again. Chromium stays the default." >&2
     brave_current=
@@ -1498,6 +1527,12 @@ if [[ $brave_usable -eq 1 ]]; then
     fi
   fi
 fi
+# Save a decline before publishing policy. A symlink refusal exits, and the no
+# from this run has to already be in omarchy.json.
+if [[ $declined_migrations != "$saved_declines" ]]; then
+  register_choices
+  saved_declines=$declined_migrations
+fi
 publish_brave_policy
 # Cursor is detect-only. On current Omarchy the cursor-bin package is Omarchy's
 # method; a cursor command that no package owns is reported and never removed.
@@ -1510,9 +1545,6 @@ if [[ $migrate_requested -eq 1 && $migration_offered -eq 0 ]]; then
   echo "No app has a migration this layer can run. Nothing was migrated."
 fi
 
-if [[ $declined_migrations != "$saved_declines" ]]; then
-  register_choices
-fi
 if [[ $migration_failed -eq 1 ]]; then
   echo "A migration to Omarchy's installer did not finish. The rest of setup was applied and saved. Fix the error above, then rerun." >&2
   exit 1

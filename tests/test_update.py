@@ -198,6 +198,7 @@ class UpdateTests(unittest.TestCase):
         self.t3_update_error = None
         self.break_version_after_failed_update = False
         self.version_after_failed_update = None
+        self.execute_apply = False
         self.real_run = updater.run
         self.run_patch = patch.object(updater, 'run', side_effect=self.run_command)
         self.run_patch.start()
@@ -222,6 +223,12 @@ class UpdateTests(unittest.TestCase):
     def run_command(self, args, **kwargs):
         if args[0] == 'git':
             return self.real_run(args, **kwargs)
+        if self.execute_apply and args[0] == 'bash' and str(args[1]).endswith('apply-layer.sh'):
+            self.machine_calls.append(args)
+            completed = subprocess.run(args, cwd=self.source, capture_output=True, text=True)
+            if completed.returncode:
+                raise updater.UpdateError(completed.stderr or completed.stdout or 'apply failed')
+            return (completed.stdout or '').strip()
         self.machine_calls.append(args)
         self.machine_kwargs.append(kwargs)
         if args[0] == self.failure:
@@ -328,6 +335,76 @@ class UpdateTests(unittest.TestCase):
                 path.write_bytes(old)
         self.assertFalse(self.machine_calls)
         self.assertEqual(self.git('rev-parse', 'HEAD'), self.initial)
+
+    def test_setup_and_update_check_out_core_before_apply(self):
+        text = (REPO / 'scripts/groundwork-update.py').read_text()
+        update = text.split('def update(', 1)[1].split('def main(args):', 1)[0]
+        merged = update.index("'merge', '--ff-only'")
+        checked = update.index('checkout_core(source)', merged)
+        applied = update.index('scripts/apply-layer.sh', checked)
+        self.assertLess(merged, checked)
+        self.assertLess(checked, applied)
+        setup = text.split("args[0] == 'setup'", 1)[1].split("args[0] == 'marker'", 1)[0]
+        self.assertLess(setup.index('checkout_core('), setup.index('apply-layer.sh'))
+
+    def test_fast_forward_checks_out_core_before_apply_reads_the_brave_spec(self):
+        # The spec is only in the submodule commit the gitlink moves to.
+        # Apply must see it after the fast-forward, without a copy in this repo.
+        os.environ['GIT_CONFIG_COUNT'] = '1'
+        os.environ['GIT_CONFIG_KEY_0'] = 'protocol.file.allow'
+        os.environ['GIT_CONFIG_VALUE_0'] = 'always'
+        sub = self.root / 'core.git'
+        work = self.root / 'core-src'
+        self.command('git', 'init', '--bare', '--initial-branch=main', str(sub))
+        self.command('git', 'clone', str(sub), str(work))
+        (work / 'README').write_text('without the spec\n')
+        self.commit(work)
+        self.command('git', '-C', str(work), 'push', 'origin', 'main')
+        old = self.command('git', '-C', str(work), 'rev-parse', 'HEAD')
+        spec = '{"schemaVersion": 1, "marker": "only-after-checkout"}\n'
+        (work / 'browser').mkdir()
+        (work / 'browser/brave.json').write_text(spec)
+        self.commit(work)
+        self.command('git', '-C', str(work), 'push', 'origin', 'main')
+        new = self.command('git', '-C', str(work), 'rev-parse', 'HEAD')
+        self.command('git', '-C', str(self.seed), 'submodule', 'add', '--', str(sub), 'core')
+        self.command('git', '-C', str(self.seed / 'core'), 'checkout', old)
+        self.commit(self.seed)
+        self.command('git', '-C', str(self.seed), 'push', 'origin', 'main')
+        self.command('git', '-C', str(self.source), 'pull', '--ff-only', 'origin', 'main')
+        self.command('git', '-C', str(self.source), 'submodule', 'update', '--init', '--', 'core')
+        self.assertFalse((self.source / 'core/browser/brave.json').exists())
+        pinned = self.git('rev-parse', 'HEAD')
+        self.command('git', '-C', str(self.seed / 'core'), 'checkout', new)
+        (self.seed / 'scripts/apply-layer.sh').write_text(
+            '#!/bin/bash\nset -euo pipefail\n'
+            'test -f core/browser/brave.json\n'
+            'grep -q only-after-checkout core/browser/brave.json\n')
+        self.commit(self.seed)
+        self.command('git', '-C', str(self.seed), 'push', 'origin', 'main')
+        self.git('fetch', 'origin', 'main')
+        self.git('merge', '--ff-only', 'origin/main')
+        self.assertFalse((self.source / 'core/browser/brave.json').exists())
+        updater.preflight(self.source)
+        (self.source / 'core/README').write_text('local edit\n')
+        with self.assertRaisesRegex(updater.UpdateError, 'core submodule has local changes'):
+            updater.preflight(self.source)
+        self.command('git', '-C', str(self.source / 'core'), 'checkout', '--', 'README')
+        updater.checkout_core(self.source)
+        self.assertEqual((self.source / 'core/browser/brave.json').read_text(), spec)
+        self.git('reset', '--hard', pinned)
+        self.command('git', '-C', str(self.source / 'core'), 'checkout', old)
+        self.assertFalse((self.source / 'core/browser/brave.json').exists())
+        self.execute_apply = True
+        updater.update('layer')
+        self.assertEqual((self.source / 'core/browser/brave.json').read_text(), spec)
+        self.assertIn(['bash', str(self.source / 'scripts/apply-layer.sh'), '--update'], self.machine_calls)
+        self.assertEqual(self.git('status', '--porcelain', '--ignore-submodules=all'), '')
+        shutil.rmtree(self.source / 'core')
+        self.assertFalse((self.source / 'core/browser/brave.json').exists())
+        updater.checkout_core(self.source)
+        self.assertEqual((self.source / 'core/browser/brave.json').read_text(), spec)
+        self.assertFalse((REPO / 'browser/brave.json').exists())
 
     def test_detached_missing_upstream_and_ahead_source_preserve_work(self):
         self.git('checkout', '--detach')

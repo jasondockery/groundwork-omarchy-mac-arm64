@@ -913,6 +913,43 @@ def accepted_brave_path():
     return STATE / 'brave-accepted.json'
 
 
+def remembered_version_document(path):
+    """None when path is absent. UpdateError when it exists and is not the schema.
+
+    The schema is a JSON object of page size to lists of version strings. A
+    missing file means the version is not remembered. A symlink, directory,
+    unreadable file, or other shape is a refusal, so a known-bad version is
+    not installed again and a damaged accept file cannot skip the launch check.
+    """
+    if not path.exists() and not path.is_symlink():
+        return None
+    try:
+        check_path(path)
+        if path.is_symlink() or not path.is_file():
+            raise UpdateError(f'{path} is not a regular file of remembered versions.')
+        value = json.loads(path.read_text())
+    except (OSError, ValueError) as error:
+        raise UpdateError(f'{path} is not a regular file of remembered versions ({error}).') from error
+    if not isinstance(value, dict) or any(
+            not isinstance(key, str) or not isinstance(versions, list)
+            or any(not isinstance(version, str) for version in versions)
+            for key, versions in value.items()):
+        raise UpdateError(f'{path} is not a map of page size to version lists.')
+    return value
+
+
+def brave_memory_status(path):
+    """0 when this brave-bin version is listed, 1 when it is not, 2 when the file is unusable."""
+    try:
+        document = remembered_version_document(path)
+    except UpdateError as error:
+        print(f'{error} Setup stopped before installing Brave.', file=sys.stderr)
+        return 2
+    version = brave_version()
+    versions = [] if document is None else document.get(str(page_size()), [])
+    return 0 if version and version in versions else 1
+
+
 def brave_version():
     """Installed brave-bin version, else the one `pacman -Si` offers, else None."""
     try:
@@ -1235,11 +1272,40 @@ def git(source, *args, **kwargs):
     return run(['git', '--no-optional-locks', '-C', str(source), *args], **kwargs)
 
 
+def checkout_core(source):
+    """Check out the core gitlink so apply can read core/browser/brave.json.
+
+    git merge --ff-only updates the gitlink and leaves an existing submodule
+    worktree at the previous commit. Setup and update both run this after that
+    fast-forward (setup has no fast-forward of its own) and before apply.
+    A checkout with no core gitlink, such as an updater fixture, is unchanged.
+    """
+    line = git(source, 'ls-tree', 'HEAD', '--', 'core')
+    if not line:
+        return
+    parts = line.split()
+    if len(parts) < 4 or parts[0] != '160000' or parts[-1] != 'core':
+        raise UpdateError('The core entry is not a submodule, so its browser spec cannot be checked out.')
+    # git-submodule is a shell script. It needs basename and sed. A setup
+    # fixture PATH that only contains installer stubs must not hide those.
+    git_path = '/usr/bin:/bin'
+    current = os.environ.get('PATH')
+    if current:
+        git_path = f'{git_path}:{current}'
+    git(source, 'submodule', 'update', '--init', '--', 'core', deadline=120,
+        extra_env={'PATH': git_path})
+
+
 def preflight(source):
     if str(source) != git(source, 'rev-parse', '--show-toplevel'):
         raise UpdateError('The saved source must be the root of its own Git checkout.')
-    if git(source, 'status', '--porcelain', '--untracked-files=all'):
+    # A submodule commit that does not match the gitlink is repaired by
+    # checkout_core. Real edits inside the submodule are still local changes.
+    if git(source, 'status', '--porcelain', '--untracked-files=all', '--ignore-submodules=all'):
         raise UpdateError('The Groundwork checkout has local changes. Commit or reconcile them, then retry; no changes were stashed or discarded.')
+    core = Path(source) / 'core'
+    if (core / '.git').exists() and git(core, 'status', '--porcelain', '--untracked-files=all'):
+        raise UpdateError('The core submodule has local changes. Commit or reconcile them in that checkout, then retry; no changes were stashed or discarded.')
     branch = git(source, 'symbolic-ref', '--short', 'HEAD')
     remote = git(source, 'config', f'branch.{branch}.remote')
     merge = git(source, 'config', f'branch.{branch}.merge')
@@ -1382,6 +1448,7 @@ def update(scope, check=False):
                 raise UpdateError('Checkout or upstream changed during the update. Retry after reviewing it.')
             managed_files(value, source)
             git(source, 'merge', '--ff-only', '--no-edit', candidate)
+            checkout_core(source)
             if value['keyd']:
                 value['pending_keyd'] = dict(source=candidate,
                                              sha256=hashlib.sha256((source / 'keyd/default.conf').read_bytes()).hexdigest(),
@@ -1494,11 +1561,9 @@ def main(args):
         print(brave_offered_extension()['id'])
         return 0
     if args and args[0] == 'brave-rejected' and len(args) == 1:
-        version = brave_version()
-        return 0 if version and version in rejected_versions(rejected_brave_path(), page_size()) else 1
+        return brave_memory_status(rejected_brave_path())
     if args and args[0] == 'brave-accepted' and len(args) == 1:
-        version = brave_version()
-        return 0 if version and version in rejected_versions(accepted_brave_path(), page_size()) else 1
+        return brave_memory_status(accepted_brave_path())
     if args and args[0] == 'reject-brave' and len(args) == 1:
         version = brave_version()
         if not version:
@@ -1575,6 +1640,7 @@ def main(args):
         validate_registration(source)
         with transaction() as lock:
             validate_registration(source)
+            checkout_core(Path(source))
             # The apply child bounds the migration prompt by this deadline.
             run(['bash', str(Path(source) / 'scripts/apply-layer.sh'), *options],
                 deadline=SETUP_APPLY_SECONDS, capture=False, lock_fd=lock.fileno(),

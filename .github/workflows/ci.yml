@@ -3,9 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    # feat/brave-via-omarchy is listed so CI runs on that branch before a pull
-    # request exists. Drop the name when the branch merges.
-    branches: [main, feat/brave-via-omarchy]
+    branches: [main]
   workflow_dispatch:
 
 permissions:

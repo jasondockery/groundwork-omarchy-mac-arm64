@@ -5,6 +5,7 @@ pacman, flatpak, omarchy, or sudo on the host, and they do not launch a real
 Brave. A passing fixture is not acceptance on the 16 KiB-page mini.
 """
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -359,6 +360,76 @@ class BraveInstallTests(unittest.TestCase):
         self.assertTrue((self.bin / 'brave').exists())
         self.assertTrue((self.bin / 'chromium').exists())
 
+    def test_update_retries_a_transient_launch_without_sudo(self):
+        self.env['FIXTURE_BRAVE_LAUNCH_STATUS'] = '1'
+        self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertTrue(self.policy_file().is_file())
+        self.assertEqual(self.remembered('brave-accepted.json'), [])
+        self.assertEqual(self.remembered('brave-rejected.json'), [])
+        before = self.policy_file().read_bytes()
+        self.reset_calls()
+        self.env['FIXTURE_SUDO_CACHED'] = '0'
+        result = subprocess.run(
+            ['python3', str(REPO / 'scripts/groundwork-update.py'), 'setup', str(REPO), '--update'],
+            env=self.env, capture_output=True, text=True, timeout=30, start_new_session=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('no terminal is available', result.stdout + result.stderr)
+        self.assertNotIn('Nothing was changed.', result.stdout + result.stderr)
+        self.assertNotIn(INSTALL_BRAVE, self.calls())
+        self.assertIn('--headless=new', self.launch_call())
+        self.assertEqual(self.policy_file().read_bytes(), before)
+        self.assertEqual(self.remembered('brave-accepted.json'), [])
+        self.assertEqual(self.remembered('brave-rejected.json'), [])
+
+    def test_matching_policy_with_the_wrong_owner_is_chowned(self):
+        self.run_install('--without-keyd', '--without-screen-sharing')
+        before = self.policy_file().read_bytes()
+        owners = json.loads((self.root / 'ownership.json').read_text())
+        for path in (self.root / 'etc/brave', self.root / 'etc/brave/policies',
+                     self.policy_file().parent, self.policy_file()):
+            self.assertEqual(owners[str(path)], 'root:root', path)
+        stat = subprocess.run([str(self.bin / 'stat'), '-c', '%U:%G', str(self.policy_file())],
+                              env=self.env, capture_output=True, text=True, check=True)
+        self.assertEqual(stat.stdout.strip(), 'root:root')
+        (self.root / 'ownership.json').unlink()
+        self.reset_calls()
+        self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertEqual(self.policy_file().read_bytes(), before)
+        chowns = [call for call in self.calls() if call[:3] == ['sudo', 'chown', 'root:root']]
+        self.assertEqual(len(chowns), 1)
+        self.assertIn(str(self.policy_file()), chowns[0])
+        self.assertFalse(any(call[0] == 'sudo' and 'install' in call and '-T' in call for call in self.calls()))
+        owners = json.loads((self.root / 'ownership.json').read_text())
+        self.assertEqual(owners[str(self.policy_file())], 'root:root')
+
+    def test_invalid_brave_memory_stops_before_install(self):
+        for name, payload in (('brave-rejected.json', '{'), ('brave-accepted.json', '[]\n')):
+            with self.subTest(name=name):
+                path = self.state(name)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(payload)
+                result = self.run_install('--without-keyd', '--without-screen-sharing', success=False)
+                self.assertIn(str(path), result.stderr)
+                self.assertIn('before installing Brave', result.stderr)
+                self.assertNotIn(INSTALL_BRAVE, self.calls())
+                self.assertFalse((self.bin / 'brave').exists())
+                path.unlink()
+                self.reset_calls()
+
+    def test_a_declined_default_survives_a_policy_symlink_refusal(self):
+        target = self.root / 'policy-target'
+        target.mkdir()
+        brave = self.root / 'etc/brave'
+        brave.parent.mkdir(parents=True)
+        brave.symlink_to(target)
+        output = self.run_in_terminal(['n'], '--without-keyd', '--without-screen-sharing', success=False)
+        self.assertIn('Refusing to write Brave policy through a symlink', output)
+        self.assertIn('default-browser-brave', self.saved()['declined_migrations'])
+        self.assertTrue(brave.is_symlink())
+        self.assertEqual(brave.resolve(), target.resolve())
+        self.assertEqual(list(target.iterdir()), [])
+        self.assertEqual(self.policy_writes(), [])
+
     def test_no_elf_is_remembered_and_removed(self):
         # No ELF is a remembered alignment failure: nothing was shown to load.
         self.env['FIXTURE_BRAVE_NO_ELF'] = '1'
@@ -371,6 +442,27 @@ class BraveInstallTests(unittest.TestCase):
 
 
 class BraveSpecTests(unittest.TestCase):
+    def test_brave_memory_exits_2_when_the_file_is_not_the_schema(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            with patch.object(updater, 'STATE', state), \
+                    patch.object(updater, 'brave_version', return_value='1.2.3'), \
+                    patch.object(updater, 'page_size', return_value=16384), \
+                    patch('sys.stderr', new=io.StringIO()):
+                self.assertEqual(updater.main(['brave-rejected']), 1)
+                self.assertEqual(updater.main(['brave-accepted']), 1)
+                (state / 'brave-rejected.json').write_text('{')
+                self.assertEqual(updater.main(['brave-rejected']), 2)
+                accepted = state / 'brave-accepted.json'
+                accepted.write_text('[]\n')
+                self.assertEqual(updater.main(['brave-accepted']), 2)
+                accepted.write_text('{"16384": ["1.2.3"]}\n')
+                self.assertEqual(updater.main(['brave-accepted']), 0)
+                rejected = state / 'brave-rejected.json'
+                rejected.unlink()
+                rejected.symlink_to(accepted)
+                self.assertEqual(updater.main(['brave-rejected']), 2)
+
     def test_rendered_policy_matches_v070_and_differs_from_upstream(self):
         spec_path = REPO / 'core/browser/brave.json'
         document = json.loads(spec_path.read_text())

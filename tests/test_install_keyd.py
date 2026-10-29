@@ -36,6 +36,14 @@ args = sys.argv[1:]
 root = pathlib.Path(os.environ['INSTALL_FIXTURE'])
 with (root / 'calls.jsonl').open('a') as log:
     log.write(json.dumps([name, *args]) + '\\n')
+
+def remember_root(paths):
+    owner_file = root / 'ownership.json'
+    owners = json.loads(owner_file.read_text()) if owner_file.is_file() else {}
+    for path in paths:
+        owners[path] = 'root:root'
+    owner_file.write_text(json.dumps(owners))
+
 if name == 'uname':
     print('Linux' if args == ['-s'] else os.environ.get('FIXTURE_ARCH', 'aarch64'))
 elif name == 'sudo':
@@ -72,12 +80,36 @@ elif name == 'sudo':
             linger.parent.mkdir(parents=True, exist_ok=True)
             linger.touch()
         sys.exit(int(os.environ.get('FIXTURE_LINGER_STATUS', '0')))
+    if args[0] == 'chown':
+        if len(args) < 3 or args[1] != 'root:root':
+            raise SystemExit('Unexpected privileged operation: ' + repr(args))
+        remember_root(args[2:])
+        sys.exit(0)
     if args[0] not in ('mkdir', 'install', 'cmp', 'cp', 'chmod'):
         raise SystemExit('Unexpected privileged operation: ' + repr(args))
     if args[0] == 'cp' and '/usr/share/chromium/extensions/' in args[-1]:
         if os.environ.get('FIXTURE_EXTENSION_WRITE_FAIL') == '1':
             sys.exit(1)
     if args and args[0] == 'install':
+        owner = group = None
+        owned_paths = []
+        index = 1
+        while index < len(args):
+            token = args[index]
+            if token in ('-o', '-g', '-m') and index + 1 < len(args):
+                if token == '-o':
+                    owner = args[index + 1]
+                elif token == '-g':
+                    group = args[index + 1]
+                index += 2
+                continue
+            if token.startswith('-'):
+                index += 1
+                continue
+            owned_paths.append(token)
+            index += 1
+        if owner == 'root' and group == 'root':
+            remember_root(owned_paths)
         cleaned = []
         index = 1
         while index < len(args):
@@ -98,6 +130,23 @@ elif name == 'sudo':
     if host_binary is None:
         raise SystemExit('missing host tool: ' + args[0])
     sys.exit(subprocess.call([host_binary, *args[1:]]))
+elif name == 'stat':
+    if args[:2] == ['-c', '%U:%G'] and len(args) == 3:
+        owner_file = root / 'ownership.json'
+        owners = json.loads(owner_file.read_text()) if owner_file.is_file() else {}
+        recorded = owners.get(args[2])
+        if recorded:
+            print(recorded)
+            sys.exit(0)
+    host_binary = None
+    for directory in ('/usr/bin', '/opt/homebrew/opt/coreutils/libexec/gnubin', '/bin'):
+        candidate = directory + '/stat'
+        if os.path.exists(candidate):
+            host_binary = candidate
+            break
+    if host_binary is None:
+        raise SystemExit('missing host tool: stat')
+    sys.exit(subprocess.call([host_binary, *args]))
 elif name == 'omarchy-mise-default-tools':
     sys.exit(1 if os.environ.get('FIXTURE_MISE_OPTED_OUT') == '1' else 0)
 elif name == 'mise':
@@ -445,13 +494,14 @@ class InstallKeydTests(unittest.TestCase):
         for name in ('bash', 'sh', 'python3', 'env'):
             (self.bin / name).symlink_to(shutil.which(name))
         for name in ('timeout', 'mktemp', 'dirname', 'rm', 'mkdir', 'cp', 'chmod',
-                     'mv', 'find', 'readlink', 'sleep', 'cmp', 'stat', 'id', 'head'):
+                     'mv', 'find', 'readlink', 'sleep', 'cmp', 'id', 'head'):
             (self.bin / name).symlink_to(host_tool(name))
         stub = self.bin / 'stub'
         stub.write_text(STUB)
         stub.chmod(0o755)
-        for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'omarchy-install-dev-env', 'omarchy-remove-dev-env', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw', 'getconf', 'readelf', 'syncthing', 'loginctl'):
+        for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'omarchy-install-dev-env', 'omarchy-remove-dev-env', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw', 'getconf', 'readelf', 'syncthing', 'loginctl', 'stat'):
             (self.bin / name).symlink_to(stub)
+        (self.bin / 'git').symlink_to(host_tool('git'))
         (self.root / 'home').mkdir()
         (self.root / 'runtime').mkdir()
         (self.root / 'nightly-t3').write_text('#!/bin/sh\nprintf "t3 0.0.0-nightly.20261018.1\\n"\n')
