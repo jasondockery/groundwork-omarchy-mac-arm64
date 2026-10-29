@@ -58,6 +58,13 @@ MIGRATION_ID_CHARACTERS = frozenset('abcdefghijklmnopqrstuvwxyz0123456789-')
 T3_KNOWN_GOOD_LARGE_PAGE = '0.1.2-nightly.20261021.3499'
 # A downloaded candidate must finish --version inside its temp directory.
 T3_CANDIDATE_SMOKE_SECONDS = 30
+# Private headless launch used to see whether brave-bin starts on this kernel.
+# A 16 KiB-page crash is brave/brave-browser#42312. A timeout is not remembered.
+BRAVE_LAUNCH_SECONDS = 30
+BRAVE_PAGE_ISSUE = 'brave/brave-browser#42312'
+# Guard for the only extension the Brave spec may offer. The update URL is read
+# from the spec; this id is the refusal check, not a second copy of the manifest.
+BRAVE_EXTENSION_ID = 'nngceckbapebfimnlniiiahkandclblb'
 # bubblewrap ships with Flatpak on Omarchy. A scrubbed environment is not a
 # substitute: without a mount and network namespace the candidate can still
 # read the home directory and open sockets, so a missing bwrap skips this run
@@ -616,6 +623,176 @@ def package_alignment_problem(package):
     return None
 
 
+def brave_spec_path():
+    """groundwork-core's Brave spec. This checkout does not keep a second copy."""
+    return Path(__file__).resolve().parent.parent / 'core' / 'browser' / 'brave.json'
+
+
+def load_brave_spec():
+    path = brave_spec_path()
+    if path.is_symlink() or not path.is_file():
+        raise UpdateError(f'Could not read the Brave spec at {path}.')
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, ValueError) as error:
+        raise UpdateError(f'Could not read the Brave spec at {path} ({error}).') from error
+    if not isinstance(value, dict) or value.get('schemaVersion') != 1:
+        raise UpdateError(f'Brave spec at {path} is not schema version 1.')
+    return value
+
+
+def brave_policy_document(spec=None):
+    """Policy JSON for /etc/brave/policies/managed. Reasons stay in the spec."""
+    spec = load_brave_spec() if spec is None else spec
+    policies = spec.get('policies')
+    if not isinstance(policies, list) or not policies:
+        raise UpdateError('The Brave spec lists no policies.')
+    document = {}
+    for item in policies:
+        if not isinstance(item, dict):
+            raise UpdateError('A Brave policy entry is not an object.')
+        name = item.get('name')
+        if not isinstance(name, str) or not name or any(character.isspace() for character in name):
+            raise UpdateError('A Brave policy entry has no name.')
+        if name in document:
+            raise UpdateError(f'Brave policy {name} is listed twice.')
+        if 'value' not in item:
+            raise UpdateError(f'Brave policy {name} has no value.')
+        value = item['value']
+        if isinstance(value, bool) or isinstance(value, str) or type(value) is int:
+            document[name] = value
+        else:
+            raise UpdateError(f'Brave policy {name} has a value this layer cannot write.')
+    return document
+
+
+def render_brave_policy():
+    return json.dumps(brave_policy_document(), indent=2) + '\n'
+
+
+def brave_offered_extension(spec=None):
+    """The one extension Brave may offer. Anything else is refused."""
+    spec = load_brave_spec() if spec is None else spec
+    extensions = spec.get('extensions')
+    if not isinstance(extensions, list):
+        raise UpdateError('The Brave spec has no extension list.')
+    offered = [item for item in extensions if isinstance(item, dict) and item.get('install') == 'offer']
+    if len(offered) != 1:
+        raise UpdateError('The Brave spec must offer exactly one extension.')
+    item = offered[0]
+    if item.get('name') != 'Bitwarden' or item.get('id') != BRAVE_EXTENSION_ID:
+        raise UpdateError('The Brave spec offers an extension other than Bitwarden.')
+    url = item.get('updateUrl')
+    if not isinstance(url, str) or not url.startswith('https://'):
+        raise UpdateError('The Bitwarden extension update URL is missing or not https.')
+    return item
+
+
+def render_brave_extension():
+    item = brave_offered_extension()
+    return json.dumps({'external_update_url': item['updateUrl']}, indent=2) + '\n'
+
+
+def brave_launch_environment(home, tmp, runtime):
+    """Private environment for the headless launch. The caller's variables are not copied.
+
+    GROUNDWORK_TESTING=1 is the installer fixture. Only then are INSTALL_FIXTURE
+    and FIXTURE_* copied, so the fake brave command can read its knobs. A normal
+    run does not set that variable.
+    """
+    env = {
+        'PATH': '/usr/bin:/bin',
+        'HOME': str(home),
+        'TMPDIR': str(tmp),
+        'LANG': 'C.UTF-8',
+        'XDG_RUNTIME_DIR': str(runtime),
+        'XDG_CONFIG_HOME': str(home / '.config'),
+        'XDG_CACHE_HOME': str(home / '.cache'),
+        'XDG_DATA_HOME': str(home / '.local/share'),
+    }
+    if os.environ.get('GROUNDWORK_TESTING') == '1':
+        for key, value in os.environ.items():
+            if key == 'INSTALL_FIXTURE' or key.startswith('FIXTURE_'):
+                env[key] = value
+    return env
+
+
+def brave_launch_result(binary):
+    """('ok', '') when a private headless launch exits 0.
+
+    'remember' is a crash of this build. 'transient' is a timeout or other
+    exit, which the next run may try again. The user's profile is not used.
+    """
+    path = Path(binary)
+    if (not path.is_file()) or (path.is_symlink() and not path.exists()):
+        return 'transient', f'{binary} is not an executable, so Brave was not shown to start.'
+    if not os.access(path, os.X_OK):
+        return 'transient', f'{binary} is not executable, so Brave was not shown to start.'
+    page = page_size()
+    parent = tempfile.mkdtemp(prefix='groundwork-brave-launch-')
+    process = None
+    try:
+        home = Path(parent) / 'home'
+        tmp = Path(parent) / 'tmp'
+        runtime = Path(parent) / 'runtime'
+        profile = Path(parent) / 'profile'
+        for directory in (home, tmp, runtime, profile, home / '.config', home / '.cache', home / '.local/share'):
+            directory.mkdir(parents=True, exist_ok=True)
+            os.chmod(directory, 0o700)
+        env = brave_launch_environment(home, tmp, runtime)
+        argv = [
+            str(path),
+            '--headless=new',
+            '--disable-gpu',
+            '--no-first-run',
+            '--no-default-browser-check',
+            '--disable-extensions',
+            f'--user-data-dir={profile}',
+            '--dump-dom',
+            'about:blank',
+        ]
+        process = subprocess.Popen(
+            argv, env=env, cwd=parent, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True, preexec_fn=disable_core_dumps)
+        try:
+            process.communicate(timeout=BRAVE_LAUNCH_SECONDS)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
+            return ('transient',
+                    f'Brave did not finish a headless launch within {BRAVE_LAUNCH_SECONDS} seconds '
+                    f'on this {page // 1024} KiB-page kernel.')
+        code = process.returncode
+        if code == 0:
+            return 'ok', ''
+        number = -code if code < 0 else code - 128 if code > 128 else None
+        if number is not None:
+            try:
+                signal.Signals(number)
+                name = signal.Signals(number).name
+            except ValueError:
+                name = f'signal {number}'
+            return ('remember',
+                    f'Brave crashed during launch ({name}) on this {page // 1024} KiB-page kernel '
+                    f'({BRAVE_PAGE_ISSUE}).')
+        return ('transient',
+                f'Brave\'s headless launch failed (exit {code}) on this {page // 1024} KiB-page kernel.')
+    finally:
+        if process is not None and process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        shutil.rmtree(parent, ignore_errors=True)
+
+
 def bun_alignment_problem(binary):
     """Reason `binary` cannot be mapped on this kernel, or None.
 
@@ -724,6 +901,101 @@ def bitwarden_package_command():
         return run(['pacman', '-Qoq', executable], deadline=30) == 'bitwarden'
     except (UpdateError, OSError):
         return False
+
+
+def rejected_brave_path():
+    """brave-bin versions that failed the page-size or launch check, by page size."""
+    return STATE / 'brave-rejected.json'
+
+
+def accepted_brave_path():
+    """brave-bin versions that passed both checks on this page size."""
+    return STATE / 'brave-accepted.json'
+
+
+def remembered_version_document(path):
+    """None when path is absent. UpdateError when it exists and is not the schema.
+
+    The schema is a JSON object of page size to lists of version strings. A
+    missing file means the version is not remembered. A symlink, directory,
+    unreadable file, or other shape is a refusal, so a known-bad version is
+    not installed again and a damaged accept file cannot skip the launch check.
+    """
+    if not path.exists() and not path.is_symlink():
+        return None
+    try:
+        check_path(path)
+        if path.is_symlink() or not path.is_file():
+            raise UpdateError(f'{path} is not a regular file of remembered versions.')
+        value = json.loads(path.read_text())
+    except (OSError, ValueError) as error:
+        raise UpdateError(f'{path} is not a regular file of remembered versions ({error}).') from error
+    if not isinstance(value, dict) or any(
+            not isinstance(key, str) or not isinstance(versions, list)
+            or any(not isinstance(version, str) for version in versions)
+            for key, versions in value.items()):
+        raise UpdateError(f'{path} is not a map of page size to version lists.')
+    return value
+
+
+def brave_memory_status(path):
+    """0 when this brave-bin version is listed, 1 when it is not, 2 when the file is unusable."""
+    try:
+        document = remembered_version_document(path)
+    except UpdateError as error:
+        print(f'{error} Setup stopped before installing Brave.', file=sys.stderr)
+        return 2
+    version = brave_version()
+    versions = [] if document is None else document.get(str(page_size()), [])
+    return 0 if version and version in versions else 1
+
+
+def brave_version():
+    """Installed brave-bin version, else the one `pacman -Si` offers, else None."""
+    try:
+        fields = run(['pacman', '-Q', 'brave-bin'], deadline=30).split()
+        if len(fields) == 2:
+            return fields[1]
+    except (UpdateError, OSError):
+        pass
+    try:
+        for line in run(['pacman', '-Si', 'brave-bin'], deadline=30).splitlines():
+            key, _, value = line.partition(':')
+            if key.strip() == 'Version' and value.strip():
+                return value.strip()
+    except (UpdateError, OSError):
+        pass
+    return None
+
+
+def drop_remembered_version(path, page, version):
+    try:
+        check_path(path)
+        value = json.loads(path.read_text()) if path.exists() else {}
+    except (OSError, ValueError, UpdateError):
+        return
+    if not isinstance(value, dict):
+        return
+    key = str(page)
+    versions = [item for item in rejected_versions(path, page) if item != version]
+    if versions:
+        value[key] = versions
+    else:
+        value.pop(key, None)
+    if any(isinstance(items, list) and items for items in value.values()):
+        atomic_write(path, json.dumps(value, indent=2) + '\n')
+    elif path.exists() and not path.is_symlink():
+        path.unlink()
+
+
+def reject_brave_version(page, version):
+    drop_remembered_version(accepted_brave_path(), page, version)
+    reject_version(rejected_brave_path(), page, version)
+
+
+def accept_brave_version(page, version):
+    drop_remembered_version(rejected_brave_path(), page, version)
+    reject_version(accepted_brave_path(), page, version)
 
 
 def page_size_reason(page):
@@ -1000,11 +1272,52 @@ def git(source, *args, **kwargs):
     return run(['git', '--no-optional-locks', '-C', str(source), *args], **kwargs)
 
 
+def checkout_core(source):
+    """Check out the core gitlink so apply can read core/browser/brave.json.
+
+    git merge --ff-only updates the gitlink and leaves an existing submodule
+    worktree at the previous commit. Setup and update both run this after that
+    fast-forward (setup has no fast-forward of its own) and before apply.
+    A checkout with no core gitlink, such as an updater fixture, is unchanged.
+    """
+    line = git(source, 'ls-tree', 'HEAD', '--', 'core')
+    if not line:
+        return
+    parts = line.split()
+    if len(parts) < 4 or parts[0] != '160000' or parts[-1] != 'core':
+        raise UpdateError('The core entry is not a submodule, so its browser spec cannot be checked out.')
+    recorded = parts[2]
+    core = Path(source) / 'core'
+    # A worktree already at that commit, with no local edits, does not need
+    # git-submodule. That script fetches and is what made a routine setup
+    # rerun slow enough to hit the CI job limit.
+    if (core / '.git').exists():
+        try:
+            checked_out = git(core, 'rev-parse', 'HEAD')
+        except UpdateError:
+            checked_out = ''
+        if checked_out == recorded and not git(core, 'status', '--porcelain', '--untracked-files=all'):
+            return
+    # git-submodule is a shell script. It needs basename and sed. A setup
+    # fixture PATH that only contains installer stubs must not hide those.
+    git_path = '/usr/bin:/bin'
+    current = os.environ.get('PATH')
+    if current:
+        git_path = f'{git_path}:{current}'
+    git(source, 'submodule', 'update', '--init', '--', 'core', deadline=120,
+        extra_env={'PATH': git_path})
+
+
 def preflight(source):
     if str(source) != git(source, 'rev-parse', '--show-toplevel'):
         raise UpdateError('The saved source must be the root of its own Git checkout.')
-    if git(source, 'status', '--porcelain', '--untracked-files=all'):
+    # A submodule commit that does not match the gitlink is repaired by
+    # checkout_core. Real edits inside the submodule are still local changes.
+    if git(source, 'status', '--porcelain', '--untracked-files=all', '--ignore-submodules=all'):
         raise UpdateError('The Groundwork checkout has local changes. Commit or reconcile them, then retry; no changes were stashed or discarded.')
+    core = Path(source) / 'core'
+    if (core / '.git').exists() and git(core, 'status', '--porcelain', '--untracked-files=all'):
+        raise UpdateError('The core submodule has local changes. Commit or reconcile them in that checkout, then retry; no changes were stashed or discarded.')
     branch = git(source, 'symbolic-ref', '--short', 'HEAD')
     remote = git(source, 'config', f'branch.{branch}.remote')
     merge = git(source, 'config', f'branch.{branch}.merge')
@@ -1147,6 +1460,7 @@ def update(scope, check=False):
                 raise UpdateError('Checkout or upstream changed during the update. Retry after reviewing it.')
             managed_files(value, source)
             git(source, 'merge', '--ff-only', '--no-edit', candidate)
+            checkout_core(source)
             if value['keyd']:
                 value['pending_keyd'] = dict(source=candidate,
                                              sha256=hashlib.sha256((source / 'keyd/default.conf').read_bytes()).hexdigest(),
@@ -1244,6 +1558,45 @@ def main(args):
             print(problem, file=sys.stderr)
             return 1
         return 0
+    if args and args[0] == 'check-brave-launch' and len(args) == 2:
+        try:
+            kind, message = brave_launch_result(args[1])
+        except (OSError, UpdateError) as error:
+            # A full disk or a binary that vanishes is not a page-size crash.
+            print(error, file=sys.stderr)
+            return 2
+        if kind != 'ok':
+            print(message, file=sys.stderr)
+        return {'ok': 0, 'remember': 1, 'transient': 2}[kind]
+    if args and args[0] == 'render-brave-policy' and len(args) == 1:
+        sys.stdout.write(render_brave_policy())
+        return 0
+    if args and args[0] == 'render-brave-extension' and len(args) == 1:
+        sys.stdout.write(render_brave_extension())
+        return 0
+    if args and args[0] == 'brave-extension-id' and len(args) == 1:
+        print(brave_offered_extension()['id'])
+        return 0
+    if args and args[0] == 'brave-rejected' and len(args) == 1:
+        return brave_memory_status(rejected_brave_path())
+    if args and args[0] == 'brave-accepted' and len(args) == 1:
+        return brave_memory_status(accepted_brave_path())
+    if args and args[0] == 'reject-brave' and len(args) == 1:
+        version = brave_version()
+        if not version:
+            print('The brave-bin version could not be read, so it was not remembered.', file=sys.stderr)
+            return 1
+        reject_brave_version(page_size(), version)
+        print(version)
+        return 0
+    if args and args[0] == 'accept-brave' and len(args) == 1:
+        version = brave_version()
+        if not version:
+            print('The brave-bin version could not be read, so it was not recorded.', file=sys.stderr)
+            return 1
+        accept_brave_version(page_size(), version)
+        print(version)
+        return 0
     if args and args[0] == 'bitwarden-rejected' and len(args) == 1:
         # Exit 0 when the version setup would check already failed on this kernel.
         version = bitwarden_version()
@@ -1304,6 +1657,7 @@ def main(args):
         validate_registration(source)
         with transaction() as lock:
             validate_registration(source)
+            checkout_core(Path(source))
             # The apply child bounds the migration prompt by this deadline.
             run(['bash', str(Path(source) / 'scripts/apply-layer.sh'), *options],
                 deadline=SETUP_APPLY_SECONDS, capture=False, lock_fd=lock.fileno(),

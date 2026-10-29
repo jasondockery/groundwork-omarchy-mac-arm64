@@ -30,12 +30,20 @@ def host_tool(name):
 
 
 STUB = '''#!/usr/bin/env python3
-import hashlib, io, json, os, pathlib, subprocess, sys, zipfile
+import hashlib, io, json, os, pathlib, shutil, subprocess, sys, zipfile
 name = pathlib.Path(sys.argv[0]).name
 args = sys.argv[1:]
 root = pathlib.Path(os.environ['INSTALL_FIXTURE'])
 with (root / 'calls.jsonl').open('a') as log:
     log.write(json.dumps([name, *args]) + '\\n')
+
+def remember_root(paths):
+    owner_file = root / 'ownership.json'
+    owners = json.loads(owner_file.read_text()) if owner_file.is_file() else {}
+    for path in paths:
+        owners[path] = 'root:root'
+    owner_file.write_text(json.dumps(owners))
+
 if name == 'uname':
     print('Linux' if args == ['-s'] else os.environ.get('FIXTURE_ARCH', 'aarch64'))
 elif name == 'sudo':
@@ -72,12 +80,46 @@ elif name == 'sudo':
             linger.parent.mkdir(parents=True, exist_ok=True)
             linger.touch()
         sys.exit(int(os.environ.get('FIXTURE_LINGER_STATUS', '0')))
+    if args[0] == 'chown':
+        if len(args) < 3 or args[1] != 'root:root':
+            raise SystemExit('Unexpected privileged operation: ' + repr(args))
+        remember_root(args[2:])
+        sys.exit(0)
     if args[0] not in ('mkdir', 'install', 'cmp', 'cp', 'chmod'):
         raise SystemExit('Unexpected privileged operation: ' + repr(args))
     if args[0] == 'cp' and '/usr/share/chromium/extensions/' in args[-1]:
         if os.environ.get('FIXTURE_EXTENSION_WRITE_FAIL') == '1':
             sys.exit(1)
-    for prefix in ('/etc/keyd', '/usr/share/chromium'):
+    if args and args[0] == 'install':
+        owner = group = None
+        owned_paths = []
+        index = 1
+        while index < len(args):
+            token = args[index]
+            if token in ('-o', '-g', '-m') and index + 1 < len(args):
+                if token == '-o':
+                    owner = args[index + 1]
+                elif token == '-g':
+                    group = args[index + 1]
+                index += 2
+                continue
+            if token.startswith('-'):
+                index += 1
+                continue
+            owned_paths.append(token)
+            index += 1
+        if owner == 'root' and group == 'root':
+            remember_root(owned_paths)
+        cleaned = []
+        index = 1
+        while index < len(args):
+            if args[index] in ('-o', '-g') and index + 1 < len(args):
+                index += 2
+                continue
+            cleaned.append(args[index])
+            index += 1
+        args = [args[0], *cleaned]
+    for prefix in ('/etc/keyd', '/usr/share/chromium', '/etc/brave'):
         args = [str(root / prefix.lstrip('/')) + arg[len(prefix):] if arg == prefix or arg.startswith(prefix + '/') else arg for arg in args]
     host_binary = None
     for directory in ('/usr/bin', '/opt/homebrew/opt/coreutils/libexec/gnubin', '/bin'):
@@ -88,6 +130,23 @@ elif name == 'sudo':
     if host_binary is None:
         raise SystemExit('missing host tool: ' + args[0])
     sys.exit(subprocess.call([host_binary, *args[1:]]))
+elif name == 'stat':
+    if args[:2] == ['-c', '%U:%G'] and len(args) == 3:
+        owner_file = root / 'ownership.json'
+        owners = json.loads(owner_file.read_text()) if owner_file.is_file() else {}
+        recorded = owners.get(args[2])
+        if recorded:
+            print(recorded)
+            sys.exit(0)
+    host_binary = None
+    for directory in ('/usr/bin', '/opt/homebrew/opt/coreutils/libexec/gnubin', '/bin'):
+        candidate = directory + '/stat'
+        if os.path.exists(candidate):
+            host_binary = candidate
+            break
+    if host_binary is None:
+        raise SystemExit('missing host tool: stat')
+    sys.exit(subprocess.call([host_binary, *args]))
 elif name == 'omarchy-mise-default-tools':
     sys.exit(1 if os.environ.get('FIXTURE_MISE_OPTED_OUT') == '1' else 0)
 elif name == 'mise':
@@ -189,6 +248,7 @@ elif name == 'flatpak':
     marker = {
         'com.bitwarden.desktop': root / 'bitwarden-flatpak',
         'io.freetubeapp.FreeTube': root / 'freetube-flatpak',
+        'com.brave.Browser': root / 'brave-flatpak',
     }.get(app)
     if args[:1] == ['ps']:
         print(os.environ.get('FIXTURE_FLATPAK_RUNNING', ''))
@@ -220,7 +280,10 @@ elif name == 'pacman':
             sys.exit(1)
         print('Repository      : omarchy')
         print('Name            : ' + args[1])
-        print('Version         : ' + os.environ.get('FIXTURE_FEED_VERSION', '2026.10.1-1'))
+        version = os.environ.get('FIXTURE_FEED_VERSION', '2026.10.1-1')
+        if args[1] == 'brave-bin':
+            version = os.environ.get('FIXTURE_BRAVE_VERSION', '1.73.91-1')
+        print('Version         : ' + version)
         sys.exit(0)
     if args[:1] == ['-Q'] and len(args) == 2:
         version = root / 'pacman-installed' / (args[1] + '.version')
@@ -277,6 +340,81 @@ elif name == 'omarchy-remove-dev-env':
     for path in (root / 'bin' / 'bun', root / 'mise-installed' / 'bun'):
         if path.is_symlink() or path.is_file():
             path.unlink()
+elif name == 'omarchy-install-browser':
+    if not args:
+        if os.environ.get('FIXTURE_BRAVE_INSTALLER_SUPPORTS', '1') == '1':
+            print('Usage: omarchy-install-browser <chromium|chrome|brave|brave-origin|edge|firefox|zen>')
+        else:
+            print('Usage: omarchy-install-browser <chromium|chrome|edge|firefox|zen>')
+        sys.exit(1)
+    if os.environ.get('FIXTURE_BRAVE_INSTALLER_SUPPORTS', '1') != '1' or args != ['brave']:
+        print('Usage: omarchy-install-browser <chromium|chrome|brave|brave-origin|edge|firefox|zen>')
+        sys.exit(1)
+    status = int(os.environ.get('FIXTURE_BRAVE_INSTALL_STATUS', '0'))
+    if status:
+        sys.exit(status)
+    app = root / 'opt/brave-bin'
+    app.mkdir(parents=True, exist_ok=True)
+    elf = b'#!/bin/sh\\n' if os.environ.get('FIXTURE_BRAVE_NO_ELF') == '1' else b'\\x7fELF' + bytes(16)
+    (app / 'brave').write_bytes(elf)
+    files = [str(app) + '/', str(app / 'brave')]
+    command = root / 'bin' / 'brave'
+    if os.environ.get('FIXTURE_BRAVE_NO_COMMAND') != '1':
+        if not command.exists():
+            command.symlink_to(root / 'bin' / 'stub')
+        files.append(str(command))
+        owned_path = root / 'pacman-owned'
+        owned_line = str(command) + ' brave-bin'
+        existing = owned_path.read_text().splitlines() if owned_path.exists() else []
+        if owned_line not in existing:
+            with owned_path.open('a') as owned:
+                owned.write(owned_line + '\\n')
+    installed = root / 'pacman-installed'
+    installed.mkdir(exist_ok=True)
+    (installed / 'brave-bin').write_text('\\n'.join(files) + '\\n')
+    (installed / 'brave-bin.version').write_text(os.environ.get('FIXTURE_BRAVE_VERSION', '1.73.91-1') + '\\n')
+elif name == 'omarchy-remove-browser':
+    if args != ['brave']:
+        sys.exit(1)
+    status = int(os.environ.get('FIXTURE_BRAVE_REMOVE_STATUS', '0'))
+    if status:
+        sys.exit(status)
+    listing = root / 'pacman-installed' / 'brave-bin'
+    removed = []
+    if listing.exists():
+        removed = listing.read_text().splitlines()
+        for line in removed:
+            path = pathlib.Path(line)
+            if path.is_symlink() or path.is_file():
+                path.unlink()
+        listing.unlink()
+        (root / 'pacman-installed' / 'brave-bin.version').unlink(missing_ok=True)
+    owned = root / 'pacman-owned'
+    if owned.exists():
+        owned.write_text(''.join(line + '\\n' for line in owned.read_text().splitlines() if not line.endswith(' brave-bin')))
+    brave_etc = root / 'etc/brave'
+    if brave_etc.is_dir() and not brave_etc.is_symlink():
+        shutil.rmtree(brave_etc)
+elif name == 'omarchy-default-browser':
+    state = root / 'default-browser'
+    if not args:
+        current = state.read_text().strip() if state.exists() else os.environ.get('FIXTURE_DEFAULT_BROWSER', 'chromium')
+        print(current)
+        sys.exit(0)
+    if args == ['brave']:
+        status = int(os.environ.get('FIXTURE_DEFAULT_BROWSER_STATUS', '0'))
+        if status:
+            sys.exit(status)
+        state.write_text('brave\\n')
+        sys.exit(0)
+    sys.exit(1)
+elif name == 'brave':
+    status = os.environ.get('FIXTURE_BRAVE_LAUNCH_STATUS', '0')
+    if status == 'sleep':
+        import time
+        time.sleep(60)
+        sys.exit(0)
+    sys.exit(int(status))
 elif name == 'omarchy' and args[1:3] == ['add', 'bitwarden'] and args[:1] == ['pkg']:
     # A package whose bundled Electron ELF and bitwarden command pacman owns.
     status = int(os.environ.get('FIXTURE_BITWARDEN_ADD_STATUS', '0'))
@@ -361,13 +499,14 @@ class InstallKeydTests(unittest.TestCase):
         for name in ('bash', 'sh', 'python3', 'env'):
             (self.bin / name).symlink_to(shutil.which(name))
         for name in ('timeout', 'mktemp', 'dirname', 'rm', 'mkdir', 'cp', 'chmod',
-                     'mv', 'find', 'readlink', 'sleep', 'cmp', 'stat', 'id', 'head'):
+                     'mv', 'find', 'readlink', 'sleep', 'cmp', 'id', 'head'):
             (self.bin / name).symlink_to(host_tool(name))
         stub = self.bin / 'stub'
         stub.write_text(STUB)
         stub.chmod(0o755)
-        for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'omarchy-install-dev-env', 'omarchy-remove-dev-env', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw', 'getconf', 'readelf', 'syncthing', 'loginctl'):
+        for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'omarchy-install-dev-env', 'omarchy-remove-dev-env', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw', 'getconf', 'readelf', 'syncthing', 'loginctl', 'stat'):
             (self.bin / name).symlink_to(stub)
+        (self.bin / 'git').symlink_to(host_tool('git'))
         (self.root / 'home').mkdir()
         (self.root / 'runtime').mkdir()
         (self.root / 'nightly-t3').write_text('#!/bin/sh\nprintf "t3 0.0.0-nightly.20261018.1\\n"\n')
@@ -587,7 +726,10 @@ raise SystemExit(os.WEXITSTATUS(status))
                 privileged = self.privileged_calls()
                 self.assertEqual(privileged[0], ['sudo', '-n', '/usr/bin/true'])
                 self.assertEqual(oct(manifest.stat().st_mode & 0o777), '0o644')
-                self.assertEqual(manifest.read_bytes(), (REPO / 'chromium/extensions' / manifest.name).read_bytes())
+                expected = subprocess.run(
+                    [sys.executable, str(REPO / 'scripts/groundwork-update.py'), 'render-brave-extension'],
+                    check=True, capture_output=True).stdout
+                self.assertEqual(manifest.read_bytes(), expected)
 
     def test_update_primes_sudo_when_readelf_is_missing(self):
         self.prepare_routine_update('--without-keyd', '--without-screen-sharing')

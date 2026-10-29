@@ -1,7 +1,8 @@
 #!/bin/bash
 # Link the personal Hyprland override into $HOME.
-# For any Apple Silicon Omarchy Mac (aarch64). Does not touch Git, SSH,
-# groundwork-core, groundwork-mac, or /usr/share/omarchy.
+# For any Apple Silicon Omarchy Mac (aarch64). Reads the core/ checkout and
+# does not write it. Does not touch Git config, SSH, groundwork-mac, or
+# /usr/share/omarchy.
 set -euo pipefail
 
 usage() {
@@ -146,11 +147,17 @@ if [[ -n $stored ]]; then
   declined_migrations=${preferences[5]-}
 fi
 
+# An updater installed before the Brave spec fast-forwards and then runs this
+# script. That copy does not check out submodules, and register_choices (which
+# replaces it) is below this check. Check out core first when the spec is missing.
+if [[ ! -f "$root/core/browser/brave.json" || -L "$root/core/browser/brave.json" ]]; then
+  PATH="/usr/bin:/bin${PATH:+:$PATH}" git --no-optional-locks -C "$root" submodule update --init -- core
+fi
+
 # Fail before installing packages or moving files when the checkout is incomplete.
-bitwarden_extension=nngceckbapebfimnlniiiahkandclblb.json
-extension_source="$root/chromium/extensions/$bitwarden_extension"
-[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$extension_source" ]] || {
-  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, or Bitwarden extension manifest is missing." >&2
+# The Bitwarden extension id and Brave policies are read from core, not a copy here.
+[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$root/core/browser/brave.json" && ! -L "$root/core/browser/brave.json" ]] || {
+  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, or Brave spec is missing." >&2
   exit 1
 }
 
@@ -160,6 +167,7 @@ extension_source="$root/chromium/extensions/$bitwarden_extension"
 t3_installer=""
 bun_preview_dir=""
 sudo_keepalive_pid=""
+brave_render_temps=()
 stop_sudo_keepalive() {
   if [[ -n "${sudo_keepalive_pid}" ]]; then
     kill "$sudo_keepalive_pid" 2>/dev/null || true
@@ -176,8 +184,20 @@ cleanup() {
     rm -rf -- "$bun_preview_dir"
     bun_preview_dir=""
   fi
+  if [[ ${#brave_render_temps[@]} -gt 0 ]]; then
+    rm -f -- "${brave_render_temps[@]}"
+    brave_render_temps=()
+  fi
 }
 trap cleanup EXIT
+
+extension_id=$(python3 "$root/scripts/groundwork-update.py" brave-extension-id)
+bitwarden_extension=${extension_id}.json
+extension_source=$(mktemp)
+brave_policy_source=$(mktemp)
+brave_render_temps=("$extension_source" "$brave_policy_source")
+python3 "$root/scripts/groundwork-update.py" render-brave-extension >"$extension_source"
+python3 "$root/scripts/groundwork-update.py" render-brave-policy >"$brave_policy_source"
 
 # Each privileged step has a check that needs no sudo. A routine update uses
 # them to ask for administrator permission only when something must change.
@@ -252,6 +272,228 @@ syncthing_linger_enabled() {
 syncthing_linger_needed() {
   syncthing_always_on && ! syncthing_linger_enabled
 }
+# Brave (decision 0015). Install with Omarchy's browser installer, then keep it
+# only when its ELF files and a short launch work on this kernel. Chromium stays.
+# A Flatpak or another brave command is offered later and is not replaced here.
+brave_flatpak=com.brave.Browser
+brave_added=0
+brave_usable=0
+brave_installer_supports_result=
+brave_policy_root=$test_root/etc/brave
+brave_policy_dir=$brave_policy_root/policies/managed
+brave_policy_file=$brave_policy_dir/groundwork.json
+brave_installer_supports() {
+  if [[ -n $brave_installer_supports_result ]]; then
+    return "$brave_installer_supports_result"
+  fi
+  local usage result=1
+  if command -v omarchy-install-browser >/dev/null; then
+    usage=$(omarchy-install-browser 2>&1 || true)
+    [[ $usage == *'|brave|'* ]] && result=0
+  fi
+  brave_installer_supports_result=$result
+  return "$result"
+}
+brave_flatpak_installed() {
+  command -v flatpak >/dev/null && flatpak --user info "$brave_flatpak" >/dev/null 2>&1
+}
+brave_package_command() {
+  local executable owner
+  executable=$(command -v brave 2>/dev/null) || return 1
+  command -v pacman >/dev/null || return 1
+  owner=$(pacman -Qoq "$executable" 2>/dev/null) || return 1
+  [[ $owner == brave-bin ]]
+}
+brave_page_kib() {
+  local page
+  page=$(getconf PAGESIZE 2>/dev/null || true)
+  if [[ ! $page =~ ^[0-9]+$ || $page -lt 1 ]]; then
+    echo unknown
+    return 0
+  fi
+  echo $((page / 1024))
+}
+# Exit 0 when the version is listed, 1 when it is not. Any other status is a
+# damaged brave-rejected or brave-accepted file: stop before installing Brave.
+brave_remembered() {
+  local status=0
+  python3 "$root/scripts/groundwork-update.py" "$1" || status=$?
+  if [[ $status -ne 0 && $status -ne 1 ]]; then
+    exit "$status"
+  fi
+  return "$status"
+}
+brave_root_owned() {
+  [[ $(stat -c '%U:%G' "$1" 2>/dev/null) == root:root ]]
+}
+brave_policy_current() {
+  local dir
+  for dir in "$brave_policy_root" "$brave_policy_root/policies" "$brave_policy_dir"; do
+    [[ -d $dir && ! -L $dir && $(stat -c %a "$dir" 2>/dev/null) == 755 ]] || return 1
+    brave_root_owned "$dir" || return 1
+  done
+  [[ -f $brave_policy_file && ! -L $brave_policy_file && $(stat -c %a "$brave_policy_file" 2>/dev/null) == 644 ]] || return 1
+  brave_root_owned "$brave_policy_file" || return 1
+  cmp -s "$brave_policy_source" "$brave_policy_file"
+}
+brave_changes_needed() {
+  brave_installer_supports || return 1
+  if ! brave_package_command; then
+    # Someone else's Brave is an offer, not an install, and needs no sudo.
+    if brave_flatpak_installed || command -v brave >/dev/null 2>&1; then
+      brave_remembered brave-rejected || true
+      brave_remembered brave-accepted || true
+      return 1
+    fi
+    if brave_remembered brave-rejected; then
+      return 1
+    fi
+    brave_remembered brave-accepted || true
+    return 0
+  fi
+  # An installed brave-bin needs sudo only to repair policy. A launch retry does not.
+  brave_remembered brave-rejected || true
+  brave_remembered brave-accepted || true
+  brave_policy_current && return 1
+  return 0
+}
+# Say what the default actually is. A later brave-bin that fails its checks
+# stays installed when this run did not add it, and the default stays Brave.
+brave_default_sentence() {
+  local current=
+  if command -v omarchy-default-browser >/dev/null 2>&1; then
+    current=$(omarchy-default-browser 2>/dev/null) || current=
+  fi
+  if [[ "$current" == brave ]]; then
+    echo "Brave stays the default. To put Chromium back, run omarchy-default-browser chromium."
+  else
+    echo "Chromium stays the default."
+  fi
+}
+brave_fail() {
+  local remember=$1
+  local reason=$2
+  # A timeout or other non-signal launch failure is retried next run, so the
+  # package this run added stays. Alignment and a signal crash are remembered
+  # and, only then, removed when this run added them. Pass 1 as the third
+  # argument to remove without remembering (a copy this run added that is
+  # already rejected, or that never put brave-bin's command on PATH).
+  local remove=${3:-$remember}
+  local version
+  echo "$reason $(brave_default_sentence)" >&2
+  brave_usable=0
+  if [[ $remember -eq 1 ]]; then
+    if version=$(python3 "$root/scripts/groundwork-update.py" reject-brave); then
+      echo "Remembered brave-bin $version as unusable on this kernel. Setup will not try that version again." >&2
+    fi
+  fi
+  if [[ $remove -eq 1 && $brave_added -eq 1 ]]; then
+    if omarchy-remove-browser brave; then
+      echo "Removed the Brave browser this run had added." >&2
+    else
+      echo "Could not remove the Brave browser this run added. Remove it with: omarchy-remove-browser brave" >&2
+    fi
+    hash -r
+    brave_added=0
+  fi
+}
+assess_brave() {
+  local launch_status launch_reason align_reason
+  if brave_remembered brave-rejected; then
+    brave_fail 0 "This brave-bin version already failed on this $(brave_page_kib) KiB-page kernel, so it was not tried again." 1
+    return 0
+  fi
+  if brave_remembered brave-accepted; then
+    brave_usable=1
+    return 0
+  fi
+  align_reason=$(python3 "$root/scripts/groundwork-update.py" check-package-alignment brave-bin 2>&1) || {
+    brave_fail 1 "$align_reason"
+    return 0
+  }
+  launch_status=0
+  launch_reason=$(python3 "$root/scripts/groundwork-update.py" check-brave-launch "$(command -v brave)" 2>&1) || launch_status=$?
+  if [[ $launch_status -eq 0 ]]; then
+    python3 "$root/scripts/groundwork-update.py" accept-brave >/dev/null
+    brave_usable=1
+    return 0
+  fi
+  # 1 is a remembered Brave crash. 2 is a retryable launch result. Anything
+  # above 128 is this process being cancelled (Ctrl+C is 130); stop setup.
+  if [[ $launch_status -gt 128 ]]; then
+    exit "$launch_status"
+  fi
+  if [[ $launch_status -eq 1 ]]; then
+    brave_fail 1 "$launch_reason"
+  else
+    brave_fail 0 "${launch_reason:-Brave did not finish its launch check on this $(brave_page_kib) KiB-page kernel.}"
+  fi
+}
+add_and_assess_brave() {
+  if ! omarchy-install-browser brave; then
+    echo "omarchy-install-browser brave failed, so Chromium stays the default." >&2
+    brave_usable=0
+    return 1
+  fi
+  brave_added=1
+  hash -r
+  if ! brave_package_command; then
+    brave_fail 0 "omarchy-install-browser brave did not put the brave-bin command first on PATH." 1
+    return 1
+  fi
+  assess_brave
+  [[ $brave_usable -eq 1 ]]
+}
+install_missing_brave() {
+  brave_installer_supports || return 0
+  if brave_package_command; then
+    assess_brave
+    return 0
+  fi
+  if brave_flatpak_installed || command -v brave >/dev/null 2>&1; then
+    return 0
+  fi
+  if brave_remembered brave-rejected; then
+    echo "The brave-bin version available here already failed on this $(brave_page_kib) KiB-page kernel, so it was not installed again. $(brave_default_sentence)" >&2
+    return 0
+  fi
+  brave_remembered brave-accepted || true
+  add_and_assess_brave || true
+}
+write_brave_policy() {
+  local dir=$brave_policy_root
+  local policies=$dir/policies
+  local managed=$brave_policy_dir
+  local dest=$brave_policy_file
+  if [[ -L $dir || -L $policies || -L $managed || -L $dest ]]; then
+    echo "Refusing to write Brave policy through a symlink under /etc/brave. Nothing there was changed." >&2
+    exit 1
+  fi
+  if [[ -e $dest && ! -f $dest ]]; then
+    echo "Refusing to replace /etc/brave/policies/managed/groundwork.json because it is not a regular file." >&2
+    exit 1
+  fi
+  sudo install -d -m 0755 -o root -g root "$dir" "$policies" "$managed"
+  if ! sudo cmp -s "$brave_policy_source" "$dest"; then
+    sudo install -o root -g root -m 0644 -T "$brave_policy_source" "$dest"
+  else
+    # install -d fixes the directories. A byte-identical file still needs root:root
+    # so browser_policy_purge_dir does not delete it, and 0644 when the mode drifted.
+    if ! brave_root_owned "$dir" || ! brave_root_owned "$policies" || ! brave_root_owned "$managed" || ! brave_root_owned "$dest"; then
+      sudo chown root:root "$dir" "$policies" "$managed" "$dest"
+    fi
+    if [[ $(stat -c %a "$dest" 2>/dev/null) != 644 ]]; then
+      sudo chmod 644 "$dest"
+    fi
+  fi
+}
+publish_brave_policy() {
+  brave_package_command || return 0
+  if brave_policy_current; then
+    return 0
+  fi
+  write_brave_policy
+}
 privileged_changes_needed() {
   local executable
   # Missing tools are installed through omarchy pkg add or Omarchy's installers.
@@ -268,6 +510,9 @@ privileged_changes_needed() {
   if ! command -v bitwarden >/dev/null && ! bitwarden_flatpak_installed && bitwarden_native_available; then
     return 0
   fi
+  # A missing Brave install or a policy that is not root:root and current needs
+  # administrator permission. Retrying a launch of an installed brave-bin does not.
+  brave_changes_needed && return 0
   service_ready tailscaled || return 0
   ! syncthing_linger_needed || return 0
   if command -v chromium >/dev/null; then
@@ -613,9 +858,16 @@ if ! ensure_user_flatpak io.freetubeapp.FreeTube; then
   echo "FreeTube could not be installed. Setup continues. Resolve the Flatpak error and rerun ./install.sh." >&2
 fi
 
+# Brave's release channel, through Omarchy. Brave Origin is a different browser
+# and is not installed here. Chromium is part of the base system and is kept.
+install_missing_brave
+
 # Use the same external-extension mechanism as Omarchy's 1Password service.
-# Chromium fetches and updates the official Web Store extension per profile;
-# no account state or browser preference database is written here.
+# Chromium fetches and updates the official Web Store extension per profile.
+# Brave is not Google-branded, so this same /usr/share/chromium/extensions path
+# is the one Chromium's standalone lookup uses. No account state, profile
+# database, or forced-install policy is written. If Brave ignores the manifest,
+# that is reported from the machine; it is not fixed by forcing the extension.
 if command -v chromium >/dev/null; then
   if [[ $updating -eq 0 ]] || ! chromium_extension_current; then
     # Chromium must traverse both directories even when setup uses umask 077.
@@ -1236,6 +1488,77 @@ if [[ $bitwarden_native_failed -eq 0 ]] && bitwarden_flatpak_installed && bitwar
     "Migrating installs bitwarden with omarchy pkg add, as Omarchy's Install > Service > Bitwarden does, unless that package is already installed. It checks that the package's bitwarden command and ELF files work on this kernel, then runs flatpak --user uninstall $bitwarden_flatpak. Your vault stays in your Bitwarden account; sign in again in the new app. The Flatpak's local data in ~/.var/app/$bitwarden_flatpak is kept. To undo, run flatpak --user install flathub $bitwarden_flatpak and omarchy pkg drop bitwarden. Quit Bitwarden first." \
     migrate_bitwarden_to_native
 fi
+migrate_brave_to_omarchy() {
+  if brave_package_command; then
+    assess_brave
+  elif brave_remembered brave-rejected; then
+    echo "The brave-bin version available here already failed on this $(brave_page_kib) KiB-page kernel, so it was not installed again. $(brave_default_sentence)" >&2
+    brave_usable=0
+    return 1
+  else
+    brave_remembered brave-accepted || true
+    add_and_assess_brave || true
+  fi
+  if [[ $brave_usable -ne 1 ]]; then
+    echo "Brave is not usable on this kernel, so it was not made the default." >&2
+    return 1
+  fi
+  echo "Brave now uses Omarchy's brave-bin package. Chromium stays installed. The Flatpak and ~/.var/app/$brave_flatpak were kept. Import data at brave://settings/importData."
+}
+migrate_default_browser_to_brave() {
+  if ! omarchy-default-browser brave; then
+    echo "omarchy-default-browser brave failed, so the default browser was not changed." >&2
+    return 1
+  fi
+  local current=
+  current=$(omarchy-default-browser 2>/dev/null) || current=
+  if [[ $current != brave ]]; then
+    echo "omarchy-default-browser brave did not leave Brave as the default." >&2
+    return 1
+  fi
+  echo "Brave is the default browser. Chromium stays installed. Web apps open in Brave; sign-ins that exist only in Chromium stay there."
+}
+if brave_installer_supports && ! brave_package_command; then
+  brave_current=
+  if brave_flatpak_installed; then
+    brave_current="the user Flatpak $brave_flatpak"
+  elif brave_foreign=$(command -v brave 2>/dev/null); then
+    brave_current="$brave_foreign, which brave-bin does not own"
+  fi
+  if [[ -n $brave_current ]] && brave_remembered brave-rejected; then
+    # Same rule as a missing Brave: a version that already failed is not installed again.
+    echo "The brave-bin version available here already failed on this $(brave_page_kib) KiB-page kernel, so it was not installed again. $(brave_default_sentence)" >&2
+    brave_current=
+  fi
+  if [[ -n $brave_current ]]; then
+    offer_omarchy_migration brave-flatpak "Brave" "$brave_current" \
+      "omarchy-install-browser brave" \
+      "Migrating runs omarchy-install-browser brave, then checks that brave-bin's ELF files and a short launch work on this kernel. Chromium stays installed. The Flatpak and ~/.var/app/$brave_flatpak are kept. Import bookmarks and passwords at brave://settings/importData. To undo a package this run adds, run omarchy-remove-browser brave." \
+      migrate_brave_to_omarchy
+  fi
+fi
+if [[ $brave_usable -eq 1 ]]; then
+  if ! command -v omarchy-default-browser >/dev/null; then
+    echo "omarchy-default-browser is missing, so Brave was not offered as the default. Chromium stays the default." >&2
+  else
+    brave_default=$(omarchy-default-browser 2>/dev/null) || brave_default=
+    if [[ $brave_default != brave ]]; then
+      brave_default=${brave_default:-nothing}
+      offer_omarchy_migration default-browser-brave "Brave" \
+        "not the default browser (the default is $brave_default)" \
+        "the default browser via omarchy-default-browser brave" \
+        "This runs omarchy-default-browser brave. Chromium stays installed. Web apps then open in Brave, and sign-ins that exist only in Chromium stay there. To undo, run omarchy-default-browser chromium. Import data at brave://settings/importData if you want it." \
+        migrate_default_browser_to_brave
+    fi
+  fi
+fi
+# Save a decline before publishing policy. A symlink refusal exits, and the no
+# from this run has to already be in omarchy.json.
+if [[ $declined_migrations != "$saved_declines" ]]; then
+  register_choices
+  saved_declines=$declined_migrations
+fi
+publish_brave_policy
 # Cursor is detect-only. On current Omarchy the cursor-bin package is Omarchy's
 # method; a cursor command that no package owns is reported and never removed.
 cursor_command=$(command -v cursor || true)
@@ -1247,9 +1570,6 @@ if [[ $migrate_requested -eq 1 && $migration_offered -eq 0 ]]; then
   echo "No app has a migration this layer can run. Nothing was migrated."
 fi
 
-if [[ $declined_migrations != "$saved_declines" ]]; then
-  register_choices
-fi
 if [[ $migration_failed -eq 1 ]]; then
   echo "A migration to Omarchy's installer did not finish. The rest of setup was applied and saved. Fix the error above, then rerun." >&2
   exit 1
@@ -1270,6 +1590,9 @@ if [[ $freetube_ready -eq 1 ]]; then
 else
   echo "Trackpad configuration, T3 Code, Herdr, Tailscale, Obsidian, and Bitwarden are installed."
   echo "FreeTube was not installed."
+fi
+if [[ $brave_usable -eq 1 ]]; then
+  echo "Brave is installed, and Chromium stays. See docs/apps.md."
 fi
 echo "Next time, run update-all for maintenance or groundwork-update for configuration only."
 echo "Open Obsidian with Super+Shift+O; finish vault, sync, and Bitwarden sign-in using docs/apps.md."

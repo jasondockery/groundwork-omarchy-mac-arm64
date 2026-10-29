@@ -2,7 +2,7 @@
 
 Personal settings for Omarchy on Apple Silicon. The desktop comes from [omacom/omarchy](https://github.com/omacom/omarchy) (`quattro`), packaged as `omarchy-dev` from `pkgs.omarchy.org/edge`. Apple Silicon support is the `omarchy-mac` and `omarchy-mac-boot` packages from [omacom/omarchy-mac-pkgs](https://github.com/omacom/omarchy-mac-pkgs). [omacom/omarchy-mac](https://github.com/omacom/omarchy-mac) is the legacy fork, and its `quattro` branch is not what the installer uses; shared Mac hardware support has lived in [omacom/omarchy](https://github.com/omacom/omarchy) since [omacom/omarchy#14431](https://github.com/omacom/omarchy/pull/14431). The upstream [omarchy-mac-installer](https://github.com/omacom/omarchy-mac-installer) installs the OS. This repo only keeps personal settings that Omarchy does not provide.
 
-The learning curriculum stays in [Groundwork](https://jasondockery.github.io/groundwork/) for now. Use [this repo's shortcut guide](docs/keybindings.md) for the Omarchy keys when an older lesson uses Groundwork-specific bindings. The `core/` submodule remains a read-only reference from the initial family split; it is not needed to install this layer. Do not copy the curriculum into this repo. [groundwork-mac](https://github.com/jasondockery/groundwork-mac) provisions a personal Mac development environment (and Linux/WSL/headless environments); it is not the Omarchy OS installer and must not be applied here.
+The learning curriculum stays in [Groundwork](https://jasondockery.github.io/groundwork/) for now. Use [this repo's shortcut guide](docs/keybindings.md) for the Omarchy keys when an older lesson uses Groundwork-specific bindings. The `core/` submodule is the read-only groundwork-core checkout this layer reads, including the Brave spec. `./install.sh` and `update-all` run `git submodule update --init -- core` so that checkout matches the pinned gitlink. `scripts/apply-layer.sh` runs that checkout when the Brave spec is not in the worktree yet, so an `update-all` installed before this revision can still apply it. Do not copy the curriculum, or `core/browser/brave.json`, into this repo. [groundwork-mac](https://github.com/jasondockery/groundwork-mac) provisions a personal Mac development environment (and Linux/WSL/headless environments); it is not the Omarchy OS installer and must not be applied here.
 
 It is for any Apple Silicon Mac running Omarchy: Mac mini, MacBook Air, and MacBook Pro, M1 and later, aarch64. Machine notes live in `docs/machines/`. Nothing in `packages/` or `install.sh` is specific to one model.
 
@@ -22,7 +22,7 @@ less install.sh
 ./install.sh
 ```
 
-For an existing checkout, use `git status` and review local edits before updating it; do not clone over it or reset it. Public HTTPS clones need no GitHub login. For a private copy, use an authorized account or your chosen SSH host alias/key instead. The installer does not configure GitHub credentials. A recursive submodule clone is unnecessary for setup.
+For an existing checkout, use `git status` and review local edits before updating it; do not clone over it or reset it. Public HTTPS clones need no GitHub login. For a private copy, use an authorized account or your chosen SSH host alias/key instead. The installer does not configure GitHub credentials. `./install.sh` checks out the pinned `core` submodule; a separate recursive clone is unnecessary.
 
 The default installs T3 Code Nightly, Herdr, Tailscale, keyd, Obsidian, Bitwarden (desktop and CLI), and FreeTube, starts `tailscaled` and keyd, applies the trackpad preferences, and makes Caps Lock Escape on tap and Control while held. Different existing input/keyd files are backed up. `--without-keyd` skips keyd setup. Omarchy continues to own the desktop shortcuts, tmux, shell, editor, and terminal configuration. T3 Code and agent providers still need your local authentication. Follow the [desktop apps guide](docs/apps.md) for Bitwarden sign-in, the local Obsidian vault, previous plugin choices, and free cross-platform sync. Existing notes are never moved automatically.
 
@@ -52,6 +52,7 @@ Only enable SSH after reviewing that guide and your effective tailnet policy. No
 - Check that `t3 --version` identifies a Nightly build, then run `t3`, open its local interface, authenticate a provider already installed on this machine, and complete one small task in a disposable project. Installing the UI does not authenticate Codex or Claude.
 - Open Obsidian with `Super+Shift+O` and select the local vault printed by setup. A new vault has Vim mode enabled; existing settings are preserved. Verify your notes and the chosen sync path using the [apps guide](docs/apps.md).
 - Launch Bitwarden from the app menu and finish sign-in/MFA. Restart Chromium to load the registered official extension, approve/enable it if prompted in each profile, and test autofill. `bw --version` checks CLI availability; it does not prove vault sign-in. A new install uses Omarchy's `bitwarden` package when the feed has it and it passes setup's checks, and otherwise the user Flatpak. User Flatpak updates use `flatpak --user update` separately from Omarchy updates.
+- When setup installed Brave and you answered yes, `omarchy-default-browser` prints `brave`. Open one page, then `brave://policy`, and confirm the groundwork-core `v0.7.0` rows. Approve Bitwarden if Brave offers it. Open one web app with `omarchy-launch-webapp` and confirm it opens in Brave; a sign-in that exists only in Chromium stays in Chromium. Chromium itself stays installed. If Brave failed the page-size or launch check, Chromium remains the default and setup says so. See the [apps guide](docs/apps.md#brave).
 - Launch FreeTube from the app menu. It opens with upstream defaults. Subscriptions and history stay in `~/.var/app/io.freetubeapp.FreeTube/config/FreeTube`. See the [apps guide](docs/apps.md).
 - From another approved computer in the same tailnet, run `ssh LOCAL_USER@MACHINE` using this machine's local login and MagicDNS name. Confirm the hostname and attach to tmux or Herdr. Test the reverse direction too using the destination's supported SSH setup.
 - From a Mac, connect to `vnc://MACHINE` with the generated local VNC password. Verify the screen and input, including after logout/login or reboot. Command+1 selects a workspace, and Option+1 selects a multiplexer window. Tailscale visibility alone does not prove a desktop server is running or permitted by policy.
@@ -123,14 +124,19 @@ does not disable its service or remove Blip.
 When an app this layer manages was installed another way than Omarchy's own
 installer, and Omarchy has one, setup offers to move it and never forces it
 ([decision 0014](docs/decisions/0014-offer-migration-to-omarchy-installers.md)).
-Today that is a Bitwarden user Flatpak once the feed has the `bitwarden`
-package. `./install.sh` in a terminal saves the other setup choices first,
+That covers a Bitwarden user Flatpak once the feed has the `bitwarden`
+package, a Brave Flatpak or other non-`brave-bin` Brave, and making a Brave
+that passed setup's checks the default browser
+([decision 0015](docs/decisions/0015-brave-via-omarchy-installer.md)).
+`./install.sh` in a terminal saves the other setup choices first,
 then asks `[y/N]` for up to five minutes and saves a no with them.
 `groundwork-update`, `update-all`, and runs without a terminal print one line
 naming the current and preferred methods and the migration id. Run
 `./install.sh --migrate-to-omarchy-installers` to migrate without a prompt,
-including after an earlier no. App data is kept; see the
-[apps guide](docs/apps.md#moving-from-the-flatpak-to-omarchys-package).
+including after an earlier no. The flag runs every offer that is still pending.
+App data is kept; see the
+[apps guide](docs/apps.md#moving-from-the-flatpak-to-omarchys-package)
+and [Brave](docs/apps.md#brave).
 A `cursor` that no pacman package owns is only reported, with
 [manual steps](docs/apps.md#cursor).
 
@@ -251,7 +257,7 @@ omarchy update
 
 `omarchy-channel-current` should print `edge`. Do not run `omarchy-channel-set`. Reboot if `omarchy update` asks. Later system updates stay on this desktop and use `omarchy update`, which applies the `aarch64-apple` edge pacman config (`[omarchy]` at `https://pkgs.omarchy.org/edge/$arch`, then `[asahi-alarm]`, then Arch Linux ARM). A bare `pacman -Syu` skips that policy.
 
-Personal settings come from this repo, in an Omarchy terminal, after the base system is up. A recursive submodule clone is unnecessary for setup:
+Personal settings come from this repo, in an Omarchy terminal, after the base system is up. `./install.sh` checks out the pinned `core` submodule, so a separate recursive clone is unnecessary:
 
 ```bash
 git clone https://github.com/jasondockery/groundwork-omarchy-mac-arm64.git ~/code/groundwork-omarchy-mac-arm64

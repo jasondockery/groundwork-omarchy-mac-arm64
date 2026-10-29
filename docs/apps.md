@@ -1,6 +1,28 @@
 # Desktop apps and personal notes
 
-`./install.sh` ensures Obsidian, the Bitwarden CLI (`bw`), the Bitwarden desktop app, and FreeTube are available alongside T3 Code Nightly, Herdr, and Tailscale. It registers the official Bitwarden extension for installed Chromium. Omarchy (`omacom/omarchy` `quattro`) continues to own desktop bindings and application updates, including the Qt 6.12 palette fix [omarchy#14553](https://github.com/omacom/omarchy/pull/14553) on this path. Account sign-in, extension approval, and sync enrollment stay local to each user.
+`./install.sh` ensures Obsidian, the Bitwarden CLI (`bw`), the Bitwarden desktop app, and FreeTube are available alongside T3 Code Nightly, Herdr, and Tailscale. It offers Brave through Omarchy's browser installer and registers the official Bitwarden extension for installed Chromium. Omarchy (`omacom/omarchy` `quattro`) continues to own desktop bindings and application updates, including the Qt 6.12 palette fix [omarchy#14553](https://github.com/omacom/omarchy/pull/14553) on this path. Account sign-in, extension approval, and sync enrollment stay local to each user.
+
+## Brave
+
+Brave is the browser this layer offers on Apple Silicon Omarchy. Chromium stays installed. The shared policy and the one offered extension are groundwork-core tag `v0.7.0` (`browser/brave.json`). This repo does not keep a second copy. The install, the 16 KiB-page check, and the launch check are [decision 0015](decisions/0015-brave-via-omarchy-installer.md).
+
+A new install runs `omarchy-install-browser brave` when that command lists `brave` and no Brave is already present. Setup keeps it only when `brave-bin`'s ELF files load on this kernel and a short private headless launch exits 0. A failed page-size check or a launch crash removes a copy that this run added, remembers that `brave-bin` version, and leaves Chromium as the default. A launch timeout or other non-signal failure is not remembered; the next run tries again. Setup does not install Brave Origin, and it does not install a Brave Flatpak.
+
+When those checks pass and Brave is not already the default, `./install.sh` in a terminal asks `[y/N]` before running `omarchy-default-browser brave` (migration id `default-browser-brave`). Updates and runs without a terminal print one line. A no is saved. To do it later:
+
+```bash
+./install.sh --migrate-to-omarchy-installers
+```
+
+That flag also runs any other pending offer. After a yes, web apps opened with `omarchy-launch-webapp` open in Brave. A sign-in that exists only in Chromium's profile stays there. To switch back, run `omarchy-default-browser chromium`.
+
+A user Flatpak `com.brave.Browser`, or a `brave` command that `brave-bin` does not own, is reported and not replaced until you say yes (migration id `brave-flatpak`). Migration installs `brave-bin` and leaves the Flatpak and `~/.var/app/com.brave.Browser` in place. It does not pass `--delete-data`. Import bookmarks and passwords at `brave://settings/importData`.
+
+Setup writes the v0.7.0 policy values to `/etc/brave/policies/managed/groundwork.json` as `root:root` mode `0644`. Rewards, Wallet, VPN, Brave AI (Leo and local AI), product analytics, the usage ping, and the built-in password manager are off. An unchanged file is not written again. `omarchy.json` and `color.json` in that directory are left alone. Check the result at `brave://policy`.
+
+Bitwarden (`nngceckbapebfimnlniiiahkandclblb`) is the only extension offered. The same external manifest Chromium uses is registered under `/usr/share/chromium/extensions`. Nothing is force-installed. If Brave does not offer Bitwarden from that file, install it from the Chrome Web Store link in the Chromium section and say so; do not add a forced-install policy. Restart Brave, approve the extension if prompted, and test autofill on one site.
+
+`omarchy update` updates `brave-bin`. This layer does not. To remove a copy setup added, run `omarchy-remove-browser brave`. That does not delete `~/.config/BraveSoftware`. The reference mini has not yet shown that Brave browses on 16 KiB pages.
 
 ## Bitwarden
 
@@ -24,7 +46,7 @@ Launch **Bitwarden** from `Super+Space`. For a Flatpak installation, `flatpak ru
 
 Setup gives `/usr/share/chromium` and its `extensions` directory mode `0755`, and the manifest mode `0644`, so Chromium can read the registration even when setup runs with a private umask. Rerunning setup repairs restrictive directory permissions left by an earlier run.
 
-Setup registers the [official Bitwarden extension](https://chromewebstore.google.com/detail/bitwarden-password-manage/nngceckbapebfimnlniiiahkandclblb) using `/usr/share/chromium/extensions/nngceckbapebfimnlniiiahkandclblb.json`, following Omarchy's existing external-extension mechanism. Its ID and Google Web Store update URL match [Bitwarden's deployment guide](https://bitwarden.com/help/browserext-deploy/). Chromium downloads and updates the extension; the installer does not edit browser profile databases or sign in to accounts.
+Setup registers the [official Bitwarden extension](https://chromewebstore.google.com/detail/bitwarden-password-manage/nngceckbapebfimnlniiiahkandclblb) using `/usr/share/chromium/extensions/nngceckbapebfimnlniiiahkandclblb.json`, following Omarchy's existing external-extension mechanism. The extension id and update URL are read from groundwork-core `v0.7.0` `browser/brave.json`, not from a copy in this repo. They match [Bitwarden's deployment guide](https://bitwarden.com/help/browserext-deploy/). Chromium downloads and updates the extension; the installer does not edit browser profile databases or sign in to accounts. Brave is offered the same manifest; see [Brave](#brave).
 
 Restart Chromium after setup. In each profile, approve/enable Bitwarden if prompted, pin its toolbar icon if useful, sign in, and test autofill on one familiar site. Existing profiles, accounts, and other extensions are preserved. If you previously removed or disabled it, Chromium may remember that decision; enable it at `chrome://extensions` or install it from the official store link. No forced-install policy is imposed. For other browsers, install their official Bitwarden extension separately. If Chromium is absent, setup reports the skip; rerun after installing it through Omarchy.
 

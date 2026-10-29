@@ -12,4 +12,5 @@ for arg in "$@"; do
   esac
 done
 root=$(cd "$(dirname "$0")" && pwd)
+# setup checks out the pinned core submodule before apply reads it.
 exec python3 "$root/scripts/groundwork-update.py" setup "$root" "$@"
