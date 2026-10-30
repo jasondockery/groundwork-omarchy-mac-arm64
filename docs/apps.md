@@ -6,23 +6,23 @@
 
 Brave is the browser this layer offers on Apple Silicon Omarchy. Chromium stays installed. The shared policy and the one offered extension are groundwork-core tag `v0.7.0` (`browser/brave.json`). This repo does not keep a second copy. The install, the 16 KiB-page check, and the launch check are [decision 0015](decisions/0015-brave-via-omarchy-installer.md).
 
-A new install runs `omarchy-install-browser brave` when that command lists `brave` and no Brave is already present. Setup keeps it only when `brave-bin`'s ELF files load on this kernel and a short private headless launch exits 0. A failed page-size check or a launch crash removes a copy that this run added, remembers that `brave-bin` version, and leaves Chromium as the default. A launch timeout or other non-signal failure is not remembered; the next run tries again. Setup does not install Brave Origin, and it does not install a Brave Flatpak.
+A new install runs `omarchy-install-browser brave` when that command lists `brave` and no Brave is already present. Setup keeps it only when `brave-bin`'s ELF files load on this kernel and a short launch works: a Brave window with a throwaway profile opens on your desktop for about five seconds, with graphics on, and closes by itself with exit 0. Your own Brave profile is not used. A failed page-size check or a launch crash removes a copy that this run added, remembers that `brave-bin` version, and leaves Chromium as the default, all said in one line. A launch timeout or other non-signal failure is not remembered; the next run tries again. Over SSH or from cron there is no desktop to open the window on, so the check waits for a run from a terminal on the desktop. Setup does not install Brave Origin, and it does not install a Brave Flatpak.
 
-When those checks pass and Brave is not already the default, `./install.sh` in a terminal asks `[y/N]` before running `omarchy-default-browser brave` (migration id `default-browser-brave`). Updates and runs without a terminal print one line. A no is saved. To do it later:
+The first time those checks pass and Chromium is the default, setup runs `omarchy default browser brave` and says so. It does that once: if you switch back to Chromium, or pick another browser, setup leaves that alone. From then on, when Brave is not the default, `./install.sh` in a terminal asks `[y/N]` before running `omarchy default browser brave` (migration id `default-browser-brave`). Updates and runs without a terminal print one line. A no is saved, and a saved no also stops the first automatic switch. To do it later:
 
 ```bash
 ./install.sh --migrate-to-omarchy-installers
 ```
 
-That flag also runs any other pending offer. After a yes, web apps opened with `omarchy-launch-webapp` open in Brave. A sign-in that exists only in Chromium's profile stays there. To switch back, run `omarchy-default-browser chromium`.
+That flag also runs any other pending offer. Once Brave is the default, web apps opened with `omarchy-launch-webapp` open in Brave. A sign-in that exists only in Chromium's profile stays there. To switch back, run `omarchy default browser chromium`.
 
 A user Flatpak `com.brave.Browser`, or a `brave` command that `brave-bin` does not own, is reported and not replaced until you say yes (migration id `brave-flatpak`). Migration installs `brave-bin` and leaves the Flatpak and `~/.var/app/com.brave.Browser` in place. It does not pass `--delete-data`. Import bookmarks and passwords at `brave://settings/importData`.
 
 Setup writes the v0.7.0 policy values to `/etc/brave/policies/managed/groundwork.json` as `root:root` mode `0644`. Rewards, Wallet, VPN, Brave AI (Leo and local AI), product analytics, the usage ping, and the built-in password manager are off. An unchanged file is not written again. `omarchy.json` and `color.json` in that directory are left alone. Check the result at `brave://policy`.
 
-Bitwarden (`nngceckbapebfimnlniiiahkandclblb`) is the only extension offered. The same external manifest Chromium uses is registered under `/usr/share/chromium/extensions`. Nothing is force-installed. If Brave does not offer Bitwarden from that file, install it from the Chrome Web Store link in the Chromium section and say so; do not add a forced-install policy. Restart Brave, approve the extension if prompted, and test autofill on one site.
+Bitwarden (`nngceckbapebfimnlniiiahkandclblb`) is the only extension offered. The same external manifest Chromium uses is registered under `/usr/share/chromium/extensions`, and `brave-bin` reads it too, so setup says the extension is registered for Chromium and Brave. Nothing is force-installed. If Brave does not offer Bitwarden from that file, install it from the Chrome Web Store link in the Chromium section and say so; do not add a forced-install policy. Restart Brave, approve the extension if prompted, and test autofill on one site.
 
-`omarchy update` updates `brave-bin`. This layer does not. To remove a copy setup added, run `omarchy-remove-browser brave`. That does not delete `~/.config/BraveSoftware`. The reference mini has not yet shown that Brave browses on 16 KiB pages.
+`omarchy update` updates `brave-bin`. This layer does not. To remove a copy setup added, run `omarchy-remove-browser brave`. That does not delete `~/.config/BraveSoftware`. On the reference mini (16 KiB pages), `brave-bin` 1:1.98.62-1 opens, renders with GPU compositing, and passes the launch check. Two crashes there on 2026-10-30 happened while dragging a tab, not at start (issue #76).
 
 ## Bitwarden
 
