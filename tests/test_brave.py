@@ -290,6 +290,22 @@ class BraveInstallTests(unittest.TestCase):
         # The first acceptance is still recorded after the default step.
         self.assertEqual(self.remembered('brave-accepted.json'), ['1.73.91-1'])
 
+    def test_an_unset_default_is_switched_once(self):
+        # No default set counts as one the person did not choose (core v0.8.0).
+        self.env['FIXTURE_DEFAULT_BROWSER'] = ''
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertIn(OMARCHY_SET_DEFAULT, self.calls())
+        self.assertNotIn('migration default-browser-brave', result.stdout)
+        self.assertEqual(result.stdout.count('Brave is the default browser.'), 1)
+        self.assertEqual((self.root / 'default-browser').read_text().strip(), 'brave')
+        # Once only: a default the person clears later is not switched again.
+        (self.root / 'default-browser').unlink()
+        self.reset_calls()
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertNotIn(OMARCHY_SET_DEFAULT, self.calls())
+        self.assertIn('migration default-browser-brave', result.stdout)
+        self.assertIn('the default is nothing', result.stdout)
+
     def test_a_default_other_than_chromium_is_only_offered(self):
         self.env['FIXTURE_DEFAULT_BROWSER'] = 'firefox'
         result = self.run_install('--without-keyd', '--without-screen-sharing')
@@ -656,7 +672,7 @@ class BraveSpecTests(unittest.TestCase):
                 rejected.symlink_to(accepted)
                 self.assertEqual(updater.main(['brave-rejected']), 2)
 
-    def test_rendered_policy_matches_v070_and_differs_from_upstream(self):
+    def test_rendered_policy_matches_the_core_spec_and_differs_from_upstream(self):
         spec_path = REPO / 'core/browser/brave.json'
         document = json.loads(spec_path.read_text())
         self.assertEqual(document['schemaVersion'], 1)
