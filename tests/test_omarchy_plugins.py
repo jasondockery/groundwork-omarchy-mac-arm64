@@ -66,6 +66,9 @@ if name == 'omarchy-shell':
     if args == ['shell', 'ping']:
         print(os.environ.get('FIXTURE_SHELL_OUTPUT', 'down'))
         sys.exit(int(os.environ.get('FIXTURE_SHELL_STATUS', '1')))
+    if args == ['shell', 'rescanPlugins']:
+        (fixture / 'rescanned').write_text('1')
+        sys.exit(0)
     sys.exit(1)
 if name == 'sudo':
     if args[:2] == ['-n', 'true']:
@@ -115,6 +118,13 @@ def layout_insert(plugin_id, args):
         entries.insert(len(entries) if requested is None else min(requested, len(entries)), {'id': plugin_id})
     edit_layout(change)
 
+def unlisted():
+    """Ids the shell does not list yet: until a rescan, or for good."""
+    hidden = list(settings.get('never_listed', []))
+    if not (fixture / 'rescanned').exists():
+        hidden += settings.get('unlisted_until_rescan', [])
+    return hidden
+
 if action == 'list' and args[2:] == ['--json']:
     if settings.get('fail_list'):
         sys.exit(1)
@@ -131,6 +141,8 @@ if action == 'list' and args[2:] == ['--json']:
     if plugins_root().is_dir():
         for directory in plugins_root().iterdir():
             states.setdefault(directory.name, [False, False])
+    for plugin_id in unlisted():
+        states.pop(plugin_id, None)
     print(json.dumps([{'id': key, 'enabled': value[0], 'firstParty': value[1]} for key, value in sorted(states.items())]))
     sys.exit(0)
 if action == 'disable' and len(args) == 3:
@@ -197,6 +209,9 @@ if action == 'add' and args[3:] == ['--yes']:
     sys.exit(0)
 if action == 'enable':
     plugin_id = args[2]
+    if plugin_id in unlisted():
+        sys.stderr.write(f"omarchy-plugin-enable: plugin '{plugin_id}' is not known; run: omarchy-shell shell rescanPlugins\n")
+        sys.exit(1)
     if plugin_id in settings.get('fail_enable', []):
         sys.stderr.write('fixture enable failed\n')
         sys.exit(1)
@@ -293,6 +308,7 @@ class PluginApplyTests(unittest.TestCase):
             'GIT_COMMITTER_NAME': 'Fixture',
             'GIT_COMMITTER_EMAIL': 'fixture@example.invalid',
             'GIT_TERMINAL_PROMPT': '0',
+            'GROUNDWORK_PLUGIN_RESCAN_WAIT': '0.5',
         })
 
     def write_list(self, entries, retired=None, version=1):
@@ -409,6 +425,43 @@ class PluginApplyTests(unittest.TestCase):
             ['plugin', 'enable', 'example.widget', '--section', 'right'],
         ])
         self.assertEqual(json.loads(self.cache_path().read_text())['schemaVersion'], 2)
+
+    def test_enable_waits_for_the_shell_to_list_a_new_checkout(self):
+        self.write_list([plugin('example.one'), plugin('example.two')])
+        self.set_control(unlisted_until_rescan=['example.one', 'example.two'])
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([line for line in result.stdout.splitlines() if 'list changes' not in line], [])
+        calls = self.calls()
+        self.assertIn(['omarchy-shell', 'shell', 'rescanPlugins'], calls)
+        rescan = calls.index(['omarchy-shell', 'shell', 'rescanPlugins'])
+        self.assertLess(rescan, len(calls) - 1 - calls[::-1].index(['omarchy', 'plugin', 'enable', 'example.one']))
+        self.assertEqual(self.enables()[-1][2], 'example.two')
+        self.assertEqual(sorted(self.record()['plugins']), ['example.one', 'example.two'])
+        self.assertNotIn('enablePending', self.record()['plugins']['example.one'])
+
+    def test_plugins_the_shell_never_lists_report_once_and_are_retried(self):
+        ids = [f'example.p{number}' for number in range(4)]
+        self.write_list([plugin(plugin_id) for plugin_id in ids])
+        self.set_control(never_listed=ids)
+        result = self.invoke()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = [line for line in result.stdout.splitlines() if 'list changes' not in line]
+        self.assertEqual(len(lines), 1, lines)
+        self.assertTrue(lines[0].startswith('Omarchy shell did not list 4 new plugin(s)'), lines)
+        self.assertIn('update-all', lines[0])
+        # Only the first was cloned; the rest wait for the next run. Nothing was removed or enabled.
+        self.assertEqual([call for call in self.omarchy_calls() if call[1] in ('add', 'remove', 'enable')],
+                         [['plugin', 'add', 'https://github.com/example/p0.git', '--yes'], ['plugin', 'enable', 'example.p0']])
+        self.assertTrue(self.plugin_dir('example.p0').is_dir())
+        self.assertTrue(self.record()['plugins']['example.p0']['enablePending'])
+        # Next run: the shell lists it now, so only enable is retried.
+        self.set_control()
+        self.clear_calls()
+        again = self.invoke()
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertIn(['plugin', 'enable', 'example.p0'], self.omarchy_calls())
+        self.assertNotIn('enablePending', self.record()['plugins']['example.p0'])
 
     def test_version_2_rules_reject_the_list(self):
         samples = [
