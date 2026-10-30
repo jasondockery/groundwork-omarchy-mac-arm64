@@ -13,7 +13,9 @@ root = pathlib.Path(os.environ['MIGRATION_FIXTURE'])
 name = pathlib.Path(sys.argv[0]).name
 with (root / 'calls').open('a') as log:
     log.write(json.dumps([name, *sys.argv[1:]]) + '\\n')
-if name == 'uname':
+if name == 'git' and sys.argv[1:4] == ['-C', sys.argv[2], 'remote'] and 'get-url' in sys.argv:
+    print(os.environ['FIXTURE_ORIGIN_' + ('OLD' if sys.argv[2].endswith('old') else 'NEW')])
+elif name == 'uname':
     print(os.environ.get('FIXTURE_OS', 'Darwin'))
 elif name == 'git' and sys.argv[1] == 'clone':
     destination = pathlib.Path(sys.argv[-1])
@@ -79,6 +81,52 @@ class MigrationTests(unittest.TestCase):
         self.assertIn('Refusing --clone-mac on Omarchy', result.stderr)
         self.assertFalse((self.root / 'new').exists())
         self.assertFalse(any(call[0] == 'git' for call in self.calls()))
+
+    def test_credentialed_origins_are_never_printed(self):
+        secret = 's3' + 'cr' + 'et' + str(os.getpid())
+        for side in ('old', 'new'):
+            (self.root / side / '.git').mkdir(parents=True)
+        self.env['FIXTURE_ORIGIN_OLD'] = f'https://deploy:{secret}-old@github.com/example/old.git?t={secret}-q#{secret}-f'
+        self.env['FIXTURE_ORIGIN_NEW'] = f'ssh://user:{secret}-new@github.com/example/new.git'
+        result = self.run_helper()
+        self.assertNotIn(secret, result.stdout + result.stderr)
+        self.assertIn('https://***@github.com/example/old.git', result.stdout)
+        self.assertIn('ssh://***@github.com/example/new.git', result.stdout)
+
+    def run_origins(self, old, new):
+        for side in ('old', 'new'):
+            (self.root / side / '.git').mkdir(parents=True, exist_ok=True)
+        self.env['FIXTURE_ORIGIN_OLD'] = old
+        self.env['FIXTURE_ORIGIN_NEW'] = new
+        result = self.run_helper()
+        return result.stdout + result.stderr
+
+    def test_slash_in_password_is_fully_masked(self):
+        secret = 's3' + 'cr' + 'et' + str(os.getpid())
+        out = self.run_origins(f'https://u:pa/{secret}x@github.com/o/r.git',
+                               f'u:pa/{secret}x@github.com:o/r.git')
+        self.assertNotIn(secret, out)
+        self.assertNotIn('pa/', out)
+        self.assertIn('https://***@github.com/o/r.git', out)
+        self.assertIn('***@github.com:o/r.git', out)
+
+    def test_token_shaped_text_is_masked_anywhere(self):
+        tok = 'gh' + 'p_' + 'A' * 36 + str(os.getpid())
+        pat = 'github' + '_pat_' + 'B' * 22
+        out = self.run_origins(f'https://github.com/o/r@{tok}',
+                               f'https://github.com/o/{pat}/r.git')
+        self.assertNotIn(tok, out)
+        self.assertNotIn(pat, out)
+        self.assertIn('https://github.com/o/***/r.git', out)
+
+    def test_short_ghp_name_is_not_masked(self):
+        out = self.run_origins('https://github.com/o/ghp_utils.git', 'https://github.com/o/new.git')
+        self.assertIn('https://github.com/o/ghp_utils.git', out)
+
+    def test_plain_origin_is_still_shown(self):
+        (self.root / 'old' / '.git').mkdir(parents=True)
+        self.env['FIXTURE_ORIGIN_OLD'] = 'git@github.com:example/old.git'
+        self.assertIn('git@github.com:example/old.git', self.run_helper().stdout)
 
 
 if __name__ == '__main__':

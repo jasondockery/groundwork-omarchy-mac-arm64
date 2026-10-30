@@ -35,6 +35,43 @@ for arg in "$@"; do
   esac
 done
 
+# Print a URL that is safe to show. Userinfo (user[:pass]@) is replaced with
+# "***@" (a bare "git@" SSH user is kept); it is cut at the last "@" anywhere
+# in the string, before the query and fragment are dropped, so an unencoded
+# "/", "?" or "#" in a password cannot leak. GitHub-token-shaped segments
+# (gh[pousr]_ + 36 or more characters, github_pat_ + 22 or more) are masked
+# anywhere.
+redact_url() {
+  local url="$1" scheme="" rest userinfo
+  url="$(printf '%s' "$url" | sed -E 's/gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}/***/g')"
+  if [[ "$url" =~ ^([A-Za-z][A-Za-z0-9+.-]*://)(.*)$ ]]; then
+    scheme="${BASH_REMATCH[1]}"
+    rest="${BASH_REMATCH[2]}"
+  else
+    rest="$url"
+  fi
+  if [[ "$rest" == *@* ]]; then
+    userinfo="${rest%@*}"
+    rest="${rest##*@}"
+    if [[ "$userinfo" == git ]]; then
+      rest="git@${rest}"
+    else
+      rest="***@${rest}"
+    fi
+  fi
+  rest="${rest%%[?#]*}"
+  printf '%s%s\n' "$scheme" "$rest"
+}
+
+# Show a checkout's origin remote without ever printing credentials.
+show_origin() {
+  local url
+  url="$(git -C "$1" remote get-url origin 2>/dev/null || true)"
+  if [[ -n "$url" ]]; then
+    redact_url "$url"
+  fi
+}
+
 on_omarchy=0
 if [[ "$(uname -s)" == Linux ]] && command -v omarchy >/dev/null 2>&1; then
   on_omarchy=1
@@ -45,14 +82,14 @@ new="${GROUNDWORK_MAC_DIR:-$HOME/code/groundwork-mac}"
 
 echo "Old public checkout: $old"
 if [[ -d "$old/.git" ]]; then
-  git -C "$old" remote get-url origin || true
+  show_origin "$old"
 else
   echo "No git checkout there."
 fi
 
 echo "groundwork-mac checkout: $new"
 if [[ -d "$new/.git" ]]; then
-  git -C "$new" remote get-url origin || true
+  show_origin "$new"
 else
   echo "Not cloned yet."
 fi
