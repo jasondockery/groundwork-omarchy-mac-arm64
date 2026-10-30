@@ -5,12 +5,15 @@ pacman, flatpak, omarchy, or sudo on the host, and they do not launch a real
 Brave. A passing fixture is not acceptance on the 16 KiB-page mini.
 """
 from contextlib import redirect_stderr
+import fcntl
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -29,11 +32,23 @@ EXTENSION_ID = 'nngceckbapebfimnlniiiahkandclblb'
 INSTALL_BRAVE = ['omarchy-install-browser', 'brave']
 REMOVE_BRAVE = ['omarchy-remove-browser', 'brave']
 SET_DEFAULT = ['omarchy-default-browser', 'brave']
+OMARCHY_SET_DEFAULT = ['omarchy', 'default', 'browser', 'brave']
+OMARCHY_ANNOUNCEMENT = 'Make it the default via Setup > Defaults > Browser.'
 
 spec = importlib.util.spec_from_file_location(
     'groundwork_brave_updater', REPO / 'scripts/groundwork-update.py')
 updater = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(updater)
+
+
+def wayland_socket(path):
+    """A Unix socket file at `path`, like a compositor's wayland-N."""
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        listener.bind(str(path))
+    finally:
+        listener.close()
+    return path
 
 
 class BraveInstallTests(unittest.TestCase):
@@ -53,8 +68,16 @@ class BraveInstallTests(unittest.TestCase):
             FIXTURE_LOAD_ALIGN='0x10000',
             FIXTURE_FEED='brave-bin',
         )
+        if self.page > 4096:
+            # On a large-page host, setup pins T3 Code; the fixture installer
+            # accepts only that pin.
+            self.env['FIXTURE_PINNED_T3'] = updater.T3_KNOWN_GOOD_LARGE_PAGE
         for name in ('pacman', 'omarchy-install-browser', 'omarchy-remove-browser', 'omarchy-default-browser'):
             (self.bin / name).symlink_to(self.bin / 'stub')
+        # The launch check opens a window, so it needs this user's Wayland
+        # socket. A bound, closed socket file is enough for the fixture.
+        wayland_socket(self.root / 'runtime' / 'wayland-fixture')
+        self.env.update(WAYLAND_DISPLAY='wayland-fixture', FIXTURE_BRAVE_SETTLE_SECONDS='0')
 
     def state(self, name):
         return self.root / 'home/.local/state/groundwork' / name
@@ -90,25 +113,47 @@ class BraveInstallTests(unittest.TestCase):
     def launch_call(self):
         return next(call for call in self.calls() if call[0] == 'brave')
 
-    def test_new_install_uses_omarchy_and_does_not_change_the_default(self):
+    def accept_once_then_restore_chromium(self):
+        """A first run that accepts Brave and makes it the default, then a user who switched back."""
+        self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertEqual((self.root / 'default-browser').read_text().strip(), 'brave')
+        (self.root / 'default-browser').write_text('chromium\n')
+        self.reset_calls()
+
+    def test_new_install_uses_omarchy_and_makes_a_working_brave_the_default(self):
         profile = self.profile()
         result = self.run_install('--without-keyd', '--without-screen-sharing')
+        text = result.stdout + result.stderr
         self.assertIn(INSTALL_BRAVE, self.calls())
         self.assertNotIn(REMOVE_BRAVE, self.calls())
-        self.assertNotIn(SET_DEFAULT, self.calls())
-        self.assertNotIn('[y/N]', result.stdout + result.stderr)
-        self.assertIn('migration default-browser-brave', result.stdout)
+        self.assertIn(OMARCHY_SET_DEFAULT, self.calls())
+        self.assertLess(self.calls().index(self.launch_call()), self.calls().index(OMARCHY_SET_DEFAULT))
+        self.assertNotIn('[y/N]', text)
+        self.assertNotIn('migration default-browser-brave', text)
+        # Omarchy's own "make it the default yourself" line is dropped; Groundwork says what it did.
+        self.assertNotIn(OMARCHY_ANNOUNCEMENT, text)
+        self.assertIn('Installing Brave...', result.stdout)
+        self.assertEqual(text.count('Brave is the default browser.'), 1)
+        self.assertIn('omarchy default browser chromium', result.stdout)
         self.assertIn('Brave is installed, and Chromium stays.', result.stdout)
-        self.assertIn('not the default browser', result.stdout)
-        self.assertFalse((self.root / 'default-browser').exists())
+        self.assertIn('registered for Chromium and Brave', result.stdout)
+        self.assertNotIn('Restart Chromium,', result.stdout)
+        self.assertIn('a Brave window with a throwaway profile opens', result.stdout)
+        self.assertEqual((self.root / 'default-browser').read_text().strip(), 'brave')
         self.assertEqual(self.remembered('brave-accepted.json'), ['1.73.91-1'])
         self.assertEqual(self.remembered('brave-rejected.json'), [])
         self.assertTrue((self.bin / 'brave').exists())
         self.assertTrue((self.bin / 'chromium').exists())
         self.assertEqual(profile.read_text(), '{"fixture": "profile"}\n')
         launch = self.launch_call()
-        self.assertIn('--headless=new', launch)
-        self.assertIn('--dump-dom', launch)
+        # The real windowed path: Wayland and the GPU, not a headless dump.
+        self.assertNotIn('--headless=new', launch)
+        self.assertNotIn('--disable-gpu', launch)
+        self.assertNotIn('--dump-dom', launch)
+        self.assertIn('--ozone-platform=wayland', launch)
+        self.assertIn('--remote-debugging-pipe', launch)
+        self.assertFalse(any(arg.startswith('--remote-debugging-port') for arg in launch))
+        self.assertIn('--password-store=basic', launch)
         self.assertIn('about:blank', launch)
         data_dir = next(arg for arg in launch if arg.startswith('--user-data-dir='))
         self.assertIn('groundwork-brave-launch-', data_dir)
@@ -177,8 +222,16 @@ class BraveInstallTests(unittest.TestCase):
         self.env['FIXTURE_BRAVE_LAUNCH_STATUS'] = '139'
         result = self.run_install('--without-keyd', '--without-screen-sharing')
         self.assertIn('SIGSEGV', result.stderr)
-        self.assertIn('brave/brave-browser#42312', result.stderr)
+        # One line says what happened, what was remembered and removed, and the default.
+        line = next(line for line in result.stderr.splitlines() if 'SIGSEGV' in line)
+        self.assertIn('Remembered brave-bin 1.73.91-1', line)
+        self.assertIn('Removed the Brave browser this run had added.', line)
+        self.assertTrue(line.endswith('Chromium stays the default.'), line)
+        self.assertEqual((result.stdout + result.stderr).count('Chromium stays the default.'), 1)
+        self.assertNotIn(OMARCHY_ANNOUNCEMENT, result.stdout + result.stderr)
+        self.assertIn('registered for Chromium.', result.stdout)
         self.assertIn(REMOVE_BRAVE, self.calls())
+        self.assertNotIn(OMARCHY_SET_DEFAULT, self.calls())
         self.assertIn('1.73.91-1', self.remembered('brave-rejected.json'))
         self.assertFalse((self.bin / 'brave').exists())
         self.assertFalse((self.root / 'default-browser').exists())
@@ -197,7 +250,81 @@ class BraveInstallTests(unittest.TestCase):
         self.assertTrue(self.policy_file().is_file())
         self.assertNotIn('migration default-browser-brave', result.stdout)
 
+    def test_no_desktop_session_is_retried_and_keeps_chromium(self):
+        self.env.pop('WAYLAND_DISPLAY')
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        text = result.stdout + result.stderr
+        self.assertIn('no Wayland desktop session', result.stderr)
+        self.assertEqual(text.count('Chromium stays the default.'), 1)
+        self.assertNotIn(OMARCHY_ANNOUNCEMENT, text)
+        self.assertFalse(any(call[0] == 'brave' for call in self.calls()))
+        self.assertNotIn(REMOVE_BRAVE, self.calls())
+        self.assertNotIn(OMARCHY_SET_DEFAULT, self.calls())
+        self.assertEqual(self.remembered('brave-rejected.json'), [])
+        self.assertEqual(self.remembered('brave-accepted.json'), [])
+        self.assertTrue((self.bin / 'brave').exists())
+        # The next run from the desktop checks it and makes it the default.
+        self.env['WAYLAND_DISPLAY'] = 'wayland-fixture'
+        self.reset_calls()
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertIn(OMARCHY_SET_DEFAULT, self.calls())
+        self.assertEqual((self.root / 'default-browser').read_text().strip(), 'brave')
+
+    def test_a_saved_decline_stops_the_first_automatic_switch(self):
+        # A transient first check leaves Brave installed and unaccepted, and saves choices.
+        self.env['FIXTURE_BRAVE_LAUNCH_STATUS'] = '1'
+        self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertEqual(self.remembered('brave-accepted.json'), [])
+        config = self.root / 'home/.config/groundwork/omarchy.json'
+        saved = json.loads(config.read_text())
+        saved['declined_migrations'] = ['default-browser-brave']
+        config.write_text(json.dumps(saved) + '\n')
+        self.env['FIXTURE_BRAVE_LAUNCH_STATUS'] = '0'
+        self.reset_calls()
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertNotIn(OMARCHY_SET_DEFAULT, self.calls())
+        self.assertNotIn(SET_DEFAULT, self.calls())
+        self.assertIn('as you chose', result.stdout)
+        self.assertNotIn('Brave is the default browser.', result.stdout)
+        self.assertFalse((self.root / 'default-browser').exists())
+        # The first acceptance is still recorded after the default step.
+        self.assertEqual(self.remembered('brave-accepted.json'), ['1.73.91-1'])
+
+    def test_an_unset_default_is_switched_once(self):
+        # No default set counts as one the person did not choose (core v0.8.0).
+        self.env['FIXTURE_DEFAULT_BROWSER'] = ''
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertIn(OMARCHY_SET_DEFAULT, self.calls())
+        self.assertNotIn('migration default-browser-brave', result.stdout)
+        self.assertEqual(result.stdout.count('Brave is the default browser.'), 1)
+        self.assertEqual((self.root / 'default-browser').read_text().strip(), 'brave')
+        # Once only: a default the person clears later is not switched again.
+        (self.root / 'default-browser').unlink()
+        self.reset_calls()
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertNotIn(OMARCHY_SET_DEFAULT, self.calls())
+        self.assertIn('migration default-browser-brave', result.stdout)
+        self.assertIn('the default is nothing', result.stdout)
+
+    def test_a_default_other_than_chromium_is_only_offered(self):
+        self.env['FIXTURE_DEFAULT_BROWSER'] = 'firefox'
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertNotIn(OMARCHY_SET_DEFAULT, self.calls())
+        self.assertNotIn(SET_DEFAULT, self.calls())
+        self.assertIn('migration default-browser-brave', result.stdout)
+        self.assertIn('the default is firefox', result.stdout)
+        self.assertFalse((self.root / 'default-browser').exists())
+
+    def test_a_failed_default_change_is_one_line_and_setup_continues(self):
+        self.env['FIXTURE_DEFAULT_BROWSER_STATUS'] = '1'
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertIn(OMARCHY_SET_DEFAULT, self.calls())
+        self.assertIn('omarchy default browser brave failed, so the default browser was not changed. '
+                      'Chromium stays the default.', result.stderr)
+        self.assertNotIn('Brave is the default browser.', result.stdout)
+
     def test_yes_makes_brave_the_default_and_a_no_is_saved(self):
+        self.accept_once_then_restore_chromium()
         output = self.run_in_terminal(['y'], '--without-keyd', '--without-screen-sharing')
         self.assertIn('Migrate Brave now? [y/N]', output)
         self.assertIn('Brave is the default browser.', output)
@@ -216,15 +343,18 @@ class BraveInstallTests(unittest.TestCase):
         self.assertIn('as you chose', output)
 
     def test_update_prints_the_default_notice_once_and_does_not_ask(self):
-        self.run_install('--without-keyd', '--without-screen-sharing')
-        self.reset_calls()
+        # A default the user changed after Groundwork set Brave is left alone.
+        self.accept_once_then_restore_chromium()
         result = self.run_update()
         self.assertEqual(result.stdout.count('migration default-browser-brave'), 1)
         self.assertNotIn('[y/N]', result.stdout + result.stderr)
         self.assertNotIn(SET_DEFAULT, self.calls())
+        self.assertNotIn(OMARCHY_SET_DEFAULT, self.calls())
         self.assertNotIn(INSTALL_BRAVE, self.calls())
+        self.assertEqual((self.root / 'default-browser').read_text().strip(), 'chromium')
 
     def test_a_saved_decline_is_quiet_on_update(self):
+        self.accept_once_then_restore_chromium()
         self.run_in_terminal(['n'], '--without-keyd', '--without-screen-sharing')
         self.reset_calls()
         result = self.run_update()
@@ -331,7 +461,7 @@ class BraveInstallTests(unittest.TestCase):
         result = self.run_install('--without-keyd', '--without-screen-sharing')
         text = result.stdout + result.stderr
         self.assertIn('Brave stays the default.', text)
-        self.assertIn('omarchy-default-browser chromium', text)
+        self.assertIn('omarchy default browser chromium', text)
         self.assertNotIn('Chromium stays the default.', text)
         self.assertNotIn(REMOVE_BRAVE, self.calls())
         self.assertEqual((self.root / 'default-browser').read_text().strip(), 'brave')
@@ -454,7 +584,7 @@ class BraveInstallTests(unittest.TestCase):
         self.assertNotIn('no terminal is available', result.stdout + result.stderr)
         self.assertNotIn('Nothing was changed.', result.stdout + result.stderr)
         self.assertNotIn(INSTALL_BRAVE, self.calls())
-        self.assertIn('--headless=new', self.launch_call())
+        self.assertIn('--remote-debugging-pipe', self.launch_call())
         self.assertEqual(self.policy_file().read_bytes(), before)
         self.assertEqual(self.remembered('brave-accepted.json'), [])
         self.assertEqual(self.remembered('brave-rejected.json'), [])
@@ -495,10 +625,11 @@ class BraveInstallTests(unittest.TestCase):
                 self.reset_calls()
 
     def test_a_declined_default_survives_a_policy_symlink_refusal(self):
+        self.accept_once_then_restore_chromium()
         target = self.root / 'policy-target'
         target.mkdir()
         brave = self.root / 'etc/brave'
-        brave.parent.mkdir(parents=True)
+        shutil.rmtree(brave)
         brave.symlink_to(target)
         output = self.run_in_terminal(['n'], '--without-keyd', '--without-screen-sharing', success=False)
         self.assertIn('Refusing to write Brave policy through a symlink', output)
@@ -541,7 +672,7 @@ class BraveSpecTests(unittest.TestCase):
                 rejected.symlink_to(accepted)
                 self.assertEqual(updater.main(['brave-rejected']), 2)
 
-    def test_rendered_policy_matches_v070_and_differs_from_upstream(self):
+    def test_rendered_policy_matches_the_core_spec_and_differs_from_upstream(self):
         spec_path = REPO / 'core/browser/brave.json'
         document = json.loads(spec_path.read_text())
         self.assertEqual(document['schemaVersion'], 1)
@@ -590,71 +721,224 @@ class BraveSpecTests(unittest.TestCase):
         with self.assertRaises(updater.UpdateError):
             updater.brave_offered_extension(insecure)
 
-    def test_launch_outcomes_and_a_private_environment(self):
+    FAKE_BRAVE = textwrap.dedent("""\
+        #!/usr/bin/env python3
+        # A fake brave that speaks the DevTools pipe. MODE picks what it does.
+        import json, os, resource, signal, sys, time
+        MODE = {mode!r}
+        SEEN = {seen!r}
+        soft, hard = resource.getrlimit(resource.RLIMIT_CORE)
+        with open(SEEN, 'w') as handle:
+            for key, value in os.environ.items():
+                handle.write(f'ENV {{key}}={{value}}\\n')
+            handle.write(f'RLIMIT_CORE={{soft}},{{hard}}\\n')
+            handle.write('FDS ' + ' '.join(sorted(os.listdir('/proc/self/fd'), key=int)) + '\\n')
+            for arg in sys.argv[1:]:
+                handle.write(f'ARG {{arg}}\\n')
+        def die(number):
+            if number != signal.SIGKILL:
+                signal.signal(number, signal.SIG_DFL)
+            os.kill(os.getpid(), number)
+            time.sleep(5)
+        if MODE == 'crash-open':
+            die(signal.SIGSEGV)
+        if MODE == 'exit-1':
+            sys.exit(1)
+        if MODE == 'silent':
+            time.sleep(60)
+        buffer = b''
+        while True:
+            chunk = os.read(3, 65536)
+            if not chunk:
+                sys.exit(0)
+            buffer += chunk
+            while b'\\0' in buffer:
+                raw, buffer = buffer.split(b'\\0', 1)
+                message = json.loads(raw)
+                if message['method'] == 'Browser.close':
+                    if MODE == 'crash-close':
+                        die(signal.SIGABRT)
+                    if MODE == 'hang-close':
+                        time.sleep(60)
+                    if MODE == 'close-exit-3':
+                        sys.exit(3)
+                    os.write(4, json.dumps({{'id': message['id'], 'result': {{}}}}).encode() + b'\\0')
+                    sys.exit(0)
+                os.write(4, json.dumps({{'id': message['id'], 'result': {{'product': 'Fake/1'}}}}).encode() + b'\\0')
+                if MODE == 'crash-window':
+                    die(signal.SIGTRAP)
+                if MODE == 'killed-window':
+                    die(signal.SIGKILL)
+                if MODE == 'terminated-window':
+                    die(signal.SIGTERM)
+        """)
+
+    def launch(self, mode, **constants):
+        """Run brave_launch_result against a fake brave in a fake desktop session."""
+        directory = Path(tempfile.mkdtemp(prefix='groundwork-brave-unit-'))
+        self.addCleanup(shutil.rmtree, directory, True)
+        runtime = directory / 'runtime'
+        runtime.mkdir()
+        wayland_socket(runtime / 'wayland-unit')
+        binary = directory / 'brave'
+        seen = directory / 'seen'
+        binary.write_text(self.FAKE_BRAVE.format(mode=mode, seen=str(seen)))
+        binary.chmod(0o755)
+        # A descriptor the caller could leak, and caller variables that must not pass.
+        pipe_read, leak_write = os.pipe()
+        # Above 4, so it cannot be mistaken for the DevTools pipe.
+        leak_read = fcntl.fcntl(pipe_read, fcntl.F_DUPFD, 20)
+        os.close(pipe_read)
+        os.set_inheritable(leak_read, True)
+        self.addCleanup(os.close, leak_read)
+        self.addCleanup(os.close, leak_write)
+        environment = {
+            'WAYLAND_DISPLAY': 'wayland-unit',
+            'XDG_RUNTIME_DIR': str(runtime),
+            'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/should/not/leak',
+            'DISPLAY': ':99',
+            'BRAVE_SHOULD_NOT_LEAK': 'secret-value',
+        }
+        settings = dict(BRAVE_SETTLE_SECONDS=0.2, **constants)
+        with patch.dict(os.environ, environment), \
+                patch.multiple(updater, **settings):
+            os.environ.pop('GROUNDWORK_TESTING', None)
+            result = updater.brave_launch_result(binary)
+        self.assertFalse(any(Path(tempfile.gettempdir()).glob('groundwork-brave-launch-*/profile/fake-marker')))
+        record = seen.read_text() if seen.exists() else ''
+        return result, record, runtime / 'wayland-unit', leak_read
+
+    def test_launch_opens_a_private_window_on_the_session_display(self):
+        (kind, message), record, socket_path, leak = self.launch('ok')
+        self.assertEqual((kind, message), ('ok', ''))
+        env = dict(line[4:].split('=', 1) for line in record.splitlines() if line.startswith('ENV '))
+        args = [line[4:] for line in record.splitlines() if line.startswith('ARG ')]
+        fds = next(line for line in record.splitlines() if line.startswith('FDS ')).split()[1:]
+        self.assertEqual(env['WAYLAND_DISPLAY'], str(socket_path))
+        self.assertNotEqual(env['XDG_RUNTIME_DIR'], str(socket_path.parent))
+        self.assertIn('groundwork-brave-launch-', env['XDG_RUNTIME_DIR'])
+        self.assertIn('groundwork-brave-launch-', env['HOME'])
+        self.assertEqual(env['PATH'], '/usr/bin:/bin')
+        for key in ('DBUS_SESSION_BUS_ADDRESS', 'DISPLAY', 'BRAVE_SHOULD_NOT_LEAK', 'GROUNDWORK_TESTING'):
+            self.assertNotIn(key, env)
+        self.assertNotIn('secret-value', record)
+        self.assertIn('RLIMIT_CORE=1,1', record)
+        # stdin/stdout/stderr, the DevTools pipe on 3 and 4, and the fake's own
+        # record file and directory listing. Nothing else from the caller.
+        self.assertIn('3', fds)
+        self.assertIn('4', fds)
+        self.assertNotIn(str(leak), fds)
+        self.assertLessEqual(len(fds), 7, fds)
+        for flag in ('--ozone-platform=wayland', '--remote-debugging-pipe', '--password-store=basic',
+                     '--no-first-run', 'about:blank'):
+            self.assertIn(flag, args)
+        for flag in ('--headless=new', '--disable-gpu', '--dump-dom'):
+            self.assertNotIn(flag, args)
+        self.assertFalse(any(arg.startswith('--remote-debugging-port') for arg in args))
+        data_dir = next(arg for arg in args if arg.startswith('--user-data-dir='))
+        self.assertIn('groundwork-brave-launch-', data_dir)
+        self.assertFalse(Path(data_dir.split('=', 1)[1]).exists())
+
+    def test_launch_does_not_depend_on_the_system_shell(self):
+        # dash, /bin/sh on Debian and Ubuntu, rejects redirections of fds above 9,
+        # and the DevTools pipe ends sit at 10 or above. No shell may move them.
+        real = subprocess.Popen
+        seen = []
+
+        def spy(argv, *args, **kwargs):
+            seen.append(list(argv))
+            return real(argv, *args, **kwargs)
+
+        with patch.object(updater.subprocess, 'Popen', side_effect=spy):
+            (kind, message), _record, _socket, _leak = self.launch('ok')
+        self.assertEqual((kind, message), ('ok', ''))
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0][0], sys.executable)
+        self.assertFalse(any(Path(arg).name in ('sh', 'bash', 'dash') for arg in seen[0][:5]), seen[0])
+        self.assertTrue(all(int(fd) > 9 for fd in seen[0][5:7]), seen[0])
+
+    def test_launch_signals_are_remembered_crashes(self):
+        for mode, name, when in (('crash-open', 'SIGSEGV', 'while opening a window'),
+                                 ('crash-window', 'SIGTRAP', 'with its window open'),
+                                 ('crash-close', 'SIGABRT', 'while closing its window')):
+            with self.subTest(mode=mode):
+                (kind, message), _record, _socket, _leak = self.launch(mode)
+                self.assertEqual(kind, 'remember', message)
+                self.assertIn(name, message)
+                self.assertIn(when, message)
+
+    def test_a_signal_from_outside_brave_is_retried_not_remembered(self):
+        # SIGKILL from the OOM killer or SIGTERM at logout says nothing about the build.
+        for mode, name in (('killed-window', 'SIGKILL'), ('terminated-window', 'SIGTERM')):
+            with self.subTest(mode=mode):
+                (kind, message), _record, _socket, _leak = self.launch(mode)
+                self.assertEqual(kind, 'transient', message)
+                self.assertIn(name, message)
+                self.assertIn('tried again next run', message)
+        for code, kind in ((-9, 'transient'), (137, 'transient'), (143, 'transient'), (-15, 'transient'),
+                           (-11, 'remember'), (133, 'remember'), (134, 'remember'), (-7, 'remember'),
+                           (-4, 'remember'), (136, 'remember')):
+            with self.subTest(code=code):
+                self.assertEqual(updater.brave_exit_result(code, 16384, 'while testing')[0], kind)
+
+    def test_launch_failures_that_are_not_signals_are_retried(self):
+        cases = (
+            ('exit-1', {}, 'exit 1'),
+            ('close-exit-3', {}, 'exit 3'),
+            ('silent', {'BRAVE_LAUNCH_SECONDS': 1}, 'within 1 seconds'),
+            ('hang-close', {'BRAVE_CLOSE_SECONDS': 1}, 'did not close its test window within 1 seconds'),
+        )
+        for mode, constants, text in cases:
+            with self.subTest(mode=mode):
+                (kind, message), _record, _socket, _leak = self.launch(mode, **constants)
+                self.assertEqual(kind, 'transient', message)
+                self.assertIn(text, message)
+
+    def test_launch_needs_this_users_wayland_socket(self):
         with tempfile.TemporaryDirectory(prefix='groundwork-brave-unit-') as directory:
             root = Path(directory)
             binary = root / 'brave'
-            seen = root / 'env'
-            binary.write_text(textwrap.dedent(f"""\
-                #!/usr/bin/env python3
-                import os, resource
-                soft, hard = resource.getrlimit(resource.RLIMIT_CORE)
-                with open({str(seen)!r}, 'w') as handle:
-                    for key, value in os.environ.items():
-                        handle.write(f'{{key}}={{value}}\\n')
-                    handle.write(f'RLIMIT_CORE={{soft}},{{hard}}\\n')
-                """))
-            binary.chmod(0o755)
-            saved = {key: os.environ.get(key) for key in (
-                'BRAVE_SHOULD_NOT_LEAK', 'GROUNDWORK_TESTING', 'FIXTURE_BRAVE_LAUNCH_STATUS')}
-            os.environ['BRAVE_SHOULD_NOT_LEAK'] = 'secret-value'
-            os.environ['GROUNDWORK_TESTING'] = '1'
-            os.environ['FIXTURE_BRAVE_LAUNCH_STATUS'] = '0'
-            try:
-                kind, message = updater.brave_launch_result(binary)
-            finally:
-                for key, value in saved.items():
-                    if value is None:
-                        os.environ.pop(key, None)
-                    else:
-                        os.environ[key] = value
-            self.assertEqual((kind, message), ('ok', ''))
-            dumped = seen.read_text()
-            self.assertNotIn('secret-value', dumped)
-            self.assertNotIn('BRAVE_SHOULD_NOT_LEAK', dumped)
-            self.assertIn('PATH=/usr/bin:/bin', dumped)
-            self.assertIn('FIXTURE_BRAVE_LAUNCH_STATUS=0', dumped)
-            self.assertIn('groundwork-brave-launch-', dumped)
-            self.assertIn('RLIMIT_CORE=1,1', dumped)
-            binary.write_text('#!/bin/sh\nexit 139\n')
-            kind, message = updater.brave_launch_result(binary)
-            self.assertEqual(kind, 'remember')
-            self.assertIn('SIGSEGV', message)
-            binary.write_text('#!/bin/sh\nexit 1\n')
-            kind, message = updater.brave_launch_result(binary)
-            self.assertEqual(kind, 'transient')
-            self.assertIn('exit 1', message)
-            missing = root / 'missing'
-            kind, _message = updater.brave_launch_result(missing)
-            self.assertEqual(kind, 'transient')
             binary.write_text('#!/bin/sh\nexit 0\n')
+            binary.chmod(0o755)
+            (root / 'not-a-socket').write_text('')
+            for environment in ({}, {'WAYLAND_DISPLAY': 'missing', 'XDG_RUNTIME_DIR': directory},
+                                {'WAYLAND_DISPLAY': 'not-a-socket', 'XDG_RUNTIME_DIR': directory},
+                                {'WAYLAND_DISPLAY': 'wayland-0', 'XDG_RUNTIME_DIR': 'relative'}):
+                with self.subTest(environment=environment):
+                    with patch.dict(os.environ, environment, clear=False):
+                        for key in ('WAYLAND_DISPLAY', 'XDG_RUNTIME_DIR'):
+                            if key not in environment:
+                                os.environ.pop(key, None)
+                        kind, message = updater.brave_launch_result(binary)
+                    self.assertEqual(kind, 'transient')
+                    self.assertIn('no Wayland desktop session', message)
+            kind, _message = updater.brave_launch_result(root / 'missing')
+            self.assertEqual(kind, 'transient')
             binary.chmod(stat.S_IRUSR | stat.S_IWUSR)
             kind, message = updater.brave_launch_result(binary)
             self.assertEqual(kind, 'transient')
             self.assertIn('not executable', message)
 
-    def test_launch_timeout_is_not_a_remembered_crash(self):
-        with tempfile.TemporaryDirectory(prefix='groundwork-brave-timeout-') as directory:
-            binary = Path(directory) / 'brave'
-            binary.write_text('#!/bin/sh\nsleep 30\n')
-            binary.chmod(0o755)
-            with patch.object(updater, 'BRAVE_LAUNCH_SECONDS', 1):
-                kind, message = updater.brave_launch_result(binary)
-            self.assertEqual(kind, 'transient')
-            self.assertIn('within 1 seconds', message)
+    def test_any_accepted_version_is_reported_per_page_size(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            with patch.object(updater, 'STATE', state), \
+                    patch.object(updater, 'page_size', return_value=16384), \
+                    patch('sys.stderr', new=io.StringIO()):
+                self.assertEqual(updater.main(['brave-accepted-any']), 1)
+                accepted = state / 'brave-accepted.json'
+                accepted.write_text('{"4096": ["1.2.3"]}\n')
+                self.assertEqual(updater.main(['brave-accepted-any']), 1)
+                accepted.write_text('{"16384": ["1.2.3"]}\n')
+                self.assertEqual(updater.main(['brave-accepted-any']), 0)
+                accepted.write_text('[]\n')
+                self.assertEqual(updater.main(['brave-accepted-any']), 2)
 
     def test_launch_checker_oserror_is_not_a_remembered_crash(self):
-        with patch.object(updater.tempfile, 'mkdtemp', side_effect=OSError(28, 'No space left on device')):
+        # A desktop session is stubbed so the check reaches mkdtemp on a host
+        # without Wayland (CI runners) as well as on a desktop.
+        with patch.object(updater, 'brave_wayland_socket', return_value=Path('/run/fixture/wayland-0')), \
+                patch.object(updater.tempfile, 'mkdtemp', side_effect=OSError(28, 'No space left on device')):
             with redirect_stderr(io.StringIO()) as err:
                 status = updater.main(['check-brave-launch', '/bin/true'])
         self.assertEqual(status, 2)

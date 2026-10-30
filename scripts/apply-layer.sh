@@ -278,6 +278,9 @@ syncthing_linger_needed() {
 brave_flatpak=com.brave.Browser
 brave_added=0
 brave_usable=0
+# 1 when this run is the first to see a brave-bin pass both checks on this
+# page size. Only then does Groundwork make Brave the default by itself.
+brave_first_acceptance=0
 brave_installer_supports_result=
 brave_policy_root=$test_root/etc/brave
 brave_policy_dir=$brave_policy_root/policies/managed
@@ -357,15 +360,17 @@ brave_changes_needed() {
   brave_policy_current && return 1
   return 0
 }
+# The default browser as Omarchy names it (brave, chromium, ...), or nothing.
+# `omarchy default browser` runs omarchy-default-browser.
+brave_current_default() {
+  command -v omarchy-default-browser >/dev/null 2>&1 || return 0
+  omarchy default browser 2>/dev/null || true
+}
 # Say what the default actually is. A later brave-bin that fails its checks
 # stays installed when this run did not add it, and the default stays Brave.
 brave_default_sentence() {
-  local current=
-  if command -v omarchy-default-browser >/dev/null 2>&1; then
-    current=$(omarchy-default-browser 2>/dev/null) || current=
-  fi
-  if [[ "$current" == brave ]]; then
-    echo "Brave stays the default. To put Chromium back, run omarchy-default-browser chromium."
+  if [[ $(brave_current_default) == brave ]]; then
+    echo "Brave stays the default. To put Chromium back, run omarchy default browser chromium."
   else
     echo "Chromium stays the default."
   fi
@@ -378,24 +383,25 @@ brave_fail() {
   # and, only then, removed when this run added them. Pass 1 as the third
   # argument to remove without remembering (a copy this run added that is
   # already rejected, or that never put brave-bin's command on PATH).
+  # Everything this run did about it is said in one line, after the removal.
   local remove=${3:-$remember}
-  local version
-  echo "$reason $(brave_default_sentence)" >&2
+  local version message=$reason
   brave_usable=0
   if [[ $remember -eq 1 ]]; then
     if version=$(python3 "$root/scripts/groundwork-update.py" reject-brave); then
-      echo "Remembered brave-bin $version as unusable on this kernel. Setup will not try that version again." >&2
+      message+=" Remembered brave-bin $version as unusable on this kernel. Setup will not try that version again."
     fi
   fi
   if [[ $remove -eq 1 && $brave_added -eq 1 ]]; then
     if omarchy-remove-browser brave; then
-      echo "Removed the Brave browser this run had added." >&2
+      message+=" Removed the Brave browser this run had added."
     else
-      echo "Could not remove the Brave browser this run added. Remove it with: omarchy-remove-browser brave" >&2
+      message+=" Could not remove the Brave browser this run added. Remove it with: omarchy-remove-browser brave"
     fi
     hash -r
     brave_added=0
   fi
+  echo "$message $(brave_default_sentence)" >&2
 }
 assess_brave() {
   local launch_status launch_reason align_reason
@@ -412,9 +418,16 @@ assess_brave() {
     return 0
   }
   launch_status=0
+  echo "Checking that Brave starts: a Brave window with a throwaway profile opens for a few seconds and closes by itself."
   launch_reason=$(python3 "$root/scripts/groundwork-update.py" check-brave-launch "$(command -v brave)" 2>&1) || launch_status=$?
   if [[ $launch_status -eq 0 ]]; then
-    python3 "$root/scripts/groundwork-update.py" accept-brave >/dev/null
+    # A first acceptance is recorded only after the default step below, so a
+    # run stopped in between checks again and still makes the one switch.
+    if brave_remembered brave-accepted-any; then
+      python3 "$root/scripts/groundwork-update.py" accept-brave >/dev/null
+    else
+      brave_first_acceptance=1
+    fi
     brave_usable=1
     return 0
   fi
@@ -429,8 +442,32 @@ assess_brave() {
     brave_fail 0 "${launch_reason:-Brave did not finish its launch check on this $(brave_page_kib) KiB-page kernel.}"
   fi
 }
+# omarchy-install-browser ends with a blank line and "Brave browser installed.
+# Make it the default via Setup > Defaults > Browser." Groundwork checks Brave
+# next and then sets or keeps the default itself, saying which, so those two
+# lines are dropped. Every other line passes through unchanged.
+brave_install_announcement='Brave browser installed. Make it the default via Setup > Defaults > Browser.'
+run_brave_installer() {
+  local line blank=0 status
+  omarchy-install-browser brave | while IFS= read -r line || [[ -n $line ]]; do
+    if [[ -z $line ]]; then
+      ((blank == 0)) || echo
+      blank=1
+      continue
+    fi
+    if [[ $line == "$brave_install_announcement" ]]; then
+      blank=0
+      continue
+    fi
+    ((blank == 0)) || echo
+    blank=0
+    printf '%s\n' "$line"
+  done
+  status=${PIPESTATUS[0]}
+  return "$status"
+}
 add_and_assess_brave() {
-  if ! omarchy-install-browser brave; then
+  if ! run_brave_installer; then
     echo "omarchy-install-browser brave failed, so Chromium stays the default." >&2
     brave_usable=0
     return 1
@@ -878,7 +915,13 @@ if command -v chromium >/dev/null; then
     fi
     sudo chmod 644 "$extension_dir/$bitwarden_extension"
   fi
-  echo "Bitwarden's official extension is registered. Restart Chromium, approve it if prompted, and sign in in each profile."
+  # Brave's brave-bin reads the same /usr/share/chromium/extensions manifest.
+  # A Brave Flatpak or another brave command does not.
+  if brave_package_command; then
+    echo "Bitwarden's official extension is registered for Chromium and Brave. Restart each of them, approve it if prompted, and sign in in each profile."
+  else
+    echo "Bitwarden's official extension is registered for Chromium. Restart Chromium, approve it if prompted, and sign in in each profile."
+  fi
 else
   echo "Chromium is unavailable; skipped its Bitwarden extension. Rerun setup after installing Chromium."
 fi
@@ -1499,24 +1542,22 @@ migrate_brave_to_omarchy() {
     brave_remembered brave-accepted || true
     add_and_assess_brave || true
   fi
-  if [[ $brave_usable -ne 1 ]]; then
-    echo "Brave is not usable on this kernel, so it was not made the default." >&2
-    return 1
-  fi
+  # The failed check already printed its one line, naming the default.
+  [[ $brave_usable -eq 1 ]] || return 1
   echo "Brave now uses Omarchy's brave-bin package. Chromium stays installed. The Flatpak and ~/.var/app/$brave_flatpak were kept. Import data at brave://settings/importData."
 }
 migrate_default_browser_to_brave() {
-  if ! omarchy-default-browser brave; then
-    echo "omarchy-default-browser brave failed, so the default browser was not changed." >&2
+  local current
+  if ! omarchy default browser brave; then
+    echo "omarchy default browser brave failed, so the default browser was not changed. $(brave_default_sentence)" >&2
     return 1
   fi
-  local current=
-  current=$(omarchy-default-browser 2>/dev/null) || current=
+  current=$(brave_current_default)
   if [[ $current != brave ]]; then
-    echo "omarchy-default-browser brave did not leave Brave as the default." >&2
+    echo "omarchy default browser brave did not leave Brave as the default (the default is ${current:-unknown})." >&2
     return 1
   fi
-  echo "Brave is the default browser. Chromium stays installed. Web apps open in Brave; sign-ins that exist only in Chromium stay there."
+  echo "Brave is the default browser. Chromium stays installed. Web apps open in Brave; sign-ins that exist only in Chromium stay there. To switch back, run omarchy default browser chromium."
 }
 if brave_installer_supports && ! brave_package_command; then
   brave_current=
@@ -1537,20 +1578,34 @@ if brave_installer_supports && ! brave_package_command; then
       migrate_brave_to_omarchy
   fi
 fi
+# Default browser (decision 0015). The first time a brave-bin passes both
+# checks on this page size, and Chromium (Omarchy's own default) is still the
+# default or no default is set (groundwork-core v0.8.0 docs/browser.md), Groundwork
+# runs omarchy default browser brave itself, unless that
+# move was declined before. After that a default the user picks is left alone,
+# and a Brave that is not the default is only offered.
 if [[ $brave_usable -eq 1 ]]; then
   if ! command -v omarchy-default-browser >/dev/null; then
-    echo "omarchy-default-browser is missing, so Brave was not offered as the default. Chromium stays the default." >&2
+    echo "omarchy-default-browser, which omarchy default browser runs, is missing, so Brave was not made the default. Chromium stays the default." >&2
   else
-    brave_default=$(omarchy-default-browser 2>/dev/null) || brave_default=
-    if [[ $brave_default != brave ]]; then
+    brave_default=$(brave_current_default)
+    if [[ $brave_default == brave ]]; then
+      :
+    elif [[ $brave_first_acceptance -eq 1 && ( $brave_default == chromium || -z $brave_default ) ]] &&
+      ! migration_declined default-browser-brave; then
+      migrate_default_browser_to_brave || true
+    else
       brave_default=${brave_default:-nothing}
       offer_omarchy_migration default-browser-brave "Brave" \
         "not the default browser (the default is $brave_default)" \
-        "the default browser via omarchy-default-browser brave" \
-        "This runs omarchy-default-browser brave. Chromium stays installed. Web apps then open in Brave, and sign-ins that exist only in Chromium stay there. To undo, run omarchy-default-browser chromium. Import data at brave://settings/importData if you want it." \
+        "the default browser via omarchy default browser brave" \
+        "This runs omarchy default browser brave. Chromium stays installed. Web apps then open in Brave, and sign-ins that exist only in Chromium stay there. To undo, run omarchy default browser chromium. Import data at brave://settings/importData if you want it." \
         migrate_default_browser_to_brave
     fi
   fi
+fi
+if [[ $brave_first_acceptance -eq 1 && $brave_usable -eq 1 ]]; then
+  python3 "$root/scripts/groundwork-update.py" accept-brave >/dev/null
 fi
 # Save a decline before publishing policy. A symlink refusal exits, and the no
 # from this run has to already be in omarchy.json.

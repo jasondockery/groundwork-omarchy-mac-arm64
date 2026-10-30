@@ -373,6 +373,10 @@ elif name == 'omarchy-install-browser':
     installed.mkdir(exist_ok=True)
     (installed / 'brave-bin').write_text('\\n'.join(files) + '\\n')
     (installed / 'brave-bin.version').write_text(os.environ.get('FIXTURE_BRAVE_VERSION', '1.73.91-1') + '\\n')
+    # The real installer's closing lines.
+    print('Installing Brave...')
+    print('')
+    print('Brave browser installed. Make it the default via Setup > Defaults > Browser.')
 elif name == 'omarchy-remove-browser':
     if args != ['brave']:
         sys.exit(1)
@@ -414,7 +418,22 @@ elif name == 'brave':
         import time
         time.sleep(60)
         sys.exit(0)
-    sys.exit(int(status))
+    if status != '0':
+        sys.exit(int(status))
+    # Answer the launch check's DevTools pipe (fd 3 in, fd 4 out), then exit 0
+    # on Browser.close, as a window that opened and closed cleanly does.
+    buffer = b''
+    while True:
+        chunk = os.read(3, 65536)
+        if not chunk:
+            sys.exit(0)
+        buffer += chunk
+        while b'\\0' in buffer:
+            raw, buffer = buffer.split(b'\\0', 1)
+            message = json.loads(raw)
+            os.write(4, json.dumps({'id': message['id'], 'result': {}}).encode() + b'\\0')
+            if message['method'] == 'Browser.close':
+                sys.exit(0)
 elif name == 'omarchy' and args[1:3] == ['add', 'bitwarden'] and args[:1] == ['pkg']:
     # A package whose bundled Electron ELF and bitwarden command pacman owns.
     status = int(os.environ.get('FIXTURE_BITWARDEN_ADD_STATUS', '0'))
@@ -449,6 +468,12 @@ elif name == 'omarchy' and args[:3] == ['pkg', 'drop', 'bitwarden']:
         owned = root / 'pacman-owned'
         if owned.exists():
             owned.write_text(''.join(line + '\\n' for line in owned.read_text().splitlines() if line.split(' ', 1)[0] not in files))
+elif name == 'omarchy' and args[:2] == ['default', 'browser']:
+    # `omarchy default browser` runs omarchy-default-browser.
+    target = root / 'bin' / 'omarchy-default-browser'
+    if not target.exists():
+        sys.exit(1)
+    sys.exit(subprocess.call([str(target), *args[2:]]))
 elif name == 'omarchy':
     if args[:2] == ['pkg', 'add'] and len(args) > 2 and args[2] in ('ollama', 'ollama-vulkan', 'vulkan-tools'):
         if args[2] == 'ollama':

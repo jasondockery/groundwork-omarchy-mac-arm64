@@ -10,8 +10,10 @@ import os
 from pathlib import Path
 import platform
 import resource
+import select
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tarfile
@@ -58,10 +60,14 @@ MIGRATION_ID_CHARACTERS = frozenset('abcdefghijklmnopqrstuvwxyz0123456789-')
 T3_KNOWN_GOOD_LARGE_PAGE = '0.1.2-nightly.20261021.3499'
 # A downloaded candidate must finish --version inside its temp directory.
 T3_CANDIDATE_SMOKE_SECONDS = 30
-# Private headless launch used to see whether brave-bin starts on this kernel.
-# A 16 KiB-page crash is brave/brave-browser#42312. A timeout is not remembered.
+# Private windowed launch used to see whether brave-bin starts on this kernel
+# and desktop: Wayland, GPU process, and a real window, with a throwaway
+# profile. A 16 KiB-page crash is brave/brave-browser#42312. A timeout is not
+# remembered. The window must answer within BRAVE_LAUNCH_SECONDS, stay up for
+# BRAVE_SETTLE_SECONDS, then close cleanly within BRAVE_CLOSE_SECONDS.
 BRAVE_LAUNCH_SECONDS = 30
-BRAVE_PAGE_ISSUE = 'brave/brave-browser#42312'
+BRAVE_SETTLE_SECONDS = 5
+BRAVE_CLOSE_SECONDS = 15
 # Guard for the only extension the Brave spec may offer. The update URL is read
 # from the spec; this id is the refusal check, not a second copy of the manifest.
 BRAVE_EXTENSION_ID = 'nngceckbapebfimnlniiiahkandclblb'
@@ -693,8 +699,38 @@ def render_brave_extension():
     return json.dumps({'external_update_url': item['updateUrl']}, indent=2) + '\n'
 
 
-def brave_launch_environment(home, tmp, runtime):
-    """Private environment for the headless launch. The caller's variables are not copied.
+def brave_wayland_socket():
+    """Absolute path of this session's Wayland socket, or None.
+
+    WAYLAND_DISPLAY is a name under XDG_RUNTIME_DIR or an absolute path. Only
+    a socket this user owns counts. Passing the absolute path lets the launch
+    keep a private XDG_RUNTIME_DIR.
+    """
+    display = os.environ.get('WAYLAND_DISPLAY', '')
+    if not display:
+        return None
+    if os.path.isabs(display):
+        path = Path(display)
+    else:
+        runtime = os.environ.get('XDG_RUNTIME_DIR', '')
+        if not os.path.isabs(runtime):
+            return None
+        path = Path(runtime) / display
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+        return None
+    return path
+
+
+def brave_launch_environment(home, tmp, runtime, socket):
+    """Private environment for the windowed launch. The caller's variables are not copied.
+
+    The only session value passed on is the Wayland socket, as an absolute
+    path, so Brave can open a window. D-Bus, the keyring, X11, and the
+    caller's runtime directory are not passed.
 
     GROUNDWORK_TESTING=1 is the installer fixture. Only then are INSTALL_FIXTURE
     and FIXTURE_* copied, so the fake brave command can read its knobs. A normal
@@ -709,6 +745,7 @@ def brave_launch_environment(home, tmp, runtime):
         'XDG_CONFIG_HOME': str(home / '.config'),
         'XDG_CACHE_HOME': str(home / '.cache'),
         'XDG_DATA_HOME': str(home / '.local/share'),
+        'WAYLAND_DISPLAY': str(socket),
     }
     if os.environ.get('GROUNDWORK_TESTING') == '1':
         for key, value in os.environ.items():
@@ -717,11 +754,107 @@ def brave_launch_environment(home, tmp, runtime):
     return env
 
 
-def brave_launch_result(binary):
-    """('ok', '') when a private headless launch exits 0.
+class BraveDevTools:
+    """DevTools protocol over --remote-debugging-pipe (fd 3 in, fd 4 out).
 
-    'remember' is a crash of this build. 'transient' is a timeout or other
-    exit, which the next run may try again. The user's profile is not used.
+    No port is opened. Messages are JSON, each followed by a NUL byte.
+    """
+
+    def __init__(self, send_fd, receive_fd):
+        self.send_fd = send_fd
+        self.receive_fd = receive_fd
+        self.buffer = b''
+        self.next_id = 0
+
+    def call(self, method, deadline):
+        """('reply', message), ('closed', None) at EOF, or ('timeout', None)."""
+        self.next_id += 1
+        wanted = self.next_id
+        request = json.dumps({'id': wanted, 'method': method}).encode() + b'\0'
+        try:
+            os.write(self.send_fd, request)
+        except (BrokenPipeError, ConnectionResetError):
+            return 'closed', None
+        while True:
+            while b'\0' in self.buffer:
+                raw, self.buffer = self.buffer.split(b'\0', 1)
+                try:
+                    message = json.loads(raw)
+                except ValueError:
+                    continue
+                if isinstance(message, dict) and message.get('id') == wanted:
+                    return 'reply', message
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return 'timeout', None
+            ready, _, _ = select.select([self.receive_fd], [], [], remaining)
+            if not ready:
+                return 'timeout', None
+            chunk = os.read(self.receive_fd, 65536)
+            if not chunk:
+                return 'closed', None
+            self.buffer += chunk
+
+
+# Run as `python3 -I -S -c BRAVE_FD_SHIM <read fd> <write fd> <brave argv...>`.
+# os.dup2 leaves 3 and 4 inheritable; every other descriptor this interpreter
+# opens is close-on-exec, so Brave gets only 0 to 4.
+BRAVE_FD_SHIM = (
+    'import os, sys\n'
+    'read, write = int(sys.argv[1]), int(sys.argv[2])\n'
+    'os.dup2(read, 3)\n'
+    'os.dup2(write, 4)\n'
+    'os.close(read)\n'
+    'os.close(write)\n'
+    'os.execv(sys.argv[3], sys.argv[3:])\n'
+)
+
+
+def brave_settle_seconds():
+    """BRAVE_SETTLE_SECONDS, or the installer fixture's shorter wait."""
+    if os.environ.get('GROUNDWORK_TESTING') == '1':
+        value = os.environ.get('FIXTURE_BRAVE_SETTLE_SECONDS', '')
+        try:
+            return max(0.0, float(value))
+        except ValueError:
+            pass
+    return BRAVE_SETTLE_SECONDS
+
+
+# Signals a process raises on itself when it crashes: a CHECK (TRAP), abort,
+# or fault. Any other signal (SIGKILL from the OOM killer, SIGTERM or SIGHUP at
+# logout) came from outside and says nothing about this build.
+BRAVE_CRASH_SIGNALS = frozenset({
+    signal.SIGSEGV, signal.SIGTRAP, signal.SIGABRT, signal.SIGBUS, signal.SIGILL, signal.SIGFPE})
+
+
+def brave_exit_result(code, page, when):
+    """Classify a Brave exit code. Only a crash signal is a remembered crash."""
+    kib = page // 1024
+    number = -code if code < 0 else code - 128 if code > 128 else None
+    if number is not None:
+        try:
+            name = signal.Signals(number).name
+        except ValueError:
+            name = f'signal {number}'
+        if number in BRAVE_CRASH_SIGNALS:
+            return ('remember',
+                    f'Brave crashed ({name}) {when} during its launch check on this {kib} KiB-page kernel.')
+        return ('transient',
+                f'Brave was stopped by {name} {when} during its launch check on this {kib} KiB-page kernel. '
+                'That signal came from outside Brave, so the check is tried again next run.')
+    return 'transient', f'Brave exited (exit {code}) {when} during its launch check on this {kib} KiB-page kernel.'
+
+
+def brave_launch_result(binary):
+    """('ok', '') when a private Brave window opens, stays up, and closes with exit 0.
+
+    The launch is the real windowed path: Wayland, the GPU process, and a
+    page, with no --headless and no --disable-gpu. The profile, HOME, and
+    runtime directory are a throwaway temporary directory, and the window is
+    closed through the DevTools pipe. 'remember' is a crash of this build.
+    'transient' is a timeout, a missing desktop session, or another exit,
+    which the next run may try again. The user's profile is not used.
     """
     path = Path(binary)
     if (not path.is_file()) or (path.is_symlink() and not path.exists()):
@@ -729,8 +862,14 @@ def brave_launch_result(binary):
     if not os.access(path, os.X_OK):
         return 'transient', f'{binary} is not executable, so Brave was not shown to start.'
     page = page_size()
+    socket = brave_wayland_socket()
+    if socket is None:
+        return ('transient',
+                'Brave was not launch-checked because this run has no Wayland desktop session '
+                '(WAYLAND_DISPLAY). Run update-all from a terminal on the desktop to check it.')
     parent = tempfile.mkdtemp(prefix='groundwork-brave-launch-')
     process = None
+    pipes = []
     try:
         home = Path(parent) / 'home'
         tmp = Path(parent) / 'tmp'
@@ -739,48 +878,78 @@ def brave_launch_result(binary):
         for directory in (home, tmp, runtime, profile, home / '.config', home / '.cache', home / '.local/share'):
             directory.mkdir(parents=True, exist_ok=True)
             os.chmod(directory, 0o700)
-        env = brave_launch_environment(home, tmp, runtime)
+        env = brave_launch_environment(home, tmp, runtime, socket)
+        # Every pipe end sits at fd 10 or above, so moving the child's ends
+        # onto 3 and 4 cannot close one of them first.
+        for descriptor in os.pipe() + os.pipe():
+            pipes.append(fcntl.fcntl(descriptor, fcntl.F_DUPFD_CLOEXEC, 10))
+            os.close(descriptor)
+        to_brave_read, to_brave_write, from_brave_read, from_brave_write = pipes
         argv = [
             str(path),
-            '--headless=new',
-            '--disable-gpu',
+            '--ozone-platform=wayland',
+            '--password-store=basic',
             '--no-first-run',
             '--no-default-browser-check',
             '--disable-extensions',
+            '--disable-background-networking',
+            '--disable-component-update',
             f'--user-data-dir={profile}',
-            '--dump-dom',
+            '--remote-debugging-pipe',
             'about:blank',
         ]
+        # --remote-debugging-pipe reads fd 3 and writes fd 4. subprocess closes
+        # every other descriptor after preexec_fn, so this interpreter moves
+        # the two pipe ends into place, closes the originals, and execs Brave.
+        # Not /bin/sh: dash, Debian's and Ubuntu's sh, rejects redirections of
+        # descriptors above 9, and both ends sit at 10 or above.
         process = subprocess.Popen(
-            argv, env=env, cwd=parent, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            [sys.executable, '-I', '-S', '-c', BRAVE_FD_SHIM,
+             str(to_brave_read), str(from_brave_write), *argv],
+            env=env, cwd=parent, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, pass_fds=(to_brave_read, from_brave_write),
             start_new_session=True, preexec_fn=disable_core_dumps)
-        try:
-            process.communicate(timeout=BRAVE_LAUNCH_SECONDS)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.communicate()
+        os.close(to_brave_read)
+        os.close(from_brave_write)
+        pipes = [to_brave_write, from_brave_read]
+        devtools = BraveDevTools(to_brave_write, from_brave_read)
+
+        outcome, _reply = devtools.call('Browser.getVersion', time.monotonic() + BRAVE_LAUNCH_SECONDS)
+        if outcome == 'timeout':
             return ('transient',
-                    f'Brave did not finish a headless launch within {BRAVE_LAUNCH_SECONDS} seconds '
+                    f'Brave did not open its test window within {BRAVE_LAUNCH_SECONDS} seconds '
                     f'on this {page // 1024} KiB-page kernel.')
-        code = process.returncode
-        if code == 0:
-            return 'ok', ''
-        number = -code if code < 0 else code - 128 if code > 128 else None
-        if number is not None:
+        if outcome == 'closed':
             try:
-                signal.Signals(number)
-                name = signal.Signals(number).name
-            except ValueError:
-                name = f'signal {number}'
-            return ('remember',
-                    f'Brave crashed during launch ({name}) on this {page // 1024} KiB-page kernel '
-                    f'({BRAVE_PAGE_ISSUE}).')
-        return ('transient',
-                f'Brave\'s headless launch failed (exit {code}) on this {page // 1024} KiB-page kernel.')
+                process.wait(timeout=BRAVE_CLOSE_SECONDS)
+            except subprocess.TimeoutExpired:
+                return 'transient', 'Brave closed its DevTools pipe without exiting during its launch check.'
+            return brave_exit_result(process.returncode, page, 'while opening a window')
+
+        # The window is up. Let the GPU process and the first page run.
+        settle = time.monotonic() + brave_settle_seconds()
+        while time.monotonic() < settle and process.poll() is None:
+            time.sleep(0.1)
+        if process.poll() is not None:
+            return brave_exit_result(process.returncode, page, 'with its window open')
+
+        close_deadline = time.monotonic() + BRAVE_CLOSE_SECONDS
+        devtools.call('Browser.close', close_deadline)
+        try:
+            process.wait(timeout=max(0.1, close_deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            return ('transient',
+                    f'Brave did not close its test window within {BRAVE_CLOSE_SECONDS} seconds '
+                    f'on this {page // 1024} KiB-page kernel.')
+        if process.returncode == 0:
+            return 'ok', ''
+        return brave_exit_result(process.returncode, page, 'while closing its window')
     finally:
+        for descriptor in pipes:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
         if process is not None and process.poll() is None:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
@@ -790,6 +959,12 @@ def brave_launch_result(binary):
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 process.kill()
+        if process is not None:
+            # Helpers Brave started in the same session (zygote, GPU, crashpad).
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
         shutil.rmtree(parent, ignore_errors=True)
 
 
@@ -948,6 +1123,16 @@ def brave_memory_status(path):
     version = brave_version()
     versions = [] if document is None else document.get(str(page_size()), [])
     return 0 if version and version in versions else 1
+
+
+def brave_any_accepted_status():
+    """0 when any brave-bin version passed on this page size, 1 when none, 2 when the file is unusable."""
+    try:
+        document = remembered_version_document(accepted_brave_path())
+    except UpdateError as error:
+        print(f'{error} Setup stopped before installing Brave.', file=sys.stderr)
+        return 2
+    return 0 if document and document.get(str(page_size())) else 1
 
 
 def brave_version():
@@ -1581,6 +1766,8 @@ def main(args):
         return brave_memory_status(rejected_brave_path())
     if args and args[0] == 'brave-accepted' and len(args) == 1:
         return brave_memory_status(accepted_brave_path())
+    if args and args[0] == 'brave-accepted-any' and len(args) == 1:
+        return brave_any_accepted_status()
     if args and args[0] == 'reject-brave' and len(args) == 1:
         version = brave_version()
         if not version:
