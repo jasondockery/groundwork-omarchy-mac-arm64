@@ -646,6 +646,16 @@ def load_record():
             raise ListError('Omarchy plugin install record is invalid; plugin changes were skipped.')
         if pending:
             item['enablePending'] = True
+        tries = entry.get('enableTries')
+        if tries is not None:
+            if type(tries) is not int or not 1 <= tries <= 9 or not pending:
+                raise ListError('Omarchy plugin install record is invalid; plugin changes were skipped.')
+            item['enableTries'] = tries
+        rejected = entry.get('rejected', False)
+        if type(rejected) is not bool or (rejected and (pending or replaced or marks)):
+            raise ListError('Omarchy plugin install record is invalid; plugin changes were skipped.')
+        if rejected:
+            item['rejected'] = True
         setup = entry.get('setup')
         if setup is not None:
             if (type(setup) is not dict or not valid_setup_command(setup.get('command'))
@@ -743,6 +753,76 @@ def failure_text(outcome):
         return flat(outcome)
     detail = (outcome.stderr or outcome.stdout or '').strip().splitlines()
     return flat(detail[0]) if detail else f'exit {outcome.returncode}'
+
+
+def known_wait():
+    """Seconds to wait for the running shell to list a plugin after a rescan."""
+    try:
+        return max(0.0, float(os.environ.get('GROUNDWORK_PLUGIN_RESCAN_WAIT', '10')))
+    except ValueError:
+        return 10.0
+
+
+# Ids the running shell never listed, so they could not be enabled this run.
+NOT_LISTED = []
+# Runs (the first and its retries) a checkout may wait for the shell to list it.
+ENABLE_TRY_LIMIT = 3
+# Set once a wait for the shell's listing ran out in this run.
+WAIT_STATE = {'timed_out': False}
+# Plugins that used up their tries; rejected at the end of the run if the shell is healthy.
+REJECT_CANDIDATES = []
+
+
+def wait_until_listed(plugin_id):
+    """Rescan once, then poll until the shell lists a plugin. False when it never does.
+
+    `omarchy plugin add` asks the shell to rescan but does not wait for it, so
+    `omarchy plugin enable` can run before the shell lists the new checkout and
+    refuse it as not known. Each rescan reloads every panel and widget, so ask
+    once and only poll afterwards. A listing that cannot be read is not a reason
+    to hold back: enable reports its own error.
+    """
+    if WAIT_STATE['timed_out']:
+        # One wait already ran out this run: later checkouts get a single look.
+        known = plugin_states()
+        return known is None or plugin_id in known
+    deadline = time.monotonic() + known_wait()
+    try:
+        subprocess.run(['omarchy-shell', 'shell', 'rescanPlugins'], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    while True:
+        known = plugin_states()
+        if known is None or plugin_id in known:
+            return True
+        if time.monotonic() >= deadline:
+            WAIT_STATE['timed_out'] = True
+            return False
+        time.sleep(0.2)
+
+
+def is_unknown_failure(outcome):
+    return not isinstance(outcome, Exception) and 'is not known' in (outcome.stderr or outcome.stdout or '')
+
+
+def enable_cloned(item):
+    """Enable a cloned plugin, giving the shell time to list a fresh checkout.
+
+    Returns None on success, 'unlisted' when the shell never listed it, and the
+    failure text otherwise. A plugin the shell never lists does not hold back the
+    entries after it: each one is added and tried on its own.
+    """
+    plugin_id = item['id']
+    outcome = run_omarchy(enable_command(item), 60)
+    if is_unknown_failure(outcome):
+        if wait_until_listed(plugin_id):
+            outcome = run_omarchy(enable_command(item), 60)
+        if is_unknown_failure(outcome):
+            NOT_LISTED.append(plugin_id)
+            return 'unlisted'
+    if command_failed(outcome):
+        return failure_text(outcome)
+    return None
 
 
 def plugin_path(plugin_id):
@@ -972,9 +1052,14 @@ def install_checked_out(record, item, directory, sudo_state, pending_first):
     """Enable a checkout this run created, then run setup when it is due."""
     if pending_first:
         remember(record, item['id'], item['repo'], enable_pending=True)
-    outcome = run_omarchy(enable_command(item), 60)
-    if command_failed(outcome):
-        say(f"Omarchy plugin {item['id']} enable failed: {failure_text(outcome)}.")
+    failure = enable_cloned(item)
+    if failure == 'unlisted':
+        # The checkout is fine; keep it and retry enable on the next run.
+        remember(record, item['id'], item['repo'], enable_pending=True)['enableTries'] = 1
+        save_record(record)
+        return
+    if failure:
+        say(f"Omarchy plugin {item['id']} enable failed: {failure}.")
         hold_for_enable_retry(record, item['id'], item['repo'])
         return
     recorded = remember(record, item['id'], item['repo'])
@@ -990,6 +1075,7 @@ def remember(record, plugin_id, repo, enable_pending=False):
         current['enablePending'] = True
     else:
         current.pop('enablePending', None)
+        current.pop('enableTries', None)
     record['plugins'][plugin_id] = current
     save_record(record)
     return record['plugins'][plugin_id]
@@ -1050,6 +1136,11 @@ def apply_plugins(updating):
         parts.append('arch ' + ', '.join(arch_skipped))
     if excluded:
         parts.append('excluded ' + ', '.join(excluded))
+    rejected = [item['id'] for item in selected
+                if record['plugins'].get(item['id'], {}).get('rejected')
+                and record['plugins'][item['id']].get('repo') == item['repo']]
+    if rejected:
+        parts.append('rejected by the shell ' + ', '.join(rejected))
     if parts:
         say('Skipped Omarchy plugins: ' + '; '.join(parts) + '.')
 
@@ -1158,6 +1249,34 @@ def apply_plugins(updating):
             apply_replacements(record, item, states, exclusions)
     if deferred:
         say('Omarchy shell is not running; deferred plugin changes: ' + ', '.join(deferred) + '.')
+    reject_unlisted(record)
+    if NOT_LISTED:
+        say(f'{len(NOT_LISTED)} plugin(s) not installed or enabled: the shell did not list them after a rescan. '
+            'Run omarchy-restart-shell, then update-all again.')
+
+
+def reject_unlisted(record):
+    """Remember plugins the shell never listed, once the shell proves it lists others.
+
+    A rejected plugin keeps a record with no checkout, so no later run clones it
+    again until its list entry changes. When the shell lists no other third-party
+    plugin, it may be the shell that is broken, so nothing is rejected.
+    """
+    if not REJECT_CANDIDATES:
+        return
+    known = plugin_states()
+    ids = {item['id'] for item in REJECT_CANDIDATES}
+    if known is None or not any(not first_party for plugin_id, (_, first_party) in known.items() if plugin_id not in ids):
+        return
+    for item in REJECT_CANDIDATES:
+        plugin_id = item['id']
+        if not remove_checkout(plugin_id):
+            continue
+        record['plugins'][plugin_id] = {'repo': item['repo'], 'rejected': True}
+        save_record(record)
+        if plugin_id in NOT_LISTED:
+            NOT_LISTED.remove(plugin_id)
+        say(f'Omarchy plugin {plugin_id} was rejected: the shell never listed it. It stays uninstalled until its list entry changes.')
 
 
 def apply_builtin(record, item, states):
@@ -1203,7 +1322,7 @@ def listing_ready(known):
 def applied(record, plugin_id):
     """True when this layer recorded plugin_id and its enable finished."""
     held = record['plugins'].get(plugin_id)
-    return held is not None and not held.get('enablePending')
+    return held is not None and not held.get('enablePending') and not held.get('rejected')
 
 
 def takes_over(record, plugin_id, other, known, exclusions):
@@ -1464,6 +1583,13 @@ def install_plugin(record, item, updating, shell_up, deferred, sudo_state):
     if directory.is_symlink():
         say(f'Omarchy plugin {plugin_id} was not changed; its path is a symbolic link.')
         return
+    if recorded is not None and recorded.get('rejected'):
+        if recorded.get('repo') == item['repo']:
+            return
+        # The list entry changed, so the shell gets another chance at it.
+        record['plugins'].pop(plugin_id, None)
+        save_record(record)
+        recorded = None
     if path_exists(directory):
         pending = bool(recorded and recorded.get('enablePending'))
         if updating or pending:
@@ -1478,11 +1604,18 @@ def install_plugin(record, item, updating, shell_up, deferred, sudo_state):
                     if command_failed(outcome):
                         say(f'Omarchy plugin {plugin_id} update failed: {failure_text(outcome)}.')
                 if pending:
-                    outcome = run_omarchy(enable_command(item), 60)
-                    if command_failed(outcome):
-                        say(f'Omarchy plugin {plugin_id} enable failed: {failure_text(outcome)}.')
+                    failure = enable_cloned(item)
+                    if failure == 'unlisted':
+                        tries = recorded.get('enableTries', 1) + 1
+                        recorded['enableTries'] = min(tries, ENABLE_TRY_LIMIT)
+                        save_record(record)
+                        if tries >= ENABLE_TRY_LIMIT:
+                            REJECT_CANDIDATES.append(item)
+                    elif failure:
+                        say(f'Omarchy plugin {plugin_id} enable failed: {failure}.')
                     else:
                         recorded.pop('enablePending', None)
+                        recorded.pop('enableTries', None)
                         save_record(record)
         if recorded is not None and not recorded.get('enablePending') and item.get('setup'):
             current_head = git_head(directory)
