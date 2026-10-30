@@ -418,19 +418,16 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual((self.source / 'core/browser/brave.json').read_text(), spec)
 
     def main_updater_text(self):
-        """The updater update-all still execs until a successful apply replaces it."""
-        spec = 'origin/main:scripts/groundwork-update.py'
-        show = subprocess.run(['git', '-C', str(REPO), 'show', spec], capture_output=True, text=True)
-        if show.returncode != 0:
-            subprocess.run(
-                ['git', '-C', str(REPO), 'fetch', '--no-tags', '--depth=1', 'origin',
-                 '+refs/heads/main:refs/remotes/origin/main'],
-                check=True, timeout=120, env=dict(os.environ, GIT_TERMINAL_PROMPT='0'))
-            show = subprocess.run(['git', '-C', str(REPO), 'show', spec], capture_output=True, text=True)
-            show.check_returncode()
-        if 'def checkout_core' in show.stdout:
-            raise AssertionError('origin/main now checks out core; point this fixture at the pre-change updater')
-        return show.stdout
+        """The updater update-all still execs until a successful apply replaces it.
+
+        This is scripts/groundwork-update.py from d65ca1f, the last revision before
+        checkout_core was added (#74). CI checks out a single commit, so it is kept
+        as a fixture file instead of read from git.
+        """
+        text = (REPO / 'tests/fixtures/groundwork-update-before-core.py').read_text()
+        if 'def checkout_core' in text:
+            raise AssertionError('the fixture must be an updater from before checkout_core existed')
+        return text
 
     def test_update_all_from_mains_installed_updater_checks_out_core(self):
         # Protects: an already-set-up machine whose update-all is still main's
