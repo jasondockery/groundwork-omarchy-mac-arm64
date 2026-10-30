@@ -291,7 +291,7 @@ class BraveInstallTests(unittest.TestCase):
         self.assertEqual(self.remembered('brave-accepted.json'), ['1.73.91-1'])
 
     def test_an_unset_default_is_switched_once(self):
-        # No default set counts as one the person did not choose (core v0.8.0).
+        # No default set counts as one the person did not choose (groundwork-core).
         self.env['FIXTURE_DEFAULT_BROWSER'] = ''
         result = self.run_install('--without-keyd', '--without-screen-sharing')
         self.assertIn(OMARCHY_SET_DEFAULT, self.calls())

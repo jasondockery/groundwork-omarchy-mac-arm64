@@ -1587,7 +1587,7 @@ if brave_installer_supports && ! brave_package_command; then
 fi
 # Default browser (decision 0015). The first time a brave-bin passes both
 # checks on this page size, and Chromium (Omarchy's own default) is still the
-# default or no default is set (groundwork-core v0.8.0 docs/browser.md), Groundwork
+# default or no default is set (groundwork-core docs/browser.md), Groundwork
 # runs omarchy default browser brave itself, unless that
 # move was declined before. After that a default the user picks is left alone,
 # and a Brave that is not the default is only offered.
