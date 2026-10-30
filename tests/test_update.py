@@ -489,7 +489,8 @@ class UpdateTests(unittest.TestCase):
         self.command('git', '-C', str(self.seed / 'core'), 'checkout', new)
         (self.seed / 'scripts/apply-layer.sh').write_text(script)
         for name in ('seed-obsidian.py', 'groundwork-screen-share.py',
-                     'groundwork-syncthing.py', 'omarchy-plugins.py'):
+                     'groundwork-syncthing.py', 'omarchy-plugins.py',
+                     'groundwork-session-env.py'):
             (self.seed / 'scripts' / name).write_text('# fixture\n')
         self.commit(self.seed)
         self.command('git', '-C', str(self.seed), 'push', 'origin', 'main')

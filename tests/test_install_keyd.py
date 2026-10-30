@@ -1093,7 +1093,7 @@ raise SystemExit(os.WEXITSTATUS(status))
         calls = self.calls()
         self.assertNotIn(['omarchy', 'pkg', 'add', 'cursor-bin'], calls)
         self.assertNotIn(['omarchy-install-cursor'], calls)
-        self.assertFalse(any(call[0] == 'mise' for call in calls))
+        self.assertFalse(any(call[0] == 'mise' and call != ['mise', 'install', 'node'] for call in calls))
         saved = json.loads(argv.read_text())
         self.assertEqual(saved['password-store'], 'gnome-libsecret')
         self.assertTrue(saved['disable-hardware-acceleration'])
@@ -1188,7 +1188,9 @@ raise SystemExit(os.WEXITSTATUS(status))
         (self.bin / 'grok').unlink()
         self.run_install()
         self.assertIn(['mise', 'install', 'grok'], self.calls())
-        self.assertFalse((self.root / 'home/.config/mise/config.toml').exists())
+        # Only the Node pin (decision 0016) may be written; the provider is not.
+        config = self.root / 'home/.config/mise/config.toml'
+        self.assertNotIn('grok', config.read_text() if config.exists() else '')
 
     def test_failed_agent_install_stops_before_hyprland_changes(self):
         (self.bin / 'grok').unlink()

@@ -156,8 +156,8 @@ fi
 
 # Fail before installing packages or moving files when the checkout is incomplete.
 # The Bitwarden extension id and Brave policies are read from core, not a copy here.
-[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$root/core/browser/brave.json" && ! -L "$root/core/browser/brave.json" ]] || {
-  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, or Brave spec is missing." >&2
+[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$root/scripts/groundwork-session-env.py" && -f "$root/core/browser/brave.json" && ! -L "$root/core/browser/brave.json" ]] || {
+  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, session environment helper, or Brave spec is missing." >&2
   exit 1
 }
 
@@ -980,6 +980,17 @@ fi
 # after it updates T3, so an update run leaves it to that step.
 if [[ $updating -eq 0 ]]; then
   python3 "$root/scripts/groundwork-t3-launcher.py" reconcile || echo "T3 Code launcher check failed; setup continues." >&2
+fi
+
+# Desktop-launched apps (T3 Code and the agents it starts) never run `mise activate`,
+# so /usr/bin/node beats mise's Node. Decision 0016. A failure here never stops setup.
+session_env_status=0
+python3 "$root/scripts/groundwork-session-env.py" apply || session_env_status=$?
+if [[ $session_env_status -eq 3 ]] && command -v mise >/dev/null; then
+  timeout --kill-after=5s 600 mise install node </dev/null ||
+    echo "mise could not install the pinned Node yet; its shim installs it on first use, or run: mise install node" >&2
+elif [[ $session_env_status -ne 0 && $session_env_status -ne 3 ]]; then
+  echo "Session tool path check failed; setup continues." >&2
 fi
 
 python3 "$root/scripts/seed-obsidian.py" "${GROUNDWORK_OBSIDIAN_VAULT:-$HOME/Documents/Obsidian/my_obsidian_vault}"
