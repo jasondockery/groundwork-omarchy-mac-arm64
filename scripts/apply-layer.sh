@@ -1,8 +1,9 @@
 #!/bin/bash
 # Link the personal Hyprland override into $HOME.
 # For any Apple Silicon Omarchy Mac (aarch64). Reads the core/ checkout and
-# does not write it. Does not touch Git config, SSH, groundwork-mac, or
-# /usr/share/omarchy.
+# does not write it. Does not touch SSH, groundwork-mac, or /usr/share/omarchy.
+# Its only Git config write is an includeIf in ~/.config/git/config that enables
+# the commit identity guard hooks in owned repositories (decision 0017).
 set -euo pipefail
 
 usage() {
@@ -178,8 +179,8 @@ fi
 
 # Fail before installing packages or moving files when the checkout is incomplete.
 # The Bitwarden extension id and Brave policies are read from core, not a copy here.
-[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$root/scripts/groundwork-node-pin.py" && -f "$root/core/browser/brave.json" && ! -L "$root/core/browser/brave.json" ]] || {
-  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, Node pin helper, or Brave spec is missing." >&2
+[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$root/scripts/groundwork-node-pin.py" && -f "$root/scripts/groundwork-commit-guard.py" && -f "$root/core/browser/brave.json" && ! -L "$root/core/browser/brave.json" ]] || {
+  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, Node pin helper, commit guard helper, or Brave spec is missing." >&2
   exit 1
 }
 
@@ -1369,6 +1370,13 @@ install_local_inference() {
 if [[ $with_local_inference -eq 1 ]]; then
   install_local_inference
 fi
+
+# Commit identity guard (decision 0017, groundwork-core/docs/commit-identity.md). User-level
+# hooks call the pinned core script in place, are enabled only in owned repositories via includeIf,
+# and Claude Code attribution is filled in only where unset. Opt out with
+# groundwork-commit-guard off. A failure here is reported but does not stop setup.
+python3 "$root/scripts/groundwork-commit-guard.py" apply --guard "$root/core/commit-guard/commit-identity-guard.sh" ||
+  echo "The commit identity guard was not fully applied. Run groundwork-update after fixing the message above." >&2
 
 # Opt-in, per-user git-filter-repo for history purges. See docs/git-filter-repo.md. The helper
 # never needs root and never runs a history rewrite.
