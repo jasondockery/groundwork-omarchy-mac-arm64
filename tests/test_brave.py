@@ -270,6 +270,26 @@ class BraveInstallTests(unittest.TestCase):
         self.assertIn(OMARCHY_SET_DEFAULT, self.calls())
         self.assertEqual((self.root / 'default-browser').read_text().strip(), 'brave')
 
+    def test_a_saved_decline_stops_the_first_automatic_switch(self):
+        # A transient first check leaves Brave installed and unaccepted, and saves choices.
+        self.env['FIXTURE_BRAVE_LAUNCH_STATUS'] = '1'
+        self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertEqual(self.remembered('brave-accepted.json'), [])
+        config = self.root / 'home/.config/groundwork/omarchy.json'
+        saved = json.loads(config.read_text())
+        saved['declined_migrations'] = ['default-browser-brave']
+        config.write_text(json.dumps(saved) + '\n')
+        self.env['FIXTURE_BRAVE_LAUNCH_STATUS'] = '0'
+        self.reset_calls()
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertNotIn(OMARCHY_SET_DEFAULT, self.calls())
+        self.assertNotIn(SET_DEFAULT, self.calls())
+        self.assertIn('as you chose', result.stdout)
+        self.assertNotIn('Brave is the default browser.', result.stdout)
+        self.assertFalse((self.root / 'default-browser').exists())
+        # The first acceptance is still recorded after the default step.
+        self.assertEqual(self.remembered('brave-accepted.json'), ['1.73.91-1'])
+
     def test_a_default_other_than_chromium_is_only_offered(self):
         self.env['FIXTURE_DEFAULT_BROWSER'] = 'firefox'
         result = self.run_install('--without-keyd', '--without-screen-sharing')
@@ -700,7 +720,8 @@ class BraveSpecTests(unittest.TestCase):
             for arg in sys.argv[1:]:
                 handle.write(f'ARG {{arg}}\\n')
         def die(number):
-            signal.signal(number, signal.SIG_DFL)
+            if number != signal.SIGKILL:
+                signal.signal(number, signal.SIG_DFL)
             os.kill(os.getpid(), number)
             time.sleep(5)
         if MODE == 'crash-open':
@@ -730,6 +751,10 @@ class BraveSpecTests(unittest.TestCase):
                 os.write(4, json.dumps({{'id': message['id'], 'result': {{'product': 'Fake/1'}}}}).encode() + b'\\0')
                 if MODE == 'crash-window':
                     die(signal.SIGTRAP)
+                if MODE == 'killed-window':
+                    die(signal.SIGKILL)
+                if MODE == 'terminated-window':
+                    die(signal.SIGTERM)
         """)
 
     def launch(self, mode, **constants):
@@ -807,6 +832,20 @@ class BraveSpecTests(unittest.TestCase):
                 self.assertEqual(kind, 'remember', message)
                 self.assertIn(name, message)
                 self.assertIn(when, message)
+
+    def test_a_signal_from_outside_brave_is_retried_not_remembered(self):
+        # SIGKILL from the OOM killer or SIGTERM at logout says nothing about the build.
+        for mode, name in (('killed-window', 'SIGKILL'), ('terminated-window', 'SIGTERM')):
+            with self.subTest(mode=mode):
+                (kind, message), _record, _socket, _leak = self.launch(mode)
+                self.assertEqual(kind, 'transient', message)
+                self.assertIn(name, message)
+                self.assertIn('tried again next run', message)
+        for code, kind in ((-9, 'transient'), (137, 'transient'), (143, 'transient'), (-15, 'transient'),
+                           (-11, 'remember'), (133, 'remember'), (134, 'remember'), (-7, 'remember'),
+                           (-4, 'remember'), (136, 'remember')):
+            with self.subTest(code=code):
+                self.assertEqual(updater.brave_exit_result(code, 16384, 'while testing')[0], kind)
 
     def test_launch_failures_that_are_not_signals_are_retried(self):
         cases = (

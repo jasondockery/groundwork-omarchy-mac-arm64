@@ -807,8 +807,15 @@ def brave_settle_seconds():
     return BRAVE_SETTLE_SECONDS
 
 
+# Signals a process raises on itself when it crashes: a CHECK (TRAP), abort,
+# or fault. Any other signal (SIGKILL from the OOM killer, SIGTERM or SIGHUP at
+# logout) came from outside and says nothing about this build.
+BRAVE_CRASH_SIGNALS = frozenset({
+    signal.SIGSEGV, signal.SIGTRAP, signal.SIGABRT, signal.SIGBUS, signal.SIGILL, signal.SIGFPE})
+
+
 def brave_exit_result(code, page, when):
-    """Classify a Brave exit code. A signal is a remembered crash."""
+    """Classify a Brave exit code. Only a crash signal is a remembered crash."""
     kib = page // 1024
     number = -code if code < 0 else code - 128 if code > 128 else None
     if number is not None:
@@ -816,8 +823,12 @@ def brave_exit_result(code, page, when):
             name = signal.Signals(number).name
         except ValueError:
             name = f'signal {number}'
-        return ('remember',
-                f'Brave crashed ({name}) {when} during its launch check on this {kib} KiB-page kernel.')
+        if number in BRAVE_CRASH_SIGNALS:
+            return ('remember',
+                    f'Brave crashed ({name}) {when} during its launch check on this {kib} KiB-page kernel.')
+        return ('transient',
+                f'Brave was stopped by {name} {when} during its launch check on this {kib} KiB-page kernel. '
+                'That signal came from outside Brave, so the check is tried again next run.')
     return 'transient', f'Brave exited (exit {code}) {when} during its launch check on this {kib} KiB-page kernel.'
 
 

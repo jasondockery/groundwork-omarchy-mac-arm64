@@ -421,8 +421,13 @@ assess_brave() {
   echo "Checking that Brave starts: a Brave window with a throwaway profile opens for a few seconds and closes by itself."
   launch_reason=$(python3 "$root/scripts/groundwork-update.py" check-brave-launch "$(command -v brave)" 2>&1) || launch_status=$?
   if [[ $launch_status -eq 0 ]]; then
-    brave_remembered brave-accepted-any || brave_first_acceptance=1
-    python3 "$root/scripts/groundwork-update.py" accept-brave >/dev/null
+    # A first acceptance is recorded only after the default step below, so a
+    # run stopped in between checks again and still makes the one switch.
+    if brave_remembered brave-accepted-any; then
+      python3 "$root/scripts/groundwork-update.py" accept-brave >/dev/null
+    else
+      brave_first_acceptance=1
+    fi
     brave_usable=1
     return 0
   fi
@@ -1596,6 +1601,9 @@ if [[ $brave_usable -eq 1 ]]; then
         migrate_default_browser_to_brave
     fi
   fi
+fi
+if [[ $brave_first_acceptance -eq 1 && $brave_usable -eq 1 ]]; then
+  python3 "$root/scripts/groundwork-update.py" accept-brave >/dev/null
 fi
 # Save a decline before publishing policy. A symlink refusal exits, and the no
 # from this run has to already be in omarchy.json.
