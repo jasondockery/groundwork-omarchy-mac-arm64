@@ -839,6 +839,24 @@ class BraveSpecTests(unittest.TestCase):
         self.assertIn('groundwork-brave-launch-', data_dir)
         self.assertFalse(Path(data_dir.split('=', 1)[1]).exists())
 
+    def test_launch_does_not_depend_on_the_system_shell(self):
+        # dash, /bin/sh on Debian and Ubuntu, rejects redirections of fds above 9,
+        # and the DevTools pipe ends sit at 10 or above. No shell may move them.
+        real = subprocess.Popen
+        seen = []
+
+        def spy(argv, *args, **kwargs):
+            seen.append(list(argv))
+            return real(argv, *args, **kwargs)
+
+        with patch.object(updater.subprocess, 'Popen', side_effect=spy):
+            (kind, message), _record, _socket, _leak = self.launch('ok')
+        self.assertEqual((kind, message), ('ok', ''))
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0][0], sys.executable)
+        self.assertFalse(any(Path(arg).name in ('sh', 'bash', 'dash') for arg in seen[0][:5]), seen[0])
+        self.assertTrue(all(int(fd) > 9 for fd in seen[0][5:7]), seen[0])
+
     def test_launch_signals_are_remembered_crashes(self):
         for mode, name, when in (('crash-open', 'SIGSEGV', 'while opening a window'),
                                  ('crash-window', 'SIGTRAP', 'with its window open'),

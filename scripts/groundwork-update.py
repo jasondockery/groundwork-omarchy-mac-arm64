@@ -796,6 +796,20 @@ class BraveDevTools:
             self.buffer += chunk
 
 
+# Run as `python3 -I -S -c BRAVE_FD_SHIM <read fd> <write fd> <brave argv...>`.
+# os.dup2 leaves 3 and 4 inheritable; every other descriptor this interpreter
+# opens is close-on-exec, so Brave gets only 0 to 4.
+BRAVE_FD_SHIM = (
+    'import os, sys\n'
+    'read, write = int(sys.argv[1]), int(sys.argv[2])\n'
+    'os.dup2(read, 3)\n'
+    'os.dup2(write, 4)\n'
+    'os.close(read)\n'
+    'os.close(write)\n'
+    'os.execv(sys.argv[3], sys.argv[3:])\n'
+)
+
+
 def brave_settle_seconds():
     """BRAVE_SETTLE_SECONDS, or the installer fixture's shorter wait."""
     if os.environ.get('GROUNDWORK_TESTING') == '1':
@@ -885,12 +899,13 @@ def brave_launch_result(binary):
             'about:blank',
         ]
         # --remote-debugging-pipe reads fd 3 and writes fd 4. subprocess closes
-        # every other descriptor after preexec_fn, so /bin/sh moves the two
-        # pipe ends into place and closes the originals before exec.
-        shim = (f'exec "$@" 3<&{to_brave_read} 4>&{from_brave_write} '
-                f'{to_brave_read}<&- {from_brave_write}>&-')
+        # every other descriptor after preexec_fn, so this interpreter moves
+        # the two pipe ends into place, closes the originals, and execs Brave.
+        # Not /bin/sh: dash, Debian's and Ubuntu's sh, rejects redirections of
+        # descriptors above 9, and both ends sit at 10 or above.
         process = subprocess.Popen(
-            ['/bin/sh', '-c', shim, 'brave-launch-check', *argv],
+            [sys.executable, '-I', '-S', '-c', BRAVE_FD_SHIM,
+             str(to_brave_read), str(from_brave_write), *argv],
             env=env, cwd=parent, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, pass_fds=(to_brave_read, from_brave_write),
             start_new_session=True, preexec_fn=disable_core_dumps)
