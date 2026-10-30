@@ -70,7 +70,7 @@ Remove that drop-in, run `daemon-reload`, and restart the service to turn the sw
 
 WayVNC shares the clipboard on its own. It has no clipboard config key, so this layer has nothing to switch on. It reads and writes the Wayland clipboard through `ext-data-control-v1` or `wlr-data-control`, which Hyprland provides. WayVNC 0.10 and neatvnc 1.0 speak both the classic RFB cut-text messages and the TigerVNC-style extended clipboard (UTF-8, text only). The classic messages carry Latin-1, so a client that only uses them cannot carry other characters.
 
-macOS Screen Sharing is the weak link. Apple documents Edit > Use Shared Clipboard only for Mac-to-Mac sessions, and nothing in WayVNC's or neatvnc's source treats an Apple client specially. Whether Screen Sharing sends or accepts any clipboard message against WayVNC is not established. Treat copy and paste as unsupported with Screen Sharing.app until a live check says otherwise. Mouse, keyboard and the Command/Option mapping above are unaffected.
+macOS Screen Sharing is the weak link. Apple documents Edit > Use Shared Clipboard only for sharing between two Macs ([Apple Support: Share the screen of another Mac](https://support.apple.com/guide/mac-help/share-the-screen-of-another-mac-mh14066/mac)), and nothing in WayVNC's or neatvnc's source treats an Apple client specially. Whether Screen Sharing sends or accepts any clipboard message against WayVNC is not established. Treat copy and paste as unsupported with Screen Sharing.app until a live check says otherwise. Mouse, keyboard and the Command/Option mapping above are unaffected.
 
 Workarounds, in order of effort:
 
@@ -78,9 +78,11 @@ Workarounds, in order of effort:
 - Keep Screen Sharing and move text over SSH. Run these on the Mac, replacing `LOCAL_USER` and `MACHINE`. The Wayland variables are needed because an SSH shell has no desktop session; the socket name `wayland-1` is the usual one, so check `ls /run/user/$(id -u)` if it fails.
 
 ```bash
-pbpaste | ssh LOCAL_USER@MACHINE 'WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=/run/user/$(id -u) wl-copy'
+pbpaste | ssh LOCAL_USER@MACHINE 'WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=/run/user/$(id -u) wl-copy >/dev/null 2>&1'
 ssh LOCAL_USER@MACHINE 'WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=/run/user/$(id -u) wl-paste' | pbcopy
 ```
+
+The redirect on `wl-copy` matters: it forks a background server that would otherwise hold SSH's output open and hang the command. This has not been run live yet; check that the first command returns (checklist step 5). Text moved this way or over VNC, passwords included, is kept in Omarchy's clipboard history.
 
 Omarchy's clipboard history only watches the Wayland clipboard with `wl-paste --watch`, so it does not conflict with WayVNC and it records text pasted in by a client. WayVNC replaces the Omarchy clipboard with whatever a client sends ([any1/wayvnc#464](https://github.com/any1/wayvnc/issues/464) asks for a switch to stop that).
 
