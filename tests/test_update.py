@@ -314,6 +314,15 @@ class UpdateTests(unittest.TestCase):
         updater.update('layer')
         self.assertEqual(self.machine_calls, [['bash', str(self.source / 'scripts/apply-layer.sh'), '--update']])
 
+    def test_update_all_reconciles_the_t3_launcher_once_and_layer_does_not(self):
+        updater.update('all')
+        calls = [call for call in self.machine_calls if call[-2:-1] and call[-2].endswith('groundwork-t3-launcher.py')]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][-1], 'reconcile')
+        self.machine_calls.clear()
+        updater.update('layer')
+        self.assertFalse(any('groundwork-t3-launcher.py' in ' '.join(call) for call in self.machine_calls))
+
     def test_all_delegates_system_and_selected_app_updates_to_their_owners(self):
         updater.update('all')
         self.assertEqual(self.machine_calls[0], ['omarchy', 'update'])
