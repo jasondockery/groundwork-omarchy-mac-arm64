@@ -10,7 +10,9 @@ mise config, only when no mise config the user owns sets node at all:
   - the global config file (MISE_GLOBAL_CONFIG_FILE, else config.toml in
     MISE_CONFIG_DIR or $XDG_CONFIG_HOME/mise or ~/.config/mise),
   - config.local.toml, config.<env>.toml and conf.d/*.toml beside it,
-  - ~/.tool-versions.
+  - ~/.tool-versions, ~/.node-version, and the project-style files that override
+    global config under $HOME: ~/.mise.toml, ~/mise.toml, ~/.mise.local.toml,
+    ~/mise.local.toml and ~/.config/mise.toml.
 
 An existing entry of any kind is kept. An absent config file is created. The
 edit is a text insertion that is parsed and compared before it is written, an
@@ -152,6 +154,21 @@ def apply_pin():
                 return left_alone(f'{candidate} already sets node.')
         except (OSError, tomllib.TOMLDecodeError) as error:
             return left_alone(f'{candidate} could not be read ({error}).', error=True)
+    for candidate in (home() / '.mise.toml', home() / 'mise.toml', home() / '.mise.local.toml',
+                      home() / 'mise.local.toml', home() / '.config' / 'mise.toml'):
+        if candidate.is_file() and candidate not in user_config_files(config):
+            try:
+                if toml_sets_node(candidate):
+                    return left_alone(f'{candidate} already sets node.')
+            except (OSError, tomllib.TOMLDecodeError) as error:
+                return left_alone(f'{candidate} could not be read ({error}).', error=True)
+    node_version = home() / '.node-version'
+    if node_version.is_file():
+        try:
+            if node_version.read_text().split('#', 1)[0].strip():
+                return left_alone(f'{node_version} already sets node.')
+        except (OSError, UnicodeError) as error:
+            return left_alone(f'{node_version} could not be read ({error}).', error=True)
     tool_versions = home() / '.tool-versions'
     if tool_versions.is_file():
         try:

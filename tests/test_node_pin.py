@@ -117,6 +117,35 @@ class NodePinTests(FixtureHome):
         self.write(tool_versions, '# node 24\nnodejs 22\npython 3.13\n')
         self.assertEqual(self.run_step('apply')[0], 3)
 
+    def test_home_level_files_that_override_global_config_are_respected(self):
+        self.write(self.config, OMARCHY_DEFAULT_CONFIG)
+        for relative in ('.mise.toml', 'mise.toml', '.mise.local.toml', 'mise.local.toml', '.config/mise.toml'):
+            with self.subTest(file=relative):
+                other = self.home / relative
+                self.write(other, '[tools]\nbun = "latest"\nnode = "24"\n')
+                self.assertKept(self.config, OMARCHY_DEFAULT_CONFIG)
+                other.unlink()
+
+    def test_home_level_toml_without_node_does_not_block_the_pin(self):
+        self.write(self.home / '.mise.toml', '[tools]\nbun = "latest"\n')
+        self.assertEqual(self.run_step('apply')[0], 3)
+        self.assertEqual(self.home.joinpath('.mise.toml').read_text(), '[tools]\nbun = "latest"\n')
+
+    def test_invalid_home_level_toml_is_left_alone(self):
+        self.write(self.home / '.mise.toml', '[tools\n')
+        status, _, err = self.run_step('apply')
+        self.assertEqual(status, 1)
+        self.assertIn('could not be read', err)
+        self.assertFalse(self.config.exists())
+
+    def test_node_version_file_in_home_is_respected(self):
+        self.write(self.config, OMARCHY_DEFAULT_CONFIG)
+        self.write(self.home / '.node-version', 'v24.1.0\n')
+        self.assertKept(self.config, OMARCHY_DEFAULT_CONFIG)
+        # An empty or comment-only file sets nothing.
+        self.write(self.home / '.node-version', '# none\n\n')
+        self.assertEqual(self.run_step('apply')[0], 3)
+
     def test_mise_config_dir_is_honored(self):
         custom = self.root / 'custom-mise'
         with patch.dict(os.environ, {'MISE_CONFIG_DIR': str(custom)}):
