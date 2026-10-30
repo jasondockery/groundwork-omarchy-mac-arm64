@@ -13,6 +13,17 @@ GUARD = REPO / 'core/commit-guard/commit-identity-guard.sh'
 APPLY_LAYER = REPO / 'scripts/apply-layer.sh'
 
 
+OWNED = {
+    'ssh': 'git@github.com:jasondockery/fixture.git',
+    'https': 'https://github.com/jasondockery/fixture.git',
+    'ssh-url': 'ssh://git@github.com/jasondockery/fixture.git',
+    'mixed-case': 'https://github.com/JasonDockery/fixture.git',
+    'upper-case': 'git@github.com:JASONDOCKERY/fixture.git',
+}
+EMPLOYER = 'git@github.com:example-employer/fixture.git'
+BAD_MESSAGE = 'm\n\nCo-authored-by: A <a@example.com>'
+
+
 class CommitGuardTests(unittest.TestCase):
     def setUp(self):
         if not GUARD.exists():
@@ -53,10 +64,12 @@ class CommitGuardTests(unittest.TestCase):
                 state[str(path)] = ('file', path.read_bytes(), path.stat().st_mtime_ns)
         return state
 
-    def make_repo(self):
-        repo = self.home / 'repo'
+    def make_repo(self, remote=OWNED['ssh'], name='repo'):
+        repo = self.home / name
         repo.mkdir()
         self.git('init', '-q', '-b', 'main', cwd=repo)
+        if remote:
+            self.git('remote', 'add', 'origin', remote, cwd=repo)
         (repo / 'f').write_text('x')
         self.git('add', 'f', cwd=repo)
         return repo
@@ -68,7 +81,11 @@ class CommitGuardTests(unittest.TestCase):
         for name in ('commit-msg', 'pre-push', 'pre-commit'):
             self.assertEqual(os.readlink(self.hooks / name), 'dispatch')
         self.assertTrue(os.access(self.hooks / 'dispatch', os.X_OK))
-        self.assertEqual(self.git('config', '--global', 'core.hooksPath').stdout.strip(), str(self.hooks))
+        self.assertEqual(self.git('config', '--global', 'core.hooksPath').stdout.strip(), '')
+        self.assertIn(str(self.hooks), (self.gw / 'commit-guard.gitconfig').read_text())
+        includes = self.git('config', '--file', str(self.home / '.config/git/config'),
+                            '--get-regexp', r'^includeif\..*\.path$').stdout.splitlines()
+        self.assertEqual(len(includes), 3)
         self.assertFalse((self.home / '.gitconfig').exists())
         self.assertEqual((self.gw / 'commit-denylist').read_text(), '')
         self.assertEqual(json.loads(self.settings.read_text()), {'attribution': {'commit': '', 'pr': ''}})
@@ -91,8 +108,8 @@ class CommitGuardTests(unittest.TestCase):
         self.apply()
         remote = self.home / 'remote.git'
         self.git('init', '-q', '--bare', str(remote))
-        repo = self.make_repo()
-        self.git('remote', 'add', 'origin', str(remote), cwd=repo)
+        repo = self.make_repo(remote=str(remote))
+        self.git('remote', 'add', 'owned', OWNED['ssh'], cwd=repo)
         self.git('commit', '-q', '-m', 'ok', cwd=repo)
         seen = self.home / 'stdin-seen'
         hook = repo / '.git/hooks/pre-push'
@@ -104,6 +121,78 @@ class CommitGuardTests(unittest.TestCase):
         self.git('add', 'g', cwd=repo)
         self.git('commit', '-q', '--no-verify', '-m', 'x\n\nco-authored-by: A <a@example.com>', cwd=repo)
         self.assertNotEqual(self.git('push', '-q', 'origin', 'main', cwd=repo).returncode, 0)
+
+    def test_every_owned_url_form_is_blocked(self):
+        self.apply()
+        for form, url in OWNED.items():
+            repo = self.make_repo(remote=url, name='repo-' + form)
+            result = self.git('commit', '-q', '-m', BAD_MESSAGE, cwd=repo)
+            self.assertNotEqual(result.returncode, 0, form)
+            self.assertIn('Co-authored-by', result.stderr, form)
+
+    def test_employer_remote_and_other_repos_are_untouched(self):
+        self.apply()
+        for name, remote in (('employer', EMPLOYER), ('no-remote', None)):
+            repo = self.make_repo(remote=remote, name=name)
+            result = self.git('commit', '-q', '-m', BAD_MESSAGE, cwd=repo)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.git('config', '--get', 'core.hooksPath', cwd=repo).stdout.strip(), '')
+
+    def test_no_remote_commit_allowed_but_pre_push_catches_it_once_owned(self):
+        self.apply()
+        remote = self.home / 'remote.git'
+        self.git('init', '-q', '--bare', str(remote))
+        repo = self.make_repo(remote=str(remote))
+        self.assertEqual(self.git('commit', '-q', '-m', BAD_MESSAGE, cwd=repo).returncode, 0)
+        self.git('remote', 'add', 'owned', OWNED['https'], cwd=repo)
+        blocked = self.git('push', '-q', 'origin', 'main', cwd=repo)
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn('Co-authored-by', blocked.stderr)
+
+    def test_old_git_warns_and_activates_nothing(self):
+        real = subprocess.run(['which', 'git'], env=self.env, text=True, capture_output=True).stdout.strip()
+        fakebin = Path(self.temp.name) / 'fakebin'
+        fakebin.mkdir()
+        shim = fakebin / 'git'
+        shim.write_text(f'#!/bin/sh\nif [ "$1" = "--version" ]; then echo "git version 2.30.2"; exit 0; fi\nexec {real} "$@"\n')
+        shim.chmod(0o755)
+        result = self.apply(PATH=f"{fakebin}:{self.env['PATH']}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('git 2.36 or newer', result.stdout)
+        self.assertFalse((self.gw / 'commit-guard.gitconfig').exists())
+        self.assertFalse((self.home / '.config/git/config').exists())
+
+    def test_missing_guard_target_warns(self):
+        self.apply()
+        link = self.hooks / 'commit-identity-guard.sh'
+        link.unlink()
+        link.symlink_to(self.home / 'nowhere')
+        repo = self.make_repo()
+        result = self.git('commit', '-q', '-m', BAD_MESSAGE, cwd=repo)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('pinned commit identity guard is missing', result.stderr)
+
+    def test_previous_global_hookspath_from_this_installer_is_removed(self):
+        xdg = self.home / '.config/git/config'
+        xdg.parent.mkdir(parents=True)
+        self.git('config', '--file', str(xdg), 'core.hooksPath', str(self.hooks))
+        self.apply()
+        self.assertEqual(self.git('config', '--global', 'core.hooksPath').stdout.strip(), '')
+
+    def test_doctor_lists_owned_repos_that_bypass_the_guard(self):
+        self.apply()
+        code = self.home / 'code'
+        code.mkdir()
+        for name, hooks_path in (('husky-repo', '.husky'), ('plain-repo', None)):
+            repo = code / name
+            repo.mkdir()
+            self.git('init', '-q', cwd=repo)
+            self.git('remote', 'add', 'origin', OWNED['ssh'], cwd=repo)
+            if hooks_path:
+                self.git('config', 'core.hooksPath', hooks_path, cwd=repo)
+        result = self.helper('doctor')
+        self.assertIn('guard bypassed by its own core.hooksPath: ' + str(code / 'husky-repo'), result.stdout)
+        self.assertNotIn(str(code / 'plain-repo'), result.stdout)
 
     def test_denylist_blocks_identity(self):
         self.apply()
@@ -234,7 +323,7 @@ class CommitGuardTests(unittest.TestCase):
         self.apply()
         result = self.helper('doctor')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('core.hooksPath points at the Groundwork hooks', result.stdout)
+        self.assertIn('hooks apply to repositories with a github.com remote owned by this user', result.stdout)
         self.assertIn('Claude Code attribution commit and pr are empty', result.stdout)
 
     def test_doctor_reports_opt_out_and_missing_install(self):
@@ -250,8 +339,9 @@ class CommitGuardTests(unittest.TestCase):
                          if p.is_file() and not p.is_symlink())
         self.assertEqual(written, [
             '.claude/settings.json', '.config/git/config', '.config/groundwork/commit-denylist',
-            '.config/groundwork/git-hooks/dispatch', '.local/bin/groundwork-commit-guard'])
-        for rel in ('.claude/settings.json', '.config/git/config'):
+            '.config/groundwork/commit-guard.gitconfig', '.config/groundwork/git-hooks/dispatch',
+            '.local/bin/groundwork-commit-guard'])
+        for rel in ('.claude/settings.json', '.config/groundwork/commit-guard.gitconfig'):
             self.assertNotIn('@', (self.home / rel).read_text(), rel)
 
     def test_apply_layer_requires_and_runs_the_helper(self):

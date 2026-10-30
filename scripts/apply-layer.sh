@@ -2,8 +2,8 @@
 # Link the personal Hyprland override into $HOME.
 # For any Apple Silicon Omarchy Mac (aarch64). Reads the core/ checkout and
 # does not write it. Does not touch SSH, groundwork-mac, or /usr/share/omarchy.
-# Its only Git config write is core.hooksPath in ~/.config/git/config, and only
-# when none is set (commit identity guard, decision 0017).
+# Its only Git config write is an includeIf in ~/.config/git/config that enables
+# the commit identity guard hooks in owned repositories (decision 0017).
 set -euo pipefail
 
 usage() {
@@ -1372,7 +1372,7 @@ if [[ $with_local_inference -eq 1 ]]; then
 fi
 
 # Commit identity guard (decision 0017, groundwork-core/docs/commit-identity.md). User-level
-# hooks call the pinned core script in place, core.hooksPath is set only when none is,
+# hooks call the pinned core script in place, are enabled only in owned repositories via includeIf,
 # and Claude Code attribution is filled in only where unset. Opt out with
 # groundwork-commit-guard off. A failure here is reported but does not stop setup.
 python3 "$root/scripts/groundwork-commit-guard.py" apply --guard "$root/core/commit-guard/commit-identity-guard.sh" ||
