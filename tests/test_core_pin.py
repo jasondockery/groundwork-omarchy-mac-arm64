@@ -33,6 +33,8 @@ class CorePinTest(unittest.TestCase):
             env=env,
         )
         if gitlink.returncode != 0:
+            if os.environ.get("CI"):
+                self.fail(f"no core gitlink at HEAD:core: {gitlink.stderr.strip()}")
             self.skipTest("not a git checkout with a core gitlink")
         sha = gitlink.stdout.strip()
 
