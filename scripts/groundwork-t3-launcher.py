@@ -13,6 +13,7 @@ be established.
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -77,21 +78,55 @@ def default_handler():
     return result.stdout.strip()
 
 
+def drop_stale_association():
+    """Remove the removed entry from [Added Associations] x-scheme-handler/t3code."""
+    config = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'mimeapps.list'
+    try:
+        lines = config.read_text().splitlines(keepends=True)
+    except OSError:
+        return []
+    section, changed, out = '', False, []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('['):
+            section = stripped
+        key, _, value = stripped.partition('=')
+        if section == '[Added Associations]' and key == SCHEME and DUPLICATE in value.split(';'):
+            kept = [item for item in value.split(';') if item and item != DUPLICATE]
+            changed = True
+            if not kept:
+                continue
+            line = f"{key}={';'.join(kept)};\n"
+        out.append(line)
+    if not changed:
+        return []
+    try:
+        temporary = config.with_name(config.name + '.groundwork-tmp')
+        temporary.write_text(''.join(out))
+        os.replace(temporary, config)
+    except OSError as error:
+        return [f'Could not tidy {config.name} ({error}).']
+    return [f'Dropped the stale {DUPLICATE} association from {config.name}.']
+
+
 def reconcile(proc=Path('/proc')):
     """Return a list of messages. Always safe to repeat."""
     apps = data_home() / 'applications'
     primary, duplicate = apps / PRIMARY, apps / DUPLICATE
+    if not shutil.which('xdg-mime'):
+        # Nothing to repoint without it. Say so only when a duplicate exists.
+        return ['T3 Code launcher check skipped: xdg-mime is not installed.'] if duplicate.exists() else []
     try:
         handler = default_handler()
     except (OSError, subprocess.SubprocessError) as error:
-        return [f'T3 Code launcher check skipped: xdg-mime is unavailable ({error}).']
+        return [f'T3 Code launcher check skipped: xdg-mime failed ({error}).']
     if not duplicate.exists() and handler != DUPLICATE:
         return []
     if not primary.is_file():
         return [f'T3 Code launcher check skipped: {primary} is missing.']
     running, reason = t3_running(exec_paths(primary, duplicate), proc)
     if running:
-        return [f'T3 Code launcher check skipped: {reason}. Rerun after closing T3 Code.']
+        return [f'T3 Code launcher check skipped: {reason}. Close T3 Code, then rerun ./install.sh or update-all.']
     messages = []
     if handler == DUPLICATE:
         try:
@@ -111,6 +146,7 @@ def reconcile(proc=Path('/proc')):
         except OSError as error:
             return messages + [f'{duplicate.name} could not be removed ({error}).']
         messages.append(f'Removed the duplicate launcher entry {duplicate.name}.')
+    messages.extend(drop_stale_association())
     return messages
 
 

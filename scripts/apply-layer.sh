@@ -933,8 +933,11 @@ if [[ $t3_version != *-nightly.* ]]; then
 fi
 
 # The running app registers a second, hidden launcher entry. Keep one; this
-# skips, and says so, while T3 Code is running.
-python3 "$root/scripts/groundwork-t3-launcher.py" reconcile || echo "T3 Code launcher check failed; setup continues." >&2
+# skips, and says so, while T3 Code is running. update-all runs the same check
+# after it updates T3, so an update run leaves it to that step.
+if [[ $updating -eq 0 ]]; then
+  python3 "$root/scripts/groundwork-t3-launcher.py" reconcile || echo "T3 Code launcher check failed; setup continues." >&2
+fi
 
 python3 "$root/scripts/seed-obsidian.py" "${GROUNDWORK_OBSIDIAN_VAULT:-$HOME/Documents/Obsidian/my_obsidian_vault}"
 

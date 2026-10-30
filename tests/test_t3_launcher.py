@@ -133,6 +133,62 @@ class T3LauncherTests(unittest.TestCase):
         self.set_default('t3code.desktop')
         self.assertEqual(self.reconcile(), [])
 
+    def test_stale_added_association_is_dropped_only_for_the_removed_file(self):
+        self.process(1, '/usr/bin/bash')
+        mime = self.config / 'mimeapps.list'
+        mime.write_text('[Default Applications]\nx-scheme-handler/t3code=t3code.desktop;\n\n'
+                        '[Added Associations]\nx-scheme-handler/t3code=com.t3tools.T3Code.desktop;\n'
+                        'x-scheme-handler/other=com.t3tools.T3Code.desktop;\n')
+        self.reconcile()
+        self.assertEqual(mime.read_text(), '[Default Applications]\nx-scheme-handler/t3code=t3code.desktop;\n\n'
+                         '[Added Associations]\nx-scheme-handler/other=com.t3tools.T3Code.desktop;\n')
+        before = mime.read_text()
+        self.set_default('com.t3tools.T3Code.desktop')
+        self.reconcile()
+        self.assertEqual(mime.read_text(), before)
+
+    def test_mixed_association_keeps_other_handlers(self):
+        self.process(1, '/usr/bin/bash')
+        mime = self.config / 'mimeapps.list'
+        mime.write_text('[Added Associations]\nx-scheme-handler/t3code=com.t3tools.T3Code.desktop;t3code.desktop;\n')
+        self.reconcile()
+        self.assertEqual(mime.read_text(), '[Added Associations]\nx-scheme-handler/t3code=t3code.desktop;\n')
+
+    def test_association_is_untouched_while_running(self):
+        self.process(1, str(self.appimage))
+        mime = self.config / 'mimeapps.list'
+        text = '[Added Associations]\nx-scheme-handler/t3code=com.t3tools.T3Code.desktop;\n'
+        mime.write_text(text)
+        self.reconcile()
+        self.assertEqual(mime.read_text(), text)
+
+    def test_missing_xdg_mime_is_quiet_without_a_duplicate(self):
+        with patch.dict(os.environ, PATH='/nonexistent'):
+            self.assertIn('not installed', launcher.reconcile(self.proc)[0])
+            self.duplicate.unlink()
+            self.assertEqual(launcher.reconcile(self.proc), [])
+
+    def test_message_names_the_commands_to_rerun(self):
+        self.process(1, str(self.appimage))
+        self.assertIn('update-all', self.reconcile()[0])
+
+
+class HookTests(unittest.TestCase):
+    """The reconcile must run once per setup and once per update-all."""
+    ROOT = Path(__file__).resolve().parents[1]
+
+    def test_apply_layer_runs_it_only_outside_an_update(self):
+        text = (self.ROOT / 'scripts/apply-layer.sh').read_text()
+        call = 'python3 "$root/scripts/groundwork-t3-launcher.py" reconcile'
+        self.assertEqual(text.count('groundwork-t3-launcher.py'), 1)
+        before = text[:text.index(call)]
+        self.assertTrue(before.rstrip().endswith('if [[ $updating -eq 0 ]]; then'))
+
+    def test_update_all_runs_it_after_the_t3_update(self):
+        text = (self.ROOT / 'scripts/groundwork-update.py').read_text()
+        self.assertEqual(text.count('groundwork-t3-launcher.py'), 1)
+        self.assertLess(text.index('update_t3(completed, warnings)\n'), text.index('groundwork-t3-launcher.py'))
+
 
 if __name__ == '__main__':
     unittest.main()
