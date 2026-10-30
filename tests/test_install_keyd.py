@@ -1033,6 +1033,7 @@ raise SystemExit(os.WEXITSTATUS(status))
                               (('--without-keyd', '--with-keyd'), False),
                               (('--with-blip', '--without-blip'), False),
                               (('--with-local-inference', '--without-local-inference'), False),
+                              (('--with-git-filter-repo', '--without-git-filter-repo'), False),
                               (('--help',), True)]:
             with self.subTest(args=args):
                 self.run_install(*args, success=success)
@@ -1632,6 +1633,34 @@ raise SystemExit(os.WEXITSTATUS(status))
                              for call in self.calls()))
         saved = json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())
         self.assertFalse(saved['local_inference'])
+
+    def git_filter_repo_calls(self):
+        return [call for call in self.calls() if call[:3] == ['mise', 'use', '-g'] and 'pipx:git-filter-repo' in call]
+
+    def test_default_install_does_not_install_git_filter_repo(self):
+        (self.bin / 'uv').symlink_to(self.bin / 'stub')
+        self.run_install()
+        self.assertEqual(self.git_filter_repo_calls(), [])
+        saved = json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())
+        self.assertFalse(saved['git_filter_repo'])
+
+    def test_git_filter_repo_opt_in_is_per_user_saved_and_reused_by_updates(self):
+        (self.bin / 'uv').symlink_to(self.bin / 'stub')
+        self.run_install('--with-git-filter-repo')
+        self.assertEqual(self.git_filter_repo_calls(), [['mise', 'use', '-g', 'pipx:git-filter-repo']])
+        self.assertFalse(any(call[0] == 'sudo' and 'git-filter-repo' in ' '.join(call) for call in self.calls()))
+        self.assertFalse(any(call[:3] == ['omarchy', 'pkg', 'add'] and 'git-filter-repo' in call[3] for call in self.calls()))
+        saved = json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())
+        self.assertTrue(saved['git_filter_repo'])
+        (self.root / 'calls.jsonl').unlink()
+        update = self.run_update()
+        self.assertEqual(update.returncode, 0, update.stdout + update.stderr)
+        self.assertEqual(len(self.git_filter_repo_calls()), 1)
+        (self.root / 'calls.jsonl').unlink()
+        self.run_install('--without-git-filter-repo')
+        self.assertEqual(self.git_filter_repo_calls(), [])
+        saved = json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())
+        self.assertFalse(saved['git_filter_repo'])
 
 
     def test_default_install_adds_syncthing_and_waits_for_tailscale(self):

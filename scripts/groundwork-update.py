@@ -161,6 +161,7 @@ def settings(required=True):
             or '\n' in value['obsidian_vault']
             or ('blip' in value and type(value['blip']) is not bool)
             or ('local_inference' in value and type(value['local_inference']) is not bool)
+            or ('git_filter_repo' in value and type(value['git_filter_repo']) is not bool)
             or ('declined_migrations' in value and not valid_migration_ids(value['declined_migrations']))):
         raise UpdateError(f'Invalid updater settings in {CONFIG}; preserve and repair that file before updating.')
     return value
@@ -213,6 +214,16 @@ def local_inference_enabled(value):
     return flag
 
 
+def git_filter_repo_enabled(value):
+    """Saved git-filter-repo choice. Setups written before the choice existed stay off."""
+    if value is None or 'git_filter_repo' not in value:
+        return False
+    flag = value['git_filter_repo']
+    if type(flag) is not bool:
+        raise UpdateError(f'Invalid updater settings in {CONFIG}; preserve and repair that file before updating.')
+    return flag
+
+
 def validate_registration(source):
     source = Path(source).resolve()
     previous = settings(False)
@@ -226,17 +237,21 @@ def validate_registration(source):
     return previous
 
 
-def register(source, keyd, screen_sharing, vault, blip='0', local_inference='0', declined=None):
+def register(source, keyd, screen_sharing, vault, blip='0', local_inference='0', declined=None, git_filter_repo=None):
     source = Path(source).resolve()
     previous = validate_registration(source)
     if blip not in ('0', '1'):
         raise UpdateError('Blip choice must be 0 or 1.')
     if local_inference not in ('0', '1'):
         raise UpdateError('Local inference choice must be 0 or 1.')
+    if git_filter_repo not in (None, '0', '1'):
+        raise UpdateError('git-filter-repo choice must be 0 or 1.')
     value = dict(previous or {}, schema=1, source=str(source), keyd=keyd == '1',
                  screen_sharing=screen_sharing == '1', obsidian_vault=vault, blip=blip == '1',
                  local_inference=local_inference == '1')
     # None keeps whatever was saved. apply-layer.sh always passes the full list.
+    if git_filter_repo is not None:
+        value['git_filter_repo'] = git_filter_repo == '1'
     if declined is not None:
         names = parse_declined_migrations(declined)
         if names:
@@ -1823,6 +1838,7 @@ def main(args):
         source, *options = args[1:]
         valid = {'--with-keyd', '--without-keyd', '--with-screen-sharing', '--without-screen-sharing',
                  '--with-blip', '--without-blip', '--with-local-inference', '--without-local-inference',
+                 '--with-git-filter-repo', '--without-git-filter-repo',
                  '--migrate-to-omarchy-installers', '--update', '--help', '-h'}
         if any(option not in valid for option in options):
             print('Unknown setup argument; nothing changed.', file=sys.stderr)
@@ -1834,15 +1850,17 @@ def main(args):
         if ({'--with-keyd', '--without-keyd'} <= set(options)
                 or {'--with-screen-sharing', '--without-screen-sharing'} <= set(options)
                 or {'--with-blip', '--without-blip'} <= set(options)
-                or {'--with-local-inference', '--without-local-inference'} <= set(options)):
+                or {'--with-local-inference', '--without-local-inference'} <= set(options)
+                or {'--with-git-filter-repo', '--without-git-filter-repo'} <= set(options)):
             print('Choose only one option for each setup preference; nothing changed.', file=sys.stderr)
             return 64
         if '--help' in options or '-h' in options:
-            print('Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip] [--with-local-inference|--without-local-inference] [--migrate-to-omarchy-installers]')
+            print('Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip] [--with-local-inference|--without-local-inference] [--with-git-filter-repo|--without-git-filter-repo] [--migrate-to-omarchy-installers]')
             print('Saved setup choices are reused. Explicit options change those choices.')
             print('--migrate-to-omarchy-installers moves apps installed another way to Omarchy\'s own installer, even after an earlier no. See docs/decisions/0014-offer-migration-to-omarchy-installers.md.')
             print('Blip is off unless --with-blip is set. --without-blip leaves an existing Blip install unchanged.')
             print('Local inference is off unless --with-local-inference is set. --without-local-inference records that preference as off. See docs/local-inference.md for package and model removal.')
+            print('git-filter-repo is off unless --with-git-filter-repo is set. It installs per user with mise, never with sudo. --without-git-filter-repo records that preference as off and leaves an installed copy alone. See docs/git-filter-repo.md.')
             return 0
         if run(['uname', '-s']) != 'Linux' or run(['uname', '-m']) != 'aarch64' or not shutil.which('omarchy'):
             raise UpdateError('This layer requires Apple Silicon Omarchy.')
@@ -1874,18 +1892,25 @@ def main(args):
         if value:
             lines = [int(value['keyd']), int(value['screen_sharing']), value['obsidian_vault'],
                      int(blip_enabled(value)), int(local_inference_enabled(value))]
-            # A sixth line only when an offer was declined, so older readers see five.
+            # A sixth line only when an offer was declined or git-filter-repo is on, so
+            # older readers see five. The seventh line is git-filter-repo, only when on.
             declined = declined_migrations(value)
-            if declined:
+            gfr = git_filter_repo_enabled(value)
+            if declined or gfr:
                 lines.append(','.join(declined))
+            if gfr:
+                lines.append(1)
             print('\n'.join(str(line) for line in lines))
         return 0
-    if args and args[0] == 'register' and len(args) in (5, 6, 7, 8) and args[2] in ('0', '1') and args[3] in ('0', '1'):
+    if args and args[0] == 'register' and len(args) in (5, 6, 7, 8, 9) and args[2] in ('0', '1') and args[3] in ('0', '1'):
         if len(args) >= 6 and args[5] not in ('0', '1'):
             print('Invalid Blip choice; nothing changed.', file=sys.stderr)
             return 64
         if len(args) >= 7 and args[6] not in ('0', '1'):
             print('Invalid local inference choice; nothing changed.', file=sys.stderr)
+            return 64
+        if len(args) >= 9 and args[8] not in ('0', '1'):
+            print('Invalid git-filter-repo choice; nothing changed.', file=sys.stderr)
             return 64
         register(*args[1:])
         return 0
