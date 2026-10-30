@@ -33,4 +33,4 @@ The FreeTube wrapper (lock, `lstat` classification, symlink migration, receive-o
 
 ## Proof that fixtures cannot give
 
-Tests use a fake local Syncthing. They do not show that the real 2.1.x REST API accepts these bodies, that the pacman binary maps on 16 KiB pages, that `quic://` listeners bind to the tailscale address, or that two machines converge. The pull request's Not proved list is the on-device checklist.
+Tests use a fake local Syncthing. They do not show that the real 2.1.x REST API accepts these bodies, that the pacman binary maps on 16 KiB pages, that `quic://` listeners bind to the tailscale address, or that two machines converge. [The on-device checklist](../syncthing-mini-checklist.md) is the run that proves them.
