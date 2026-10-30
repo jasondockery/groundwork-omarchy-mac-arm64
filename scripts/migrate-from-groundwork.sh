@@ -35,33 +35,32 @@ for arg in "$@"; do
   esac
 done
 
-# Print a URL that is safe to show. Userinfo (user[:pass]@) before the first "/"
-# is replaced with "***@" (a bare "git@" SSH user is kept), an "@" later in the
-# URL is masked along with whatever follows it, GitHub-token-shaped segments
-# (gh[pousr]_..., github_pat_...) are masked anywhere, and any query or
-# fragment is dropped.
+# Print a URL that is safe to show. Userinfo (user[:pass]@) is replaced with
+# "***@" (a bare "git@" SSH user is kept); it is cut at the last "@" anywhere
+# in the string, before the query and fragment are dropped, so an unencoded
+# "/", "?" or "#" in a password cannot leak. GitHub-token-shaped segments
+# (gh[pousr]_ + 36 or more characters, github_pat_ + 22 or more) are masked
+# anywhere.
 redact_url() {
-  local url="$1" scheme="" head userinfo="" mark=""
-  url="$(printf '%s' "$url" | sed -E 's/(gh[pousr]_|github_pat_)[A-Za-z0-9_]+/***/g')"
+  local url="$1" scheme="" rest userinfo
+  url="$(printf '%s' "$url" | sed -E 's/gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}/***/g')"
   if [[ "$url" =~ ^([A-Za-z][A-Za-z0-9+.-]*://)(.*)$ ]]; then
     scheme="${BASH_REMATCH[1]}"
-    url="${BASH_REMATCH[2]}"
+    rest="${BASH_REMATCH[2]}"
+  else
+    rest="$url"
   fi
-  head="${url%%/*}"
-  if [[ "$head" == *@* ]]; then
-    userinfo="${head%@*}"
-    url="${url#"$userinfo"@}"
+  if [[ "$rest" == *@* ]]; then
+    userinfo="${rest%@*}"
+    rest="${rest##*@}"
     if [[ "$userinfo" == git ]]; then
-      mark="git@"
+      rest="git@${rest}"
     else
-      mark="***@"
+      rest="***@${rest}"
     fi
   fi
-  url="${url%%[?#]*}"
-  if [[ "$url" == *@* ]]; then
-    url="${url%%@*}@***"
-  fi
-  printf '%s%s%s\n' "$scheme" "$mark" "$url"
+  rest="${rest%%[?#]*}"
+  printf '%s%s\n' "$scheme" "$rest"
 }
 
 # Show a checkout's origin remote without ever printing credentials.
