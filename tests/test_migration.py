@@ -93,6 +93,18 @@ class MigrationTests(unittest.TestCase):
         self.assertIn('https://***@github.com/example/old.git', result.stdout)
         self.assertIn('ssh://***@github.com/example/new.git', result.stdout)
 
+    def test_path_secrets_and_token_segments_are_masked(self):
+        secret = 's3' + 'cr' + 'et' + str(os.getpid())
+        for side in ('old', 'new'):
+            (self.root / side / '.git').mkdir(parents=True)
+        self.env['FIXTURE_ORIGIN_OLD'] = f'https://github.com/example/old.git@{secret}-path'
+        self.env['FIXTURE_ORIGIN_NEW'] = ('https://github.com/example/' + 'gh' + 'p_' + secret +
+                                          '/new.git?x=1 https://github.com/o/' + 'github' + '_pat_' + secret)
+        result = self.run_helper()
+        self.assertNotIn(secret, result.stdout + result.stderr)
+        self.assertIn('https://github.com/example/old.git@***', result.stdout)
+        self.assertIn('https://github.com/example/***/new.git', result.stdout)
+
     def test_plain_origin_is_still_shown(self):
         (self.root / 'old' / '.git').mkdir(parents=True)
         self.env['FIXTURE_ORIGIN_OLD'] = 'git@github.com:example/old.git'

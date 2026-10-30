@@ -35,28 +35,33 @@ for arg in "$@"; do
   esac
 done
 
-# Print a URL that is safe to show: userinfo (user[:pass]@) is replaced with
-# "***@", except a bare "git@" SSH user, and any query or fragment is dropped.
-# Userinfo is cut at the last "@" so odd passwords cannot leak a prefix.
+# Print a URL that is safe to show. Userinfo (user[:pass]@) before the first "/"
+# is replaced with "***@" (a bare "git@" SSH user is kept), an "@" later in the
+# URL is masked along with whatever follows it, GitHub-token-shaped segments
+# (gh[pousr]_..., github_pat_...) are masked anywhere, and any query or
+# fragment is dropped.
 redact_url() {
-  local url="$1" scheme="" rest userinfo
+  local url="$1" scheme="" head userinfo="" mark=""
+  url="$(printf '%s' "$url" | sed -E 's/(gh[pousr]_|github_pat_)[A-Za-z0-9_]+/***/g')"
   if [[ "$url" =~ ^([A-Za-z][A-Za-z0-9+.-]*://)(.*)$ ]]; then
     scheme="${BASH_REMATCH[1]}"
-    rest="${BASH_REMATCH[2]}"
-  else
-    rest="$url"
+    url="${BASH_REMATCH[2]}"
   fi
-  if [[ "$rest" == *@* ]]; then
-    userinfo="${rest%@*}"
-    rest="${rest##*@}"
+  head="${url%%/*}"
+  if [[ "$head" == *@* ]]; then
+    userinfo="${head%@*}"
+    url="${url#"$userinfo"@}"
     if [[ "$userinfo" == git ]]; then
-      rest="git@${rest}"
+      mark="git@"
     else
-      rest="***@${rest}"
+      mark="***@"
     fi
   fi
-  rest="${rest%%[?#]*}"
-  printf '%s%s\n' "$scheme" "$rest"
+  url="${url%%[?#]*}"
+  if [[ "$url" == *@* ]]; then
+    url="${url%%@*}@***"
+  fi
+  printf '%s%s%s\n' "$scheme" "$mark" "$url"
 }
 
 # Show a checkout's origin remote without ever printing credentials.
