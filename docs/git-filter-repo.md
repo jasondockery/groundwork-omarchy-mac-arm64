@@ -10,7 +10,7 @@ When a credential or private reference has to leave a repository's history, the 
 ./install.sh --with-git-filter-repo
 ```
 
-That yes is for this machine and is saved with your other setup choices, so later runs and `groundwork-update` reuse it. The helper `scripts/install-git-filter-repo.sh` then runs `mise use -g pipx:git-filter-repo`, the runbook's per-user line for mise. It installs into your home directory, with no `sudo` and no pacman. mise's pipx backend needs `uv` or `pipx` already present; if neither is, the helper says so and installs nothing (`mise use -g uv` provides `uv`). Rerunning changes nothing once the proof below passes.
+That yes is for this machine and is saved with your other setup choices, so later runs and `groundwork-update` reuse it. The helper `scripts/install-git-filter-repo.sh` then runs `mise use -g pipx:git-filter-repo`, the runbook's per-user line for mise. It installs into your home directory, with no `sudo` and no pacman. mise's pipx backend needs `uv` or `pipx` already present; if neither is, the helper says so and installs nothing (`mise use -g uv` provides `uv`). Rerunning changes nothing once the proof below passes. A `git-filter-repo` already on your PATH, for example a system package, that passes the proof satisfies the opt-in, so nothing is installed.
 
 ## Prove it
 

@@ -1370,7 +1370,7 @@ if [[ $with_local_inference -eq 1 ]]; then
   install_local_inference
 fi
 
-# Opt-in, per-user git-filter-repo for history purges (decision 0016). The helper
+# Opt-in, per-user git-filter-repo for history purges. See docs/git-filter-repo.md. The helper
 # never needs root and never runs a history rewrite.
 if [[ $with_git_filter_repo -eq 1 ]]; then
   bash "$root/scripts/install-git-filter-repo.sh"
