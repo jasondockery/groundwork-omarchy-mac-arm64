@@ -128,6 +128,15 @@ That covers a Bitwarden user Flatpak once the feed has the `bitwarden`
 package, a Brave Flatpak or other non-`brave-bin` Brave, and making a Brave
 that passed setup's checks the default browser
 ([decision 0015](docs/decisions/0015-brave-via-omarchy-installer.md)).
+
+Setup also pins `node = "26"` in `~/.config/mise/config.toml` when no mise
+config of yours sets Node, so Omarchy's `node = "latest"` does not move to the
+next major on its own, and installs it. An existing Node entry is kept. Agents
+that Claude, Codex or Grok start through mise's command wrappers still see the
+system Node first; see
+[decision 0016](docs/decisions/0016-pin-node-for-mise.md) for the cause and
+the workaround.
+
 `./install.sh` in a terminal saves the other setup choices first,
 then asks `[y/N]` for up to five minutes and saves a no with them.
 `groundwork-update`, `update-all`, and runs without a terminal print one line

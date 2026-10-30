@@ -156,8 +156,8 @@ fi
 
 # Fail before installing packages or moving files when the checkout is incomplete.
 # The Bitwarden extension id and Brave policies are read from core, not a copy here.
-[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$root/core/browser/brave.json" && ! -L "$root/core/browser/brave.json" ]] || {
-  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, or Brave spec is missing." >&2
+[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$root/scripts/groundwork-node-pin.py" && -f "$root/core/browser/brave.json" && ! -L "$root/core/browser/brave.json" ]] || {
+  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, Node pin helper, or Brave spec is missing." >&2
   exit 1
 }
 
@@ -980,6 +980,25 @@ fi
 # after it updates T3, so an update run leaves it to that step.
 if [[ $updating -eq 0 ]]; then
   python3 "$root/scripts/groundwork-t3-launcher.py" reconcile || echo "T3 Code launcher check failed; setup continues." >&2
+fi
+
+# Pin Node in the user's mise config so Omarchy's node = "latest" does not move
+# to the next major on its own (decision 0016). A failure here never stops setup.
+if command -v mise >/dev/null; then
+  node_pin_status=0
+  python3 "$root/scripts/groundwork-node-pin.py" apply || node_pin_status=$?
+  if [[ $node_pin_status -eq 3 ]]; then
+    node_pin_version=$(python3 "$root/scripts/groundwork-node-pin.py" version)
+    if timeout --kill-after=5s 600 mise install "node@$node_pin_version" </dev/null; then
+      echo "Node $node_pin_version is pinned and installed."
+    else
+      echo "Node $node_pin_version is pinned in your mise config but NOT installed yet. Run: mise install node@$node_pin_version" >&2
+    fi
+  elif [[ $node_pin_status -ne 0 ]]; then
+    echo "Node pin check failed; setup continues." >&2
+  fi
+else
+  echo "mise is not installed, so the Node pin was skipped."
 fi
 
 python3 "$root/scripts/seed-obsidian.py" "${GROUNDWORK_OBSIDIAN_VAULT:-$HOME/Documents/Obsidian/my_obsidian_vault}"
