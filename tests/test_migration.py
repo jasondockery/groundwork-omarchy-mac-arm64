@@ -13,7 +13,9 @@ root = pathlib.Path(os.environ['MIGRATION_FIXTURE'])
 name = pathlib.Path(sys.argv[0]).name
 with (root / 'calls').open('a') as log:
     log.write(json.dumps([name, *sys.argv[1:]]) + '\\n')
-if name == 'uname':
+if name == 'git' and sys.argv[1:4] == ['-C', sys.argv[2], 'remote'] and 'get-url' in sys.argv:
+    print(os.environ['FIXTURE_ORIGIN_' + ('OLD' if sys.argv[2].endswith('old') else 'NEW')])
+elif name == 'uname':
     print(os.environ.get('FIXTURE_OS', 'Darwin'))
 elif name == 'git' and sys.argv[1] == 'clone':
     destination = pathlib.Path(sys.argv[-1])
@@ -79,6 +81,22 @@ class MigrationTests(unittest.TestCase):
         self.assertIn('Refusing --clone-mac on Omarchy', result.stderr)
         self.assertFalse((self.root / 'new').exists())
         self.assertFalse(any(call[0] == 'git' for call in self.calls()))
+
+    def test_credentialed_origins_are_never_printed(self):
+        secret = 's3' + 'cr' + 'et' + str(os.getpid())
+        for side in ('old', 'new'):
+            (self.root / side / '.git').mkdir(parents=True)
+        self.env['FIXTURE_ORIGIN_OLD'] = f'https://deploy:{secret}-old@github.com/example/old.git?t={secret}-q#{secret}-f'
+        self.env['FIXTURE_ORIGIN_NEW'] = f'ssh://user:{secret}-new@github.com/example/new.git'
+        result = self.run_helper()
+        self.assertNotIn(secret, result.stdout + result.stderr)
+        self.assertIn('https://***@github.com/example/old.git', result.stdout)
+        self.assertIn('ssh://***@github.com/example/new.git', result.stdout)
+
+    def test_plain_origin_is_still_shown(self):
+        (self.root / 'old' / '.git').mkdir(parents=True)
+        self.env['FIXTURE_ORIGIN_OLD'] = 'git@github.com:example/old.git'
+        self.assertIn('git@github.com:example/old.git', self.run_helper().stdout)
 
 
 if __name__ == '__main__':
