@@ -935,7 +935,10 @@ class BraveSpecTests(unittest.TestCase):
                 self.assertEqual(updater.main(['brave-accepted-any']), 2)
 
     def test_launch_checker_oserror_is_not_a_remembered_crash(self):
-        with patch.object(updater.tempfile, 'mkdtemp', side_effect=OSError(28, 'No space left on device')):
+        # A desktop session is stubbed so the check reaches mkdtemp on a host
+        # without Wayland (CI runners) as well as on a desktop.
+        with patch.object(updater, 'brave_wayland_socket', return_value=Path('/run/fixture/wayland-0')), \
+                patch.object(updater.tempfile, 'mkdtemp', side_effect=OSError(28, 'No space left on device')):
             with redirect_stderr(io.StringIO()) as err:
                 status = updater.main(['check-brave-launch', '/bin/true'])
         self.assertEqual(status, 2)
