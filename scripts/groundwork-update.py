@@ -1481,6 +1481,11 @@ def update(scope, check=False):
             completed.append('Groundwork configuration applied')
             if scope == 'all':
                 update_t3(completed, warnings)
+                try:
+                    run([sys.executable, str(source / 'scripts/groundwork-t3-launcher.py'), 'reconcile'],
+                        capture=False)
+                except (UpdateError, OSError) as error:
+                    warnings.append(f'T3 Code launcher check failed: {error}')
                 if shutil.which('flatpak'):
                     # Groundwork's user Flatpaks only. Other installed apps stay untouched.
                     installed = set(run(['flatpak', '--user', 'list', '--app', '--columns=application']).splitlines())

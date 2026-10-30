@@ -932,6 +932,10 @@ if [[ $t3_version != *-nightly.* ]]; then
   exit 1
 fi
 
+# The running app registers a second, hidden launcher entry. Keep one; this
+# skips, and says so, while T3 Code is running.
+python3 "$root/scripts/groundwork-t3-launcher.py" reconcile || echo "T3 Code launcher check failed; setup continues." >&2
+
 python3 "$root/scripts/seed-obsidian.py" "${GROUNDWORK_OBSIDIAN_VAULT:-$HOME/Documents/Obsidian/my_obsidian_vault}"
 
 if [[ $with_screen_sharing -eq 1 ]]; then
