@@ -448,20 +448,41 @@ class PluginApplyTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         lines = [line for line in result.stdout.splitlines() if 'list changes' not in line]
         self.assertEqual(len(lines), 1, lines)
-        self.assertTrue(lines[0].startswith('Omarchy shell did not list 4 new plugin(s)'), lines)
-        self.assertIn('update-all', lines[0])
-        # Only the first was cloned; the rest wait for the next run. Nothing was removed or enabled.
-        self.assertEqual([call for call in self.omarchy_calls() if call[1] in ('add', 'remove', 'enable')],
-                         [['plugin', 'add', 'https://github.com/example/p0.git', '--yes'], ['plugin', 'enable', 'example.p0']])
+        self.assertTrue(lines[0].startswith('4 plugin(s) not installed or enabled'), lines)
+        self.assertIn('omarchy-restart-shell', lines[0])
+        # One rescan per plugin, never a rescan loop. Nothing was removed.
+        self.assertEqual(self.calls().count(['omarchy-shell', 'shell', 'rescanPlugins']), 4)
+        self.assertFalse([call for call in self.omarchy_calls() if call[1] == 'remove'])
         self.assertTrue(self.plugin_dir('example.p0').is_dir())
-        self.assertTrue(self.record()['plugins']['example.p0']['enablePending'])
-        # Next run: the shell lists it now, so only enable is retried.
+        self.assertEqual(self.record()['plugins']['example.p0']['enableTries'], 1)
+        # Next run: the shell lists them now, so only enable is retried.
         self.set_control()
         self.clear_calls()
         again = self.invoke()
         self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
-        self.assertIn(['plugin', 'enable', 'example.p0'], self.omarchy_calls())
+        self.assertEqual(len(self.enables()), 4)
+        self.assertFalse([call for call in self.omarchy_calls() if call[1] == 'add'])
         self.assertNotIn('enablePending', self.record()['plugins']['example.p0'])
+        self.assertNotIn('enableTries', self.record()['plugins']['example.p0'])
+
+    def test_a_plugin_the_shell_rejects_for_good_does_not_block_later_ones(self):
+        self.write_list([plugin('example.bad'), plugin('example.good')])
+        self.set_control(never_listed=['example.bad'])
+        first = self.invoke()
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertIn(['plugin', 'enable', 'example.good'], self.omarchy_calls())
+        self.assertEqual(self.record()['plugins']['example.bad']['enableTries'], 1)
+        self.assertNotIn('enablePending', self.record()['plugins']['example.good'])
+        second = self.invoke()
+        self.assertIn('1 plugin(s) not installed or enabled', second.stdout)
+        self.assertEqual(self.record()['plugins']['example.bad']['enableTries'], 2)
+        third = self.invoke()
+        self.assertIn('example.bad was rejected', third.stdout)
+        self.assertNotIn('not installed or enabled', third.stdout)
+        self.assertFalse(self.plugin_dir('example.bad').exists())
+        self.assertNotIn('example.bad', self.record()['plugins'])
+        adds = [call for call in self.omarchy_calls() if call[1] == 'add']
+        self.assertEqual([call[2] for call in adds], ['https://github.com/example/bad.git', 'https://github.com/example/good.git'])
 
     def test_version_2_rules_reject_the_list(self):
         samples = [
