@@ -32,6 +32,8 @@ Blip, an iMessage client, stays off unless you pass `--with-blip`. It installs `
 
 Local inference stays off unless you pass `--with-local-inference`. That installs Omarchy's `ollama` and `ollama-vulkan` packages and downloads no model. A package install is not a GPU result. Follow [local inference](docs/local-inference.md) and run `scripts/verify-local-inference.py` on the Mac. `--without-local-inference` records the preference as off.
 
+The commit identity guard from groundwork-core is on by default: user-level `commit-msg` and `pre-push` hooks that call the pinned script, Claude Code attribution set to empty where you have not set it, and an empty `~/.config/groundwork/commit-denylist` for names you keep local. It sets `core.hooksPath` only when none is set and keeps each repository's own hooks running. Check it with `groundwork-commit-guard doctor`; turn it off with `groundwork-commit-guard off` (see [decision 0017](docs/decisions/0017-commit-identity-guard.md)).
+
 git-filter-repo stays off unless you pass `--with-git-filter-repo`. It installs per user with mise, needs no root, and is proven by `git filter-repo -h` listing `--sensitive-data-removal`. `--without-git-filter-repo` records a no. The procedure is the shared [history purge runbook](https://github.com/jasondockery/groundwork-core/blob/v0.8.1/docs/history-purge.md); this layer's install, proof, and removal are in [git-filter-repo](docs/git-filter-repo.md).
 
 Finish [Tailscale setup](docs/remote-access.md), including the tailnet policy review, interactive sign-in, and device approval. The local commands are:

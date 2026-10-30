@@ -1,4 +1,4 @@
 [submodule "core"]
 	path = core
 	url = https://github.com/jasondockery/groundwork-core.git
-	branch = v0.8.1
+	branch = v0.9.0
