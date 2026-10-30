@@ -6,7 +6,7 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip] [--with-local-inference|--without-local-inference] [--migrate-to-omarchy-installers]"
+  echo "Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip] [--with-local-inference|--without-local-inference] [--with-git-filter-repo|--without-git-filter-repo] [--migrate-to-omarchy-installers]"
   echo "Caps Lock defaults to Escape on tap and Control while held."
   echo "Saved setup choices are reused; explicit options change those choices."
   echo "--without-keyd leaves any existing keyd configuration and service unchanged."
@@ -15,6 +15,8 @@ usage() {
   echo "--without-blip leaves any existing Blip install unchanged."
   echo "--with-local-inference installs ollama and ollama-vulkan. It is off by default."
   echo "--without-local-inference records that preference as off. See docs/local-inference.md."
+  echo "--with-git-filter-repo installs git-filter-repo for your user with mise, never with sudo. It is off by default."
+  echo "--without-git-filter-repo records that preference as off and leaves an installed copy alone. See docs/git-filter-repo.md."
   echo "--migrate-to-omarchy-installers moves apps installed another way to Omarchy's own installer,"
   echo "  even after an earlier no. Without it, setup asks first and updates only report."
 }
@@ -23,10 +25,12 @@ with_keyd=1
 with_screen_sharing=1
 with_blip=0
 with_local_inference=0
+with_git_filter_repo=0
 keyd_choice=""
 sharing_choice=""
 blip_choice=""
 local_inference_choice=""
+git_filter_repo_choice=""
 updating=0
 update_plugins=0
 migrate_requested=0
@@ -67,6 +71,14 @@ for arg in "$@"; do
       fi
       local_inference_choice=$arg
       [[ $arg == --with-local-inference ]] && with_local_inference=1 || with_local_inference=0
+      ;;
+    --with-git-filter-repo | --without-git-filter-repo)
+      if [[ -n $git_filter_repo_choice && $git_filter_repo_choice != "$arg" ]]; then
+        echo "Choose only one of --with-git-filter-repo and --without-git-filter-repo." >&2
+        exit 64
+      fi
+      git_filter_repo_choice=$arg
+      [[ $arg == --with-git-filter-repo ]] && with_git_filter_repo=1 || with_git_filter_repo=0
       ;;
     --update) updating=1 ;;
     --update-plugins) update_plugins=1 ;;
@@ -145,6 +157,16 @@ if [[ -n $stored ]]; then
     esac
   fi
   declined_migrations=${preferences[5]-}
+  if [[ -z $git_filter_repo_choice ]]; then
+    case ${preferences[6]-} in
+      '') ;;
+      1) with_git_filter_repo=1 ;;
+      *)
+        echo "Saved git-filter-repo choice is invalid. Preserve ~/.config/groundwork/omarchy.json and repair it before rerunning." >&2
+        exit 1
+        ;;
+    esac
+  fi
 fi
 
 # An updater installed before the Brave spec fast-forwards and then runs this
@@ -1348,6 +1370,12 @@ if [[ $with_local_inference -eq 1 ]]; then
   install_local_inference
 fi
 
+# Opt-in, per-user git-filter-repo for history purges. See docs/git-filter-repo.md. The helper
+# never needs root and never runs a history rewrite.
+if [[ $with_git_filter_repo -eq 1 ]]; then
+  bash "$root/scripts/install-git-filter-repo.sh"
+fi
+
 # Syncthing is a default on every Groundwork machine (groundwork-core/docs/syncthing.md).
 # This Mac mini is the always-on peer, so lingering starts the user service at boot.
 # The helper holds the contract: tailnet-only listen addresses, the two shared
@@ -1409,7 +1437,7 @@ install_syncthing
 register_choices() {
   python3 "$root/scripts/groundwork-update.py" register "$root" "$with_keyd" "$with_screen_sharing" \
     "${GROUNDWORK_OBSIDIAN_VAULT:-$HOME/Documents/Obsidian/my_obsidian_vault}" "$with_blip" "$with_local_inference" \
-    "$declined_migrations"
+    "$declined_migrations" "$with_git_filter_repo"
 }
 register_choices
 saved_declines=$declined_migrations
