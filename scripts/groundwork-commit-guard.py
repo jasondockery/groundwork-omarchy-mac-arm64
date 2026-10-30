@@ -7,15 +7,16 @@ The file commit-identity-guard.sh there is a symlink to the pinned
 core/commit-guard/commit-identity-guard.sh; nothing is copied. core.hooksPath is
 NOT set globally. It lives in ~/.config/groundwork/commit-guard.gitconfig, which
 the XDG git config (~/.config/git/config) includes through
-includeIf "hasconfig:remote.*.url:..." for the owner's three GitHub URL forms
-(git 2.36 or newer; older git warns and skips). Work repositories and hook tools
+includeIf "hasconfig:remote.*.url:..." for the owner's GitHub URL forms and any
+scp-style host alias such as git@github-personal:owner/repo (git 2.36 or newer; older git warns and skips). Work repositories and hook tools
 such as pre-commit are untouched. If the user already sets core.hooksPath
 anywhere, nothing is written. Every documented hook name forwards to the
 repository's own .git/hooks/<name>.
 
 Gaps: a push straight to an owned URL from a repository with no owned remote is
 not guarded, and owned repositories with their own core.hooksPath (husky,
-lefthook) bypass the guard; `doctor` lists those under the code directory.
+lefthook) bypass the guard; `doctor` lists those under the code directory. URLs
+with userinfo (https://user@github.com/...) are not matched.
 
 Opt out with ~/.config/groundwork/commit-guard-off (`off` creates it, `on`
 removes it), or GROUNDWORK_COMMIT_GUARD=off for one command. The hooks check
@@ -192,8 +193,9 @@ def owner_glob():
 
 def include_keys():
     glob = owner_glob()
+    # The last prefix matches any scp-style host alias (git@github-personal:owner/repo).
     return [f'includeIf.hasconfig:remote.*.url:{prefix}{glob}/**.path' for prefix in (
-        'https://github.com/', 'git@github.com:', 'ssh://git@github.com/')]
+        'https://github.com/', 'git@github.com:', 'ssh://git@github.com/', '*:')]
 
 
 def git_version():
@@ -312,7 +314,7 @@ def bypassing_repos(limit=200):
     found = []
     if not root.is_dir():
         return found
-    patterns = (f'github.com:{OWNER}/', f'github.com/{OWNER}/')
+    patterns = (f':{OWNER}/', f'/{OWNER}/')
     seen = 0
     for base, dirs, files in os.walk(root):
         depth = len(Path(base).relative_to(root).parts)
@@ -354,7 +356,7 @@ def doctor():
         print('  warn  the owned-repository hook scope is not set up (needs git 2.36 or newer); '
               'run groundwork-update.')
     print('  note  not guarded: a push straight to an owned URL from a repository with no owned remote, '
-          'and owned repositories with their own core.hooksPath (husky, lefthook).')
+          'and owned repositories with their own core.hooksPath (husky, lefthook), and remote URLs with userinfo (https://user@github.com/...).')
     for repo in bypassing_repos():
         print(f'  warn  guard bypassed by its own core.hooksPath: {repo}')
     result = subprocess.run([str(guard), 'doctor'], capture_output=True, text=True)
