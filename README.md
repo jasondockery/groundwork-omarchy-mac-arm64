@@ -312,6 +312,8 @@ Omarchy keeps its own desktop, tmux file, shell, and Super keybindings. Practice
 | `git/config.local.example` | Placeholder for a name and email. Not applied |
 | `scripts/omarchy-plugins.py` | Applies the shared Omarchy shell-plugin list through `omarchy plugin` |
 | `omarchy-plugins.exclude.json` | Plugin ids this layer skips, each with a reason |
+| `scripts/omarchy-feed-watch.py` | Reports apps this layer installs itself that Omarchy now provides, and offers the move (`report`, `--json`, `dismiss <app>`). Read-only and offline unless `--online` is passed |
+| `omarchy-feed-watch.json` | The apps that report checks, each with Groundwork's method, Omarchy's candidates, and the dated evidence for keeping the self-install |
 | `scripts/groundwork-syncthing.py` | Syncthing as a user service on the tailnet, the `~/Shared` and FreeTube folders, and `groundwork syncthing-pair` |
 
 ## Syncthing shared folders
