@@ -315,6 +315,8 @@ Omarchy keeps its own desktop, tmux file, shell, and Super keybindings. Practice
 | `scripts/groundwork-disk-report.py` | Report-only sizes and cleanup commands for the yay cache, journal, and Flatpak installations. Omarchy already trims the pacman cache and ships Disktree ([decision 0019](docs/decisions/0019-disk-cleanup-report-only.md)) |
 | `scripts/omarchy-plugins.py` | Applies the shared Omarchy shell-plugin list through `omarchy plugin` |
 | `omarchy-plugins.exclude.json` | Plugin ids this layer skips, each with a reason |
+| `scripts/omarchy-feed-watch.py` | Reports apps this layer installs itself that Omarchy now provides, and offers the move (`report`, `--json`, `dismiss <app>`). Read-only and offline unless `--online` is passed |
+| `omarchy-feed-watch.json` | The apps that report checks, each with Groundwork's method, Omarchy's candidates, and the dated evidence for keeping the self-install |
 | `scripts/groundwork-syncthing.py` | Syncthing as a user service on the tailnet, the `~/Shared` and FreeTube folders, and `groundwork syncthing-pair` |
 | `scripts/groundwork-path-shadow.py` | Read-only report of PATH entries that shadow a managed command (pacman or Omarchy package, mise, Groundwork-installed `t3`), with the shell file that sets the winning entry. Run it from the checkout; `--json` and `--strict` are available. It never deletes or edits anything. |
 

@@ -1,0 +1,210 @@
+{
+  "schema": 1,
+  "about": "Apps Groundwork installs or sets up itself, and the Omarchy paths that could replace each one. Read by scripts/omarchy-feed-watch.py. Order of checks is AGENTS.md 'Omarchy first'. Apps already installed through omarchy pkg add or an Omarchy installer are listed under not_watched.",
+  "apps": [
+    {
+      "id": "t3-code",
+      "name": "T3 Code",
+      "doc": "docs/apps/t3-code.md",
+      "groundwork_method": "official T3 Code Nightly CLI (https://t3.codes/install.sh), reconciled by setup and update-all",
+      "probe": {
+        "path": "~/.t3/runtime/versions"
+      },
+      "candidates": [
+        {
+          "installer": "omarchy-install-ai-t3-code",
+          "command": "omarchy-install-ai-t3-code nightly --no-launch",
+          "menu": "Install > AI > T3 Code"
+        }
+      ],
+      "installer_keywords": [
+        "t3code",
+        "t3-code"
+      ],
+      "offer": "Decision 0020 (docs/decisions/0020-t3-code-through-omarchy-installer.md) moves T3 Code to Omarchy's installer, not the t3code-bin or t3code-nightly-bin packages. Until issue #110 ships that move as migration t3-cli, Groundwork's setup still reconciles the bun CLI, so wait for it. Quit T3 Code before any move; ~/.t3 and ~/.config/t3code stay.",
+      "self_install": {
+        "needed": true,
+        "evidence": "Decision 0020 (docs/decisions/0020-t3-code-through-omarchy-installer.md) keeps the official t3.codes/install.sh CLI, its pinned build and its update-all check only until issue #110's implementation merges, after #102. The feed's t3code packages are not used.",
+        "checked": "2026-10-31",
+        "recheck": "2026-11-30"
+      }
+    },
+    {
+      "id": "bitwarden-desktop",
+      "name": "Bitwarden desktop",
+      "doc": "docs/apps/bitwarden.md",
+      "groundwork_method": "user Flatpak com.bitwarden.desktop (fallback when the feed lacks bitwarden)",
+      "probe": {
+        "flatpak": "com.bitwarden.desktop"
+      },
+      "migration_id": "bitwarden-flatpak",
+      "candidates": [
+        {
+          "package": "bitwarden",
+          "menu": "Install > Service > Bitwarden",
+          "command": "cd {repo} && ./install.sh --migrate-to-omarchy-installers"
+        }
+      ],
+      "installer_keywords": [
+        "bitwarden"
+      ],
+      "offer": "Setup moves the Flatpak to Omarchy's bitwarden package only with your yes (migration id bitwarden-flatpak). It checks the package on this kernel first and keeps ~/.var/app/com.bitwarden.desktop. Sign in again in the new app.",
+      "self_install": {
+        "needed": false,
+        "evidence": "The Flatpak is only the fallback for a feed without bitwarden. pacman -Si bitwarden showed omarchy/bitwarden 2026.10.1-1 for aarch64 on 2026-10-28 (decision 0014).",
+        "checked": "2026-10-28",
+        "recheck": "2026-11-30"
+      }
+    },
+    {
+      "id": "cursor",
+      "name": "Cursor",
+      "doc": "docs/apps/cursor.md",
+      "groundwork_method": "omarchy pkg add cursor-bin, as Omarchy's Install > Editor > Cursor does (decision 0009); an existing cursor command is kept",
+      "probe": {
+        "command": "cursor",
+        "owner": "cursor-bin"
+      },
+      "candidates": [
+        {
+          "package": "cursor-bin",
+          "menu": "Install > Editor > Cursor",
+          "command": "omarchy pkg add cursor-bin"
+        }
+      ],
+      "installer_keywords": [
+        "cursor"
+      ],
+      "offer": "This cursor is not Omarchy's method, which is the cursor-bin package (Install > Editor > Cursor). An example is the AppImage from the older Omarchy Mac omarchy-install-cursor. This move is manual and is not done for you; nothing touches a pacman-owned cursor-bin. The steps are in docs/apps.md#cursor.",
+      "self_install": {
+        "needed": false,
+        "evidence": "Groundwork already installs cursor-bin with omarchy pkg add, which is Omarchy's own method. Only a cursor on PATH that cursor-bin does not own is reported, and it is never migrated automatically (decision 0014, Cursor: report only).",
+        "checked": "2026-10-31",
+        "recheck": "2026-11-30"
+      }
+    },
+    {
+      "id": "freetube",
+      "name": "FreeTube",
+      "doc": "docs/apps/freetube.md",
+      "groundwork_method": "user Flatpak io.freetubeapp.FreeTube",
+      "probe": {
+        "flatpak": "io.freetubeapp.FreeTube"
+      },
+      "candidates": [
+        {
+          "package": "freetube"
+        },
+        {
+          "package": "freetube-bin"
+        }
+      ],
+      "installer_keywords": [
+        "freetube"
+      ],
+      "offer": "Omarchy now ships FreeTube. Check the package on this kernel's pages before moving; your data in ~/.var/app/io.freetubeapp.FreeTube/config/FreeTube does not move by itself.",
+      "self_install": {
+        "needed": true,
+        "evidence": "Arch Linux, Arch Linux ARM, pkgs.omarchy.org/edge/aarch64, and ALARM's prebuilt aur database had no freetube package on 2026-10-24 (docs/apps.md#freetube).",
+        "checked": "2026-10-24",
+        "recheck": "2026-11-30"
+      }
+    },
+    {
+      "id": "tailscale",
+      "name": "Tailscale",
+      "doc": "docs/decisions/0004-remote-access.md",
+      "groundwork_method": "omarchy pkg add tailscale, then systemctl enable --now tailscaled; sign-in left to you",
+      "probe": {
+        "path": "/usr/bin/tailscale"
+      },
+      "candidates": [
+        {
+          "installer": "omarchy-install-service-tailscale",
+          "command": "omarchy-install-service-tailscale",
+          "menu": "Install > Service > Tailscale"
+        }
+      ],
+      "installer_keywords": [
+        "tailscale"
+      ],
+      "offer": "Omarchy's installer also runs tailscale up, sets you as operator, receives Taildrop files in ~/Downloads, and adds the bar plugin and an admin web app. It asks for tailnet sign-in while it runs.",
+      "self_install": {
+        "needed": true,
+        "evidence": "omarchy-install-service-tailscale runs sudo tailscale up --accept-routes during install. Tailnet sign-in stays interactive and local, so setup and update-all do not run it (issue #18 scope).",
+        "checked": "2026-10-31",
+        "recheck": "2026-11-30"
+      }
+    },
+    {
+      "id": "git-filter-repo",
+      "name": "git-filter-repo",
+      "doc": "docs/git-filter-repo.md",
+      "groundwork_method": "mise use -g pipx:git-filter-repo (opt-in, --with-git-filter-repo)",
+      "probe": {
+        "path": "~/.local/share/mise/installs/pipx-git-filter-repo"
+      },
+      "candidates": [
+        {
+          "package": "git-filter-repo",
+          "repo": "extra"
+        }
+      ],
+      "installer_keywords": [
+        "filter-repo"
+      ],
+      "offer": "omarchy pkg add installs the system git-filter-repo. It counts only when git filter-repo -h lists --sensitive-data-removal. Then remove the per-user copy with mise unuse -g pipx:git-filter-repo.",
+      "self_install": {
+        "needed": true,
+        "evidence": "The groundwork-core history-purge runbook names the per-user mise line, and distro packages older than 2.47 lack --sensitive-data-removal (docs/git-filter-repo.md). A system package that passes that check already satisfies the opt-in.",
+        "checked": "2026-10-31",
+        "recheck": "2026-11-30"
+      }
+    },
+    {
+      "id": "syncthing",
+      "name": "Syncthing",
+      "doc": "docs/apps/syncthing.md",
+      "groundwork_method": "omarchy pkg add syncthing, then Groundwork's own user service setup (scripts/groundwork-syncthing.py)",
+      "candidates": [],
+      "installer_keywords": [
+        "syncthing"
+      ],
+      "offer": "Omarchy now has its own Syncthing setup. Compare it with the tailnet-only listeners in decision 0013 before moving.",
+      "self_install": {
+        "needed": true,
+        "evidence": "No omarchy-install-* command for Syncthing on 2026-10-31. Groundwork's setup binds Syncthing to the tailnet only (decision 0013).",
+        "checked": "2026-10-31",
+        "recheck": "2026-11-30"
+      }
+    },
+    {
+      "id": "wayvnc",
+      "name": "Desktop sharing (WayVNC)",
+      "doc": "docs/apps/screen-sharing.md",
+      "groundwork_method": "omarchy pkg add wayvnc, then Groundwork's user service bound to the Tailscale address",
+      "candidates": [],
+      "installer_keywords": [
+        "wayvnc",
+        "vnc"
+      ],
+      "offer": "Omarchy now has its own VNC setup. Compare it with the tailnet-only binding in docs/apps/screen-sharing.md before moving.",
+      "self_install": {
+        "needed": true,
+        "evidence": "No omarchy-install-* command for WayVNC on 2026-10-31. omarchy-install-service-sunshine is a different protocol for Moonlight (decision 0004).",
+        "checked": "2026-10-31",
+        "recheck": "2026-11-30"
+      }
+    }
+  ],
+  "not_watched": {
+    "brave": "omarchy-install-browser brave (decision 0015).",
+    "obsidian": "Omarchy's own package.",
+    "herdr": "Omarchy's own package.",
+    "keyd": "omarchy pkg add keyd; Groundwork only writes its config (decision 0003).",
+    "blip": "omarchy plugin add from git (decision 0011); bun through omarchy-install-dev-env.",
+    "local-inference": "omarchy pkg add ollama ollama-vulkan (decision 0012).",
+    "ai-providers": "Omarchy's declared mise tools.",
+    "packages.txt": "An optional list; each entry is added by hand with omarchy pkg add."
+  }
+}
