@@ -21,11 +21,17 @@ OWNED = {
     'upper-case': 'git@github.com:JASONDOCKERY/fixture.git',
     'alias': 'git@github-personal:jasondockery/x.git',
     'alias-mixed-case': 'git@github-personal:JasonDockery/x.git',
+    'ssh-port': 'ssh://git@github.com:22/jasondockery/x',
+    'ssh-port-443': 'ssh://git@ssh.github.com:443/JasonDockery/x',
+    'ssh-alias': 'ssh://github-personal/jasondockery/x',
 }
 NOT_OWNED = {
     'alias-employer': 'git@github-personal:EmployerCorp/x.git',
     'alias-longer-owner': 'git@github-personal:jasondockery2/x',
     'https-longer-owner': 'https://github.com/jasondockery2/x.git',
+    'ssh-longer-owner': 'ssh://github-personal/jasondockery2/x',
+    'ssh-port-longer-owner': 'ssh://git@github.com:22/jasondockery2/x',
+    'ssh-other-owner-path': 'ssh://github-personal/other/jasondockery/x',
 }
 EMPLOYER = 'git@github.com:example-employer/fixture.git'
 BAD_MESSAGE = 'm\n\nCo-authored-by: A <a@example.com>'
@@ -92,7 +98,7 @@ class CommitGuardTests(unittest.TestCase):
         self.assertIn(str(self.hooks), (self.gw / 'commit-guard.gitconfig').read_text())
         includes = self.git('config', '--file', str(self.home / '.config/git/config'),
                             '--get-regexp', r'^includeif\..*\.path$').stdout.splitlines()
-        self.assertEqual(len(includes), 4)
+        self.assertEqual(len(includes), 5)
         self.assertFalse((self.home / '.gitconfig').exists())
         self.assertEqual((self.gw / 'commit-denylist').read_text(), '')
         self.assertEqual(json.loads(self.settings.read_text()), {'attribution': {'commit': '', 'pr': ''}})
@@ -145,6 +151,62 @@ class CommitGuardTests(unittest.TestCase):
             result = self.git('commit', '-q', '-m', BAD_MESSAGE, cwd=repo)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(self.git('config', '--get', 'core.hooksPath', cwd=repo).stdout.strip(), '')
+
+    def test_core_pattern_list_drives_five_keys(self):
+        self.apply()
+        target = self.home / '.config/git/config'
+        keys = subprocess.run(['git', 'config', '--file', str(target), '--get-regexp', r'^includeif\.'],
+                              env=self.env, text=True, capture_output=True).stdout.splitlines()
+        self.assertEqual(len(keys), 5, keys)
+        self.assertTrue(any('ssh://*/[jJ]' in key for key in keys), keys)
+
+    def test_ssh_forms_with_temp_global_config(self):
+        # Real git, a from-scratch env, and a temp GIT_CONFIG_GLOBAL as the config file.
+        self.apply()
+        config = self.home / 'global.gitconfig'
+        config.write_text((self.home / '.config/git/config').read_text())
+        env = {'PATH': os.environ['PATH'], 'HOME': str(self.home), 'XDG_CONFIG_HOME': str(self.home / 'xdg'),
+               'GIT_CONFIG_GLOBAL': str(config), 'GIT_CONFIG_NOSYSTEM': '1'}
+        hooks = str(self.hooks)
+        for name, url in {**OWNED, **NOT_OWNED}.items():
+            repo = self.home / ('probe-' + name)
+            subprocess.run(['git', 'init', '-q', str(repo)], env=env, check=True, capture_output=True)
+            subprocess.run(['git', '-C', str(repo), 'remote', 'add', 'origin', url], env=env, check=True)
+            got = subprocess.run(['git', '-C', str(repo), 'config', '--get', 'core.hooksPath'],
+                                 env=env, text=True, capture_output=True).stdout.strip()
+            self.assertEqual(got, hooks if name in OWNED else '', name)
+
+    def test_apply_adds_only_the_missing_key_and_doctor_reports_it_until_then(self):
+        self.apply()
+        target = self.home / '.config/git/config'
+        keys = subprocess.run(['git', 'config', '--file', str(target), '--name-only', '--get-regexp', r'^includeif\.'],
+                              env=self.env, text=True, capture_output=True).stdout.split()
+        fifth = [k for k in keys if k.startswith('includeif.hasconfig:remote.*.url:ssh://*/')]
+        self.assertEqual(len(fifth), 1, keys)
+        subprocess.run(['git', 'config', '--file', str(target), '--unset', fifth[0]], env=self.env, check=True)
+        subprocess.run(['git', 'config', '--file', str(target), 'user.keep', 'me'], env=self.env, check=True)
+        before = self.snapshot()
+        self.assertIn('the owned-repository hook scope is not set up', self.helper('doctor').stdout)
+        again = self.apply()
+        self.assertEqual(again.returncode, 0, again.stderr)
+        after = subprocess.run(['git', 'config', '--file', str(target), '--name-only', '--list'],
+                               env=self.env, text=True, capture_output=True).stdout.split()
+        self.assertEqual(sorted(after), sorted(keys + ['user.keep']))
+        self.assertIn('hooks apply to repositories', self.helper('doctor').stdout)
+        self.assertNotEqual(self.snapshot(), before)
+
+    def test_missing_pattern_list_fails_closed(self):
+        fake = self.home / 'pin/commit-guard'
+        fake.mkdir(parents=True)
+        (fake / 'commit-identity-guard.sh').symlink_to(GUARD)
+        # The list is looked up beside the resolved guard, so copy the script instead of linking it.
+        (fake / 'commit-identity-guard.sh').unlink()
+        (fake / 'commit-identity-guard.sh').write_text(GUARD.read_text())
+        (fake / 'commit-identity-guard.sh').chmod(0o755)
+        result = self.helper('apply', '--guard', str(fake / 'commit-identity-guard.sh'))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('owner-remote-patterns', result.stderr)
+        self.assertFalse((self.home / '.config/git/config').exists())
 
     def test_userinfo_urls_are_not_matched(self):
         self.apply()
