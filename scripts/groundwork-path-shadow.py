@@ -19,7 +19,10 @@ For each managed command it compares the first PATH hit with the managed path:
 When another entry wins, it names the shell files that put that directory on
 PATH, where it can find them.
 
-  groundwork-path-shadow.py [--json] [--strict] [command ...]
+  groundwork-path-shadow.py [--json | --brief] [--strict] [command ...]
+
+--brief prints one line per shadowed command or one whose owner did not answer,
+and nothing at all when there is none. update-all runs it that way.
 
 The exit status is 0 unless --strict is given and a command is shadowed.
 """
@@ -28,6 +31,7 @@ import glob
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 
@@ -51,6 +55,9 @@ MANAGED = [
 # Installers that source an env script instead of writing the directory.
 ENV_SCRIPTS = {'.cargo/bin': '.cargo/env'}
 STATUS_ORDER = ['shadowed', 'missing', 'unknown', 'unmanaged', 'ok', 'absent']
+# What --brief reports. Unmanaged is left to the full report: Cursor and
+# Bitwarden may have no package owner on purpose.
+BRIEF_STATUSES = ('shadowed', 'unknown')
 RUN_TIMEOUT = 10
 
 
@@ -307,10 +314,35 @@ def render(results, home):
     return '\n'.join(lines)
 
 
+def render_brief(results, home):
+    """One line per shadowed or unknown command, then the full-report command. Empty when none."""
+    lines = []
+    for item in sorted(results, key=lambda i: STATUS_ORDER.index(i['status'])):
+        if item['status'] not in BRIEF_STATUSES:
+            continue
+        if item['status'] == 'shadowed':
+            text = 'PATH shadow: %s runs %s, not the managed %s.' % (
+                item['command'], display(item['winner'], home), display(item['managed'], home))
+        else:
+            text = 'PATH shadow: %s at %s could not be checked (%s).' % (
+                item['command'], display(item['winner'], home), item['detail'])
+        if item['attribution']:
+            hit = item['attribution'][0]
+            text += ' PATH entry from %s:%d (%s).' % (display(hit['file'], home), hit['line'], hit['effect'])
+        lines.append(text)
+    if lines:
+        lines.append('Details: python3 %s. Report only: nothing was changed.'
+                     % shlex.quote(str(Path(__file__).resolve())))
+    return '\n'.join(lines)
+
+
 def main(argv=None, environ=None, system_root='/'):
     parser = argparse.ArgumentParser(description='Report PATH entries that shadow a Groundwork-managed command (read only).')
     parser.add_argument('commands', nargs='*', help='limit the check to these managed commands')
-    parser.add_argument('--json', action='store_true', help='print machine-readable results')
+    style = parser.add_mutually_exclusive_group()
+    style.add_argument('--json', action='store_true', help='print machine-readable results')
+    style.add_argument('--brief', action='store_true',
+                       help='only shadowed or unchecked commands, one line each; nothing when there are none')
     parser.add_argument('--strict', action='store_true', help='exit 1 when a command is shadowed')
     args = parser.parse_args(argv)
     environ = dict(os.environ if environ is None else environ)
@@ -321,6 +353,10 @@ def main(argv=None, environ=None, system_root='/'):
     results = scan(environ, commands=args.commands, system_root=system_root)
     if args.json:
         print(json.dumps(results, indent=2))
+    elif args.brief:
+        text = render_brief(results, environ.get('HOME', ''))
+        if text:
+            print(text)
     else:
         print(render(results, environ.get('HOME', '')))
     shadowed = any(item['status'] == 'shadowed' for item in results)

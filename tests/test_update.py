@@ -208,6 +208,21 @@ class UpdateTests(unittest.TestCase):
         self.run_patch = patch.object(updater, 'run', side_effect=self.run_command)
         self.run_patch.start()
         self.addCleanup(self.run_patch.stop)
+        # The closing reports: recorded, quiet unless a test sets an answer.
+        self.report_calls = []
+        self.report_answers = {}
+        self.real_run_report = updater.run_report
+
+        # A closure, so other test classes that borrow this setUp get it too.
+        def fake_report(label, argv, deadline):
+            self.report_calls.append((label, argv, deadline))
+            # The update has finished and recorded its receipt before any report runs.
+            self.assertTrue((self.state / 'update-all-last-success.json').is_file())
+            return self.report_answers.get(label, '')
+        self.report_patch = patch.object(updater, 'run_report', side_effect=fake_report)
+        self.report_patch.start()
+        self.addCleanup(self.report_patch.stop)
+        os.environ.pop(updater.SKIP_REPORTS_ENV, None)
 
     def command(self, *args):
         return subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL).strip()
@@ -761,6 +776,167 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
                 result = subprocess.run(['bash', str(script), *arguments], capture_output=True, text=True, timeout=5)
                 self.assertEqual(result.returncode, expected, result.stderr)
 
+
+    # The closing reports (issues #18, #107, #103).
+
+    def test_update_all_runs_each_report_after_the_update_and_layer_does_not(self):
+        with patch('sys.stdout', new_callable=io.StringIO) as output:
+            self.assertEqual(updater.update('all'), 'completed')
+        python = sys.executable
+        self.assertEqual([(label, argv) for label, argv, _ in self.report_calls], [
+            ('Omarchy feed watch', [python, str(self.source / 'scripts/omarchy-feed-watch.py'), 'report', '--brief']),
+            ('PATH shadow check', [python, str(self.source / 'scripts/groundwork-path-shadow.py'), '--brief']),
+            ('Disk report', [python, str(self.source / 'scripts/groundwork-disk-report.py'), '--brief']),
+        ])
+        self.assertTrue(all(0 < deadline <= 60 for _, _, deadline in self.report_calls))
+        self.assertIn('Reports: no Omarchy offers, PATH shadows, or low disk space.', output.getvalue())
+        self.report_calls.clear()
+        updater.update('layer')
+        updater.update('all', check=True)
+        self.assertEqual(self.report_calls, [])
+
+    def test_quiet_reports_print_one_line_and_findings_print_only_themselves(self):
+        with patch('sys.stdout', new_callable=io.StringIO) as output:
+            updater.update('all')
+        tail = output.getvalue().split('FreeTube user Flatpak update command completed', 1)[1]
+        self.assertEqual([line for line in tail.splitlines() if line.strip()],
+                         ['Reports: no Omarchy offers, PATH shadows, or low disk space.'])
+        self.report_answers['Disk report'] = 'Disk: 9.0 GiB free on /, under the 10.0 GiB Omarchy needs to update.'
+        with patch('sys.stdout', new_callable=io.StringIO) as output:
+            updater.update('all')
+        tail = output.getvalue().split('FreeTube user Flatpak update command completed', 1)[1]
+        self.assertEqual([line for line in tail.splitlines() if line.strip()],
+                         [self.report_answers['Disk report']])
+
+    def test_skip_variable_runs_no_report(self):
+        for value in ('1', 'yes'):
+            with patch.dict(os.environ, {updater.SKIP_REPORTS_ENV: value}), \
+                    patch('sys.stdout', new_callable=io.StringIO) as output:
+                self.assertEqual(updater.update('all'), 'completed')
+            self.assertEqual(self.report_calls, [])
+            self.assertNotIn('Reports', output.getvalue())
+        with patch.dict(os.environ, {updater.SKIP_REPORTS_ENV: '0'}), patch('sys.stdout', new_callable=io.StringIO):
+            updater.update('all')
+        self.assertEqual(len(self.report_calls), 3)
+
+    def test_failing_and_hanging_reports_never_fail_update_all(self):
+        # Real report processes from the fetched checkout, with short deadlines.
+        self.report_patch.stop()
+        scripts = self.seed / 'scripts'
+        (scripts / 'omarchy-feed-watch.py').write_text('import sys\nprint("table broken", file=sys.stderr)\nsys.exit(1)\n')
+        (scripts / 'groundwork-path-shadow.py').write_text(
+            'import subprocess, sys, time\n'
+            'subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])\n'
+            'time.sleep(60)\n')
+        (scripts / 'groundwork-disk-report.py').write_text('print("Disk: fixture finding")\n')
+        self.commit(self.seed)
+        self.command('git', '-C', str(self.seed), 'push', 'origin', 'main')
+        reports = tuple((label, script, args, 2) for label, script, args, _ in updater.REPORTS)
+        started = time.monotonic()
+        with patch.object(updater, 'REPORTS', reports), \
+                patch('sys.stdout', new_callable=io.StringIO) as output, \
+                patch('sys.stderr', new_callable=io.StringIO) as errors:
+            self.assertEqual(updater.main(['all']), 0)
+        self.assertLess(time.monotonic() - started, 30)
+        receipt = json.loads((self.state / 'update-all-last-success.json').read_text())
+        self.assertEqual(receipt['result'], 'completed')
+        self.assertNotIn('warnings', receipt)
+        self.assertIn('Omarchy feed watch failed (exit 1); skipped. table broken', errors.getvalue())
+        self.assertIn('PATH shadow check did not finish within 2 seconds; skipped.', errors.getvalue())
+        self.assertNotIn('Update incomplete', errors.getvalue())
+        self.assertIn('Disk: fixture finding', output.getvalue())
+        self.assertNotIn('Reports: no Omarchy offers', output.getvalue())
+
+    def test_a_report_that_cannot_start_or_is_interrupted_is_only_noted(self):
+        with patch('sys.stderr', new_callable=io.StringIO) as errors:
+            self.assertIsNone(self.real_run_report('Fixture report', [str(self.root / 'missing')], 5))
+        self.assertIn('Fixture report could not start', errors.getvalue())
+        self.report_patch.stop()
+        with patch.object(updater, 'run_report', side_effect=KeyboardInterrupt), \
+                patch('sys.stdout', new_callable=io.StringIO), \
+                patch('sys.stderr', new_callable=io.StringIO) as errors:
+            self.assertEqual(updater.update('all'), 'completed')
+        self.assertIn('Reports cancelled. The update itself had already finished.', errors.getvalue())
+        self.assertNotIn('Update incomplete', errors.getvalue())
+
+    def test_a_report_printing_invalid_bytes_is_shown_and_does_not_fail(self):
+        script = self.root / 'bytes.py'
+        script.write_text('import sys\nsys.stdout.buffer.write(b"Disk: \\xff odd\\n")\n')
+        self.report_patch.stop()
+        reports = (('Disk report', str(script), (), 10),)
+        with patch.object(updater, 'REPORTS', reports), \
+                patch.object(updater, 'run_report', side_effect=lambda label, argv, deadline:
+                             self.real_run_report(label, [sys.executable, str(script)], deadline)), \
+                patch('sys.stdout', new_callable=io.StringIO) as output, \
+                patch('sys.stderr', new_callable=io.StringIO) as errors:
+            self.assertEqual(updater.main(['all']), 0)
+        self.assertIn('Disk: \ufffd odd', output.getvalue())
+        self.assertNotIn('Update incomplete', errors.getvalue())
+        self.assertEqual(json.loads((self.state / 'update-all-last-success.json').read_text())['result'], 'completed')
+
+    def test_a_report_runner_that_raises_or_a_closed_stdout_is_only_noted(self):
+        self.report_patch.stop()
+        for failure in (RuntimeError('fixture bug'), BrokenPipeError(32, 'Broken pipe')):
+            with self.subTest(failure=type(failure).__name__), \
+                    patch.object(updater, 'run_report', side_effect=failure), \
+                    patch('sys.stdout', new_callable=io.StringIO), \
+                    patch('sys.stderr', new_callable=io.StringIO) as errors:
+                self.assertEqual(updater.main(['all']), 0)
+            expected = ('Reports stopped: the output was closed.' if isinstance(failure, BrokenPipeError)
+                        else f'Reports stopped ({type(failure).__name__}')
+            self.assertIn(expected, errors.getvalue())
+            self.assertIn('The update itself had already finished.', errors.getvalue())
+            self.assertNotIn('Update incomplete', errors.getvalue())
+        # stdout already closed when the reports start.
+        closed = io.StringIO()
+        with patch('sys.stderr', new_callable=io.StringIO) as errors:
+            with patch('sys.stdout', closed):
+                closed.close()
+                updater.run_reports(self.source)
+        self.assertIn('Reports stopped (ValueError', errors.getvalue())
+
+    def test_a_reader_that_quits_early_still_leaves_exit_zero(self):
+        # update-all | head: the pipe closes before the reports print. The
+        # process must not exit 120 from Python's final flush.
+        ready = self.root / 'reader-closed'
+        child = self.root / 'child.py'
+        child.write_text(
+            'import importlib.util, os, sys, time\n'
+            'from pathlib import Path\n'
+            f'spec = importlib.util.spec_from_file_location("u", {str(REPO / "scripts/groundwork-update.py")!r})\n'
+            'u = importlib.util.module_from_spec(spec); spec.loader.exec_module(u)\n'
+            'u.run_report = lambda label, argv, deadline: "Disk: fixture finding\\n" * 1000\n'
+            f'while not os.path.exists({str(ready)!r}): time.sleep(0.05)\n'
+            f'u.run_reports(Path({str(self.source)!r}))\n'
+            'print("after the reports")\n')
+        process = subprocess.Popen([sys.executable, str(child)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process.stdout.close()
+        ready.touch()
+        _, errors = process.communicate(timeout=30)
+        self.assertEqual(process.returncode, 0, errors)
+        self.assertIn(b'Reports stopped: the output was closed.', errors)
+        self.assertNotIn(b'Exception ignored', errors)
+
+    def test_a_timed_out_report_leaves_no_process_behind(self):
+        marker = self.root / 'child.pid'
+        script = self.root / 'hang.py'
+        script.write_text('import subprocess, sys, time\n'
+                          'child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])\n'
+                          f'open({str(marker)!r}, "w").write(str(child.pid))\n'
+                          'time.sleep(60)\n')
+        with patch('sys.stderr', new_callable=io.StringIO):
+            self.assertIsNone(self.real_run_report('Fixture report', [sys.executable, str(script)], 5))
+        pid = int(marker.read_text())
+        for _ in range(50):
+            try:
+                # Gone, or a zombie waiting for its new parent to reap it.
+                if Path(f'/proc/{pid}/stat').read_text().split(') ', 1)[1].startswith('Z'):
+                    break
+            except (FileNotFoundError, ProcessLookupError):
+                break
+            time.sleep(0.1)
+        else:
+            self.fail(f'report child {pid} still running')
 
     def enable_saved_blip(self):
         saved = json.loads(self.config.read_text())

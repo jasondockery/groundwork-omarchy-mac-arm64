@@ -134,6 +134,23 @@ only in an interactive terminal, without `--yes`, so you can read the diff.
 If that diff touches `bridge/`, it reminds you to re-run `blip-setup` and does
 not run the wizard. `groundwork-update` does not update the plugin.
 
+Last, `update-all` runs three report-only checks from the checkout. They run after
+the update has finished and recorded its result, each with a short time limit
+(60, 30, and 15 seconds). A check that fails or runs out of time prints one line
+and is skipped; it never changes the exit status. Each prints only what it finds:
+
+- `scripts/omarchy-feed-watch.py report --brief`: apps Groundwork installs itself
+  that Omarchy now provides, one line per offer you have not dismissed.
+- `scripts/groundwork-path-shadow.py --brief`: managed commands whose first `PATH`
+  hit is another copy, or whose owner could not be asked, with the shell file
+  that puts it first.
+- `scripts/groundwork-disk-report.py --brief`: free space on `/` under, or within
+  5 GiB of, the 10 GiB Omarchy needs to update.
+
+When none of them finds anything, `update-all` prints one line saying so. Run a
+script without `--brief` for the full report. Set `GROUNDWORK_SKIP_REPORTS=1` to
+skip all three. `groundwork-update` and `update-all --check` do not run them.
+
 For only repository configuration, run `groundwork-update`. It preserves saved
 keyd, screen-sharing, Blip, and Obsidian vault choices and does not request routine
 system or app upgrades. It installs and retires listed shell plugins and leaves
@@ -329,13 +346,13 @@ Omarchy keeps its own desktop, tmux file, shell, and Super keybindings. Practice
 | `keyd/default.conf` | Default Caps Lock behavior: tap = Escape, hold = Control, via keyd |
 | `packages.txt` | Optional aarch64 packages that are not part of the Omarchy install |
 | `git/config.local.example` | Placeholder for a name and email. Not applied |
-| `scripts/groundwork-disk-report.py` | Report-only sizes and cleanup commands for the yay cache, journal, and Flatpak installations. Omarchy already trims the pacman cache and ships Disktree ([decision 0019](docs/decisions/0019-disk-cleanup-report-only.md)) |
+| `scripts/groundwork-disk-report.py` | Report-only sizes and cleanup commands for the yay cache, journal, and Flatpak installations. Omarchy already trims the pacman cache and ships Disktree ([decision 0019](docs/decisions/0019-disk-cleanup-report-only.md)). `--brief`, which `update-all` runs, only warns about low free space |
 | `scripts/omarchy-plugins.py` | Applies the shared Omarchy shell-plugin list through `omarchy plugin` |
 | `omarchy-plugins.exclude.json` | Plugin ids this layer skips, each with a reason |
-| `scripts/omarchy-feed-watch.py` | Reports apps this layer installs itself that Omarchy now provides, and offers the move (`report`, `--json`, `dismiss <app>`). Read-only and offline unless `--online` is passed |
+| `scripts/omarchy-feed-watch.py` | Reports apps this layer installs itself that Omarchy now provides, and offers the move (`report`, `--json`, `--brief`, `dismiss <app>`). Read-only and offline unless `--online` is passed. `update-all` runs `report --brief` |
 | `omarchy-feed-watch.json` | The apps that report checks, each with Groundwork's method, Omarchy's candidates, and the dated evidence for keeping the self-install |
 | `scripts/groundwork-syncthing.py` | Syncthing as a user service on the tailnet, the `~/Shared` and FreeTube folders, and `groundwork syncthing-pair` |
-| `scripts/groundwork-path-shadow.py` | Read-only report of PATH entries that shadow a managed command (pacman or Omarchy package, mise, Groundwork-installed `t3`), with the shell file that sets the winning entry. Run it from the checkout; `--json` and `--strict` are available. It never deletes or edits anything. |
+| `scripts/groundwork-path-shadow.py` | Read-only report of PATH entries that shadow a managed command (pacman or Omarchy package, mise, Groundwork-installed `t3`), with the shell file that sets the winning entry. Run it from the checkout; `--json`, `--brief`, and `--strict` are available. `update-all` runs `--brief`, and setup's `t3` check prints its report when another `t3` wins. It never deletes or edits anything. |
 
 ## Syncthing shared folders
 

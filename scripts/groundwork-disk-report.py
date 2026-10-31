@@ -9,17 +9,26 @@ cache, the systemd journal, and Flatpak installations (unused runtimes are remov
 with flatpak's own prompt; this does not count them). Every action line
 is a command for the person to read and run themselves.
 
+  groundwork-disk-report.py [--brief]
+
+--brief only checks free space on /. It prints one line when that is under, or
+within 5 GiB of, Omarchy's 10 GiB update floor, and nothing otherwise. It walks
+no directory and runs no command. update-all runs it that way.
+
 Exit status: 0 always for a finished report, 2 for bad usage.
 """
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 
 GIB = 1024 ** 3
 OMARCHY_UPDATE_MIN_FREE = 10 * GIB  # omarchy-update-requires-free-space
+# --brief speaks up below this much free space: the floor plus 5 GiB of room.
+BRIEF_NEAR_FREE = OMARCHY_UPDATE_MIN_FREE + 5 * GIB
 PACMAN_CACHE = Path('/var/cache/pacman/pkg')
 FLATPAK_SYSTEM = Path('/var/lib/flatpak')
 
@@ -111,12 +120,31 @@ def collect(home, run=None, tree_size=None, free_bytes=None):
     return rows
 
 
+def brief(free_bytes=None):
+    """One line when free space on / is under or near Omarchy's floor, else ''."""
+    if free_bytes is None:
+        free_bytes = shutil.disk_usage('/').free
+    if free_bytes >= BRIEF_NEAR_FREE:
+        return ''
+    floor = human(OMARCHY_UPDATE_MIN_FREE)
+    if free_bytes < OMARCHY_UPDATE_MIN_FREE:
+        state = f'Disk: {human(free_bytes)} free on /, under the {floor} Omarchy needs to update.'
+    else:
+        state = f'Disk: {human(free_bytes)} free on /, close to the {floor} Omarchy needs to update.'
+    return f'{state} What can be cleaned: python3 {shlex.quote(str(Path(__file__).resolve()))}'
+
+
 def main(argv):
     if argv and argv[0] in ('-h', '--help'):
         print(__doc__.strip())
         return 0
+    if argv == ['--brief']:
+        line = brief()
+        if line:
+            print(line)
+        return 0
     if argv:
-        print('usage: groundwork-disk-report [-h]', file=sys.stderr)
+        print('usage: groundwork-disk-report [-h] [--brief]', file=sys.stderr)
         return 2
     print('Disk report. This only measures; it deletes nothing.\n')
     for label, value, note, command in collect(Path.home()):

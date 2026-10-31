@@ -177,8 +177,12 @@ class T3InstallTests(unittest.TestCase):
         other.write_text('#!/bin/sh\necho t3 v0.0.0\n')
         other.chmod(0o755)
         self.env['PATH'] = f'{self.bin}:{self.home}/.local/bin'
+        (self.home / '.bashrc').write_text(f'export PATH="{self.bin}:$PATH"\n')
         result = self.run_install(success=False)
         self.assertIn('T3 command shadowing', result.stderr)
+        # The PATH-shadow report names the file that put the other t3 first.
+        self.assertIn(f'shadowed  t3         wins: {other}', result.stderr)
+        self.assertIn('prepends PATH at ~/.bashrc:1', result.stderr)
         self.assertFalse(any(call[0] in ('stow', 'hyprctl') for call in self.calls()))
         self.assertTrue(other.is_file())
 

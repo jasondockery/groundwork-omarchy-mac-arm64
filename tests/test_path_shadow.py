@@ -201,6 +201,43 @@ class PathShadowTest(unittest.TestCase):
             self.assertEqual(ps.main(['herdr', '--strict'], env, str(self.root / 'sys')), 1)
         self.assertIn('Report only', out.getvalue())
 
+    def test_brief_is_silent_when_nothing_is_shadowed(self):
+        fakes = self.root / 'fakes'
+        fakes.mkdir()
+        (fakes / 'pacman').write_text('#!/bin/sh\necho herdr-pkg\n')
+        (fakes / 'pacman').chmod(0o755)
+        make_exe(self.pkg_bin / 'herdr')
+        make_exe(self.pkg_bin / 'cursor')
+        env = self.environ(self.pkg_bin, fakes)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(ps.main(['herdr', 'cursor', 'keyd', '--brief'], env, str(self.root / 'sys')), 0)
+        self.assertEqual(out.getvalue(), '')
+
+    def test_brief_names_shadowed_and_unknown_commands_only(self):
+        managed = make_exe(self.pkg_bin / 'herdr')
+        self.owned.add(managed)
+        make_exe(self.root / 'v/herdr')
+        make_exe(self.root / 'v/cursor')
+        make_exe(self.root / 'v/codex')
+        self.timeout.add('mise')
+        (self.home / '.profile').write_text('export PATH="%s:$PATH"\n' % (self.root / 'v'))
+        env = self.environ(self.root / 'v', self.pkg_bin)
+        results = ps.scan(env, runner=self.runner, commands=['herdr', 'cursor', 'codex'],
+                          system_root=str(self.root / 'sys'))
+        lines = ps.render_brief(results, str(self.home)).splitlines()
+        self.assertEqual(len(lines), 3, lines)
+        self.assertIn('PATH shadow: herdr runs %s, not the managed %s.' % (self.root / 'v/herdr', managed), lines[0])
+        self.assertIn('PATH entry from ~/.profile:1 (prepends).', lines[0])
+        self.assertIn('PATH shadow: codex at %s could not be checked (mise did not answer).' % (self.root / 'v/codex'), lines[1])
+        self.assertNotIn('cursor', '\n'.join(lines))
+        self.assertIn('groundwork-path-shadow.py', lines[2])
+        self.assertIn('nothing was changed', lines[2])
+
+    def test_brief_and_json_are_exclusive(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            ps.main(['--brief', '--json'], self.environ())
+
     def test_mise_which_is_offline_and_never_installs(self):
         make_exe(self.home / '.opencode/bin/opencode')
         self.check('opencode', 'mise', self.environ(self.home / '.opencode/bin', MISE_OFFLINE='0'))
