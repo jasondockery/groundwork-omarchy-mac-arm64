@@ -7,16 +7,20 @@ The file commit-identity-guard.sh there is a symlink to the pinned
 core/commit-guard/commit-identity-guard.sh; nothing is copied. core.hooksPath is
 NOT set globally. It lives in ~/.config/groundwork/commit-guard.gitconfig, which
 the XDG git config (~/.config/git/config) includes through
-includeIf "hasconfig:remote.*.url:..." for the owner's GitHub URL forms and any
-scp-style host alias such as git@github-personal:owner/repo (git 2.36 or newer; older git warns and skips). Work repositories and hook tools
+includeIf "hasconfig:remote.*.url:..." for the owner's GitHub URL forms (the list is core/commit-guard/owner-remote-patterns),
+any scp-style host alias such as git@github-personal:owner/repo, and any ssh:// host or
+alias with or without a port (ssh://git@github.com:22/owner/repo, ssh://github-personal/owner/repo) (git 2.36 or newer; older git warns and skips). Work repositories and hook tools
 such as pre-commit are untouched. If the user already sets core.hooksPath
 anywhere, nothing is written. Every documented hook name forwards to the
 repository's own .git/hooks/<name>.
 
 Gaps: a push straight to an owned URL from a repository with no owned remote is
 not guarded, and owned repositories with their own core.hooksPath (husky,
-lefthook) bypass the guard; `doctor` lists those under the code directory. URLs
-with userinfo (https://user@github.com/...) are not matched.
+lefthook) bypass the guard; `doctor` lists those under the code directory. https
+URLs with userinfo (https://user@github.com/...) are not matched. A different
+owner's path (owner2/x, other/owner/x) is not matched either; ssh:// URLs with any
+user, host or port are, so an ssh:// host that is not GitHub but has an
+/owner/ path is guarded too.
 
 Opt out with ~/.config/groundwork/commit-guard-off (`off` creates it, `on`
 removes it), or GROUNDWORK_COMMIT_GUARD=off for one command. The hooks check
@@ -32,6 +36,7 @@ Exit status: 0 done or nothing to do, 1 a step failed, 2 usage.
 """
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -191,11 +196,22 @@ def owner_glob():
     return ''.join(f'[{c}{c.upper()}]' if c.upper() != c else c for c in OWNER)
 
 
-def include_keys():
+def include_keys(guard):
+    """One includeIf key per line of core's owner-remote-patterns, next to the pinned guard.
+
+    Fails closed (OSError) when the list is missing or has no <owner> pattern, so a
+    pin without it never installs a partial scope.
+    """
+    path = Path(guard).resolve().parent / 'owner-remote-patterns'
     glob = owner_glob()
-    # The last prefix matches any scp-style host alias (git@github-personal:owner/repo).
-    return [f'includeIf.hasconfig:remote.*.url:{prefix}{glob}/**.path' for prefix in (
-        'https://github.com/', 'git@github.com:', 'ssh://git@github.com/', '*:')]
+    keys = []
+    for line in path.read_text().splitlines():
+        line = re.sub(r'\s+#.*$', '', line.strip())
+        if line and not line.startswith('#') and '<owner>' in line:
+            keys.append(f"includeIf.hasconfig:remote.*.url:{line.replace('<owner>', glob)}.path")
+    if not keys:
+        raise OSError(f'no <owner> patterns in {path}; the core pin is too old (needs v0.10.0 or newer)')
+    return keys
 
 
 def git_version():
@@ -214,7 +230,7 @@ def config_value(file, key):
     return result.stdout.strip() if result.returncode == 0 else ''
 
 
-def set_hooks_path():
+def set_hooks_path(keys):
     """Scope core.hooksPath to repositories with an owned GitHub remote."""
     hooks = str(hooks_dir())
     target = config_home() / 'git' / 'config'
@@ -239,7 +255,7 @@ def set_hooks_path():
         write_atomic(include, text, 0o644)
         changed = True
     target.parent.mkdir(parents=True, exist_ok=True)
-    for key in include_keys():
+    for key in keys:
         if config_value(target, key) != str(include):
             subprocess.run(['git', 'config', '--file', str(target), key, str(include)], check=True)
             changed = True
@@ -296,8 +312,9 @@ def apply(guard):
         say(f'{guard} is not in this checkout (is the core submodule checked out?); skipped.')
         return 0
     try:
+        keys = include_keys(guard)  # before any write, so a bad pin leaves nothing behind
         changed = install_hook_files(guard)
-        changed = set_hooks_path() or changed
+        changed = set_hooks_path(keys) or changed
         changed = ensure_denylist() or changed
         changed = merge_attribution() or changed
     except (OSError, subprocess.CalledProcessError) as error:
@@ -344,15 +361,19 @@ def doctor():
         return 0
     current = effective_hooks_path()
     target = config_home() / 'git' / 'config'
-    scoped = (groundwork_dir() / 'commit-guard.gitconfig').is_file() and all(
-        config_value(target, key) for key in include_keys())
+    try:
+        scoped = (groundwork_dir() / 'commit-guard.gitconfig').is_file() and all(
+            config_value(target, key) for key in include_keys(guard))
+    except OSError as error:
+        print(f'  warn  cannot read the owned-remote patterns ({error}); run groundwork-update.')
+        scoped = None
     if current:
         print(f'  warn  core.hooksPath is {current} for every repository, so the guard hooks are not scoped or active; '
               f'chain {hooks_dir()}/commit-msg and {hooks_dir()}/pre-push from it.')
     elif scoped:
         print('  ok    hooks apply to repositories with a github.com remote owned by this user; '
               'other repositories are untouched')
-    else:
+    elif scoped is not None:
         print('  warn  the owned-repository hook scope is not set up (needs git 2.36 or newer); '
               'run groundwork-update.')
     print('  note  not guarded: a push straight to an owned URL from a repository with no owned remote, '

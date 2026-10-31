@@ -119,6 +119,21 @@ class MigrationTests(unittest.TestCase):
         self.assertNotIn(pat, out)
         self.assertIn('https://github.com/o/***/r.git', out)
 
+    def test_redact_url_passes_core_shared_vectors(self):
+        checker = REPO / 'core/redaction/check-redact-url.sh'
+        if not checker.exists():
+            if os.environ.get('CI'):
+                self.fail('core submodule is not checked out')
+            self.skipTest('core submodule is not checked out')
+        script = REPO / 'scripts/migrate-from-groundwork.sh'
+        function = subprocess.run(['sed', '-n', '/^redact_url() {/,/^}/p', str(script)],
+                                  capture_output=True, text=True, check=True).stdout
+        self.assertIn('redact_url', function)
+        env = {'PATH': os.environ['PATH'], 'HOME': str(self.root), 'XDG_CONFIG_HOME': str(self.root / 'xdg')}
+        result = subprocess.run(['bash', str(checker), 'bash', '-c', function + '\nredact_url "$1"', '_'],
+                                env=env, capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_short_ghp_name_is_not_masked(self):
         out = self.run_origins('https://github.com/o/ghp_utils.git', 'https://github.com/o/new.git')
         self.assertIn('https://github.com/o/ghp_utils.git', out)
