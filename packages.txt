@@ -4,9 +4,11 @@
 # Brave is not listed here. setup runs `omarchy-install-browser brave` (AUR
 # brave-bin) when that installer exists. Chromium stays an Omarchy base package.
 # See docs/decisions/0015-brave-via-omarchy-installer.md.
-# T3 Code Nightly uses its official
-# checksum-verifying ARM64 CLI installer because the community Arch package is
-# not an ARM64 source of truth. Add optional packages one line at a time:
+# T3 Code Nightly uses its official checksum-verifying ARM64 CLI installer.
+# The pkgs.omarchy.org edge/aarch64 feed also ships t3code-bin and
+# t3code-nightly-bin (checked 2026-10-31); whether to use them is the T3
+# decision's call. See docs/apps/t3-code.md.
+# Add optional packages one line at a time:
 #   omarchy pkg add <name>
 #
 # git, neovim, lazygit, ripgrep, fd, bat, eza, fzf, zoxide, starship,
