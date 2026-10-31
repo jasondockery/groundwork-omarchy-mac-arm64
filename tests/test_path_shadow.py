@@ -37,7 +37,7 @@ class PathShadowTest(unittest.TestCase):
         self.timeout = set()
 
     def environ(self, *dirs, **extra):
-        env = {'HOME': str(self.home), 'PATH': ':'.join(str(d) for d in dirs)}
+        env = {'OMARCHY_PATH': str(self.root / 'o'), 'HOME': str(self.home), 'PATH': ':'.join(str(d) for d in dirs)}
         env.update(extra)
         return env
 
