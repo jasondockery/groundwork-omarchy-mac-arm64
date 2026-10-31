@@ -28,6 +28,8 @@ SCHEME = 'x-scheme-handler/t3code'
 APPIMAGE = 'T3-Code.AppImage'
 # AppImage mounts are /tmp/.mount_<first six characters of the name>XXXXXX.
 MOUNT_PREFIX = '.mount_T3-Cod'
+# APPIMAGE_EXTRACT_AND_RUN=1 (no FUSE) runs from /tmp/appimage_extracted_<hash>.
+EXTRACTED_PREFIX = 'appimage_extracted_'
 
 
 def data_home():
@@ -65,8 +67,9 @@ def t3_running(paths, proc=Path('/proc'), prefixes=()):
     """Return (running, reason). running is True when unsure, so callers skip.
 
     A process counts when its executable or one of its first two arguments is
-    in `paths`, when it runs from an AppImage mount of T3 Code, or when its
-    executable starts with one of `prefixes`.
+    in `paths`, when it runs from an AppImage mount of T3 Code or from an
+    extract-and-run directory (as t3code), or when its executable starts
+    with one of `prefixes`.
     """
     try:
         pids = [entry for entry in proc.iterdir() if entry.name.isdigit()]
@@ -82,7 +85,9 @@ def t3_running(paths, proc=Path('/proc'), prefixes=()):
             continue  # another user's process, or one that just exited
         except OSError as error:
             return True, f'could not inspect process {entry.name} ({error})'
-        if exe in paths or Path(exe).parent.name.startswith(MOUNT_PREFIX) \
+        parent = Path(exe).parent.name
+        if exe in paths or parent.startswith(MOUNT_PREFIX) \
+                or (parent.startswith(EXTRACTED_PREFIX) and Path(exe).name == 't3code') \
                 or any(exe.startswith(prefix) for prefix in prefixes) \
                 or any(part.decode(errors='replace') in paths for part in argv[:2]):
             return True, f'T3 Code is running (process {entry.name})'
@@ -100,7 +105,9 @@ def app_running(proc=None, cli=False):
     """(running, reason) for the T3 Code app, and with `cli` the bun CLI too."""
     proc = proc_root() if proc is None else proc
     apps = data_home() / 'applications'
-    prefixes = (str(t3_home() / 'runtime/versions') + '/',) if cli else ()
+    versions = t3_home() / 'runtime/versions'
+    # /proc/<pid>/exe is a resolved path, so match the real directory too.
+    prefixes = tuple(dict.fromkeys((str(versions) + '/', os.path.realpath(versions) + '/'))) if cli else ()
     return t3_running(exec_paths(apps / PRIMARY, apps / DUPLICATE), proc, prefixes)
 
 

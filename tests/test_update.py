@@ -1247,6 +1247,8 @@ class T3GateTests(unittest.TestCase):
         if rest == ['--appimage-extract']:
             if meta.get('extract') == 'crash':
                 raise updater.UpdateError(f'{args[0]} failed (exit 139).')
+            if meta.get('extract') == 'killed':
+                raise updater.UpdateError(f'{args[0]} failed (exit -9).')
             if meta.get('extract') == 'hang':
                 raise updater.UpdateError(f'{args[0]} exceeded its 180-second deadline. Retry after repairing that stage.')
             root = Path(kwargs['cwd']) / 'squashfs-root'
@@ -1267,6 +1269,10 @@ class T3GateTests(unittest.TestCase):
             # node-pty's x86-64 prebuild: p_align 0x1000. It must never be read.
             elf(PTY_X64, machine=62, load='bad')
             (root / 'resources/app.asar').write_bytes(b'not an ELF file')
+            if meta.get('desktop_link'):
+                (root / 'elsewhere.desktop').write_text(f'[Desktop Entry]\nX-AppImage-Version={CANDIDATE}\n')
+                (root / 't3code.desktop').symlink_to('elsewhere.desktop')
+                return ''
             desktop = meta.get('desktop', meta['version'])
             (root / 't3code.desktop').write_text(
                 '[Desktop Entry]\nName=T3 Code\nExec=AppRun --no-sandbox %U\n'
@@ -1276,6 +1282,8 @@ class T3GateTests(unittest.TestCase):
             smoke = meta.get('smoke')
             if smoke == 'crash':
                 raise updater.UpdateError(f'{args[0]} failed (exit 139).')
+            if smoke == 'killed':
+                raise updater.UpdateError(f'{args[0]} failed (exit 137).')
             if smoke == 'hang':
                 raise updater.UpdateError(f'{args[0]} exceeded its 30-second deadline. Retry after repairing that stage.')
             return '0.0.0-nightly.wrong' if smoke == 'wrong' else meta['version']
@@ -1529,6 +1537,66 @@ class T3GateTests(unittest.TestCase):
                 self.assertFalse((self.state / 't3-rejected.json').exists())
                 self.assertFalse((self.state / 't3/last-good.json').exists())
 
+    def test_sigkill_is_a_skip_not_a_rejection(self):
+        for behavior in (dict(smoke='killed'), dict(extract='killed')):
+            with self.subTest(**behavior):
+                self.install(fake_appimage(CANDIDATE, **behavior))
+                completed, warnings, _ = self.gate()
+                self.assertEqual(completed, [])
+                self.assertEqual(len(warnings), 1)
+                self.assertIn('SIGKILL', warnings[0])
+                self.assertFalse((self.state / 't3-rejected.json').exists())
+
+    def test_the_work_directory_is_on_disk_under_the_cache_and_removed(self):
+        self.install(fake_appimage())
+        self.gate()
+        work = self.home / '.cache/groundwork'
+        for call, kwargs in self.calls:
+            self.assertTrue(kwargs['cwd'].startswith(str(work) + '/groundwork-t3-'), kwargs['cwd'])
+        self.assertEqual(list(work.iterdir()), [])
+
+    def test_only_the_extraction_drops_ipc_and_uts(self):
+        self.install(fake_appimage())
+        self.gate()
+        extract, smoke = (call for call, _ in self.calls)
+        for flag in ('--unshare-ipc', '--unshare-uts'):
+            self.assertIn(flag, extract[:extract.index('--')])
+            self.assertNotIn(flag, smoke)
+
+    def test_a_symlinked_desktop_entry_is_not_read(self):
+        self.install(fake_appimage(INSTALLED, desktop_link=True))
+        _, warnings, _ = self.gate()
+        # No t3code was unpacked either, so this is a skip, and the linked version is never used.
+        self.assertIsNone(updater.t3_desktop_version(self.root))
+        root = self.root / 'tree'
+        root.mkdir()
+        (root / 'other.desktop').write_text(f'X-AppImage-Version={CANDIDATE}\n')
+        (root / 't3code.desktop').symlink_to('other.desktop')
+        self.assertIsNone(updater.t3_desktop_version(root))
+        (root / 't3code.desktop').unlink()
+        (root / 't3code.desktop').write_text(f'X-AppImage-Version={CANDIDATE}\n')
+        self.assertEqual(updater.t3_desktop_version(root), CANDIDATE)
+
+    def test_setup_does_not_download_an_older_build(self):
+        self.releases = {INSTALLED: fake_appimage(INSTALLED)}
+        self.install(fake_appimage(CANDIDATE, smoke='crash'))
+        completed, warnings = [], []
+        with patch('sys.stdout', new_callable=io.StringIO):
+            passed = updater.t3_gate(self.source, completed, warnings, pending=False, page=16384, download=False)
+        self.assertFalse(passed)
+        self.assertEqual(self.fetched, [])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn('Do not open T3 Code yet. Run update-all', warnings[0])
+        # A kept copy is still restored during setup.
+        self.install(fake_appimage())
+        updater.t3_gate(self.source, [], [], pending=False, page=16384, download=False)
+        self.install(fake_appimage(CANDIDATE, smoke='crash'))
+        completed = []
+        with patch('sys.stdout', new_callable=io.StringIO):
+            self.assertTrue(updater.t3_gate(self.source, completed, [], pending=False, page=16384, download=False))
+        self.assertEqual(completed, [f'T3 Code restored to {INSTALLED}'])
+        self.assertEqual(self.fetched, [])
+
     def test_bad_runtime_load_is_rejected_without_unpacking(self):
         self.install(fake_appimage(CANDIDATE, load='bad'))
         self.running = (True, 'T3 Code is running (process 1)')
@@ -1686,7 +1754,7 @@ class T3GateTests(unittest.TestCase):
             self.assertEqual(updater.main(['t3-check-installed', '16384']), 0)
         lock.assert_called_once_with()
         _, kwargs = gate.call_args
-        self.assertEqual((kwargs['pending'], kwargs['page']), (False, 16384))
+        self.assertEqual((kwargs['pending'], kwargs['page'], kwargs['download']), (False, 16384, False))
         with patch.object(updater, 'verify_lock'), patch.object(updater, 't3_gate', return_value=False), \
                 patch('sys.stderr', new_callable=io.StringIO):
             self.assertEqual(updater.main(['t3-check-installed', '0']), 1)
@@ -1727,9 +1795,15 @@ class T3SandboxTests(unittest.TestCase):
                     paths.append(path)
                 return path
         with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / 'home'
+            (home / '.cache').mkdir(parents=True)
+            (home / 'sentinel').write_text('home contents must not be visible\n')
+            self.sentinel = home / 'sentinel'
             appimage = Path(directory) / 'T3-Code.AppImage'
+            t3code = t3code.replace('__SENTINEL__', str(self.sentinel))
             appimage.write_text(SHELL_APPIMAGE.format(extract=extract, t3code=t3code.rstrip('\n'), version=CANDIDATE))
             with patch.object(updater, 'STATE', Path(directory) / 'state'), \
+                    patch.dict(os.environ, HOME=str(home), XDG_CACHE_HOME=str(home / '.cache')), \
                     patch.object(updater, 'elf_machine', return_value=updater.EM_AARCH64), \
                     patch.object(updater, 'load_segments', return_value=[(0, 0x400000, 0x10000)]), \
                     patch.object(updater.tempfile, 'TemporaryDirectory', Recording), \
@@ -1793,7 +1867,7 @@ case "$XDG_RUNTIME_DIR" in */groundwork-t3-*) ;; *) ok=0 ;; esac
 case "$(pwd)" in */groundwork-t3-*/squashfs-root) ;; *) ok=0 ;; esac
 [ "$PATH" = /usr/bin:/bin ] || ok=0
 [ -z "$USER" ] || ok=0
-[ ! -e "{Path.home()}" ] || [ "{Path.home()}" = / ] || ok=0
+[ ! -e "$SENTINEL" ] || ok=0
 if [ "$ok" -eq 1 ]; then echo "{CANDIDATE}"; else echo "0.0.0-unscrubbed"; fi
 # A real double-fork that ignores the shell exiting. The pid namespace must reap it.
 (
@@ -1802,7 +1876,9 @@ if [ "$ok" -eq 1 ]; then echo "{CANDIDATE}"; else echo "0.0.0-unscrubbed"; fi
 exit 0
 '''
         self.addCleanup(subprocess.run, ['pkill', '-f', token], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        result = self.check(script)
+        # The work directory is under the (fixture) home's cache, so only its
+        # parents exist in the sandbox; a file beside them must not.
+        result = self.check(script.replace('$SENTINEL', '__SENTINEL__'))
         self.assertEqual((result.status, result.version), ('pass', CANDIDATE), result.detail)
         time.sleep(0.3)
         found = subprocess.run(['pgrep', '-a', '-f', token], capture_output=True, text=True)

@@ -70,10 +70,8 @@ class BraveInstallTests(unittest.TestCase):
         )
         if self.page > 4096:
             # On a large-page host, a new T3 Code install is checked in a
-            # sandbox (test_t3_install covers that). Start with the app in place.
-            subprocess.run([str(self.bin / 'omarchy-install-ai-t3-code'), 'nightly', '--no-launch'],
-                           env=self.env, check=True, timeout=10)
-            (self.root / 'calls.jsonl').unlink(missing_ok=True)
+            # sandbox (test_t3_install covers that). Start with a checked app in place.
+            base.InstallKeydTests.seed_checked_t3_app(self)
         for name in ('pacman', 'omarchy-install-browser', 'omarchy-remove-browser', 'omarchy-default-browser'):
             (self.bin / name).symlink_to(self.bin / 'stub')
         # The launch check opens a window, so it needs this user's Wayland

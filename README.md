@@ -105,7 +105,7 @@ builds ([pingdotgg/t3code#23433](https://github.com/pingdotgg/t3code/issues/2343
   `nightly-linux-arm64.yml` and its sha512, checks it, and puts it in place. While T3 Code runs,
   nothing is replaced, and the warning says to quit it and rerun `update-all`.
 
-The check copies the AppImage into a temporary directory and unpacks it there with
+The check copies the AppImage into a temporary directory under `~/.cache/groundwork` (on disk, removed afterwards) and unpacks it there with
 `--appimage-extract`, inside `bwrap --die-with-parent --unshare-pid --unshare-net` with system
 directories read-only, the temporary directory writable, no home directory, and a fresh environment
 (`HOME`, `TMPDIR`, and `XDG_*` inside it, `PATH=/usr/bin:/bin`, core limit 1). The app is not started.
@@ -117,8 +117,12 @@ because they never load here. A LOAD passes when its `p_align` is at least the p
 runs in the same sandbox for at most 30 seconds and must print the version under test. Omarchy ships
 `bwrap` with Flatpak. A missing `bwrap` skips the check with a warning and runs nothing. A misaligned
 LOAD or a signal death is remembered. A timeout, a transport error, or a wrong version warns, is not
-remembered, and is checked again on the next `update-all`. Warnings finish the other stages, record
+remembered, and is checked again on the next `update-all`, as is a SIGKILL (usually low memory). Warnings finish the other stages, record
 `completed_with_warnings`, and exit non-zero.
+
+Setup checks the installed AppImage too, whenever it does not match the kept copy, including one
+that a failed `omarchy-install-ai-t3-code` left in place. Setup restores a kept copy but does not
+download an older build; it says to run `update-all`, which does.
 
 One race remains. The app can apply a staged build when it quits before `update-all` has checked it.
 The next `update-all` then finds the installed build failing and restores the last good copy.

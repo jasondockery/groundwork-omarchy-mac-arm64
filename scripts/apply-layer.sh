@@ -582,8 +582,13 @@ privileged_changes_needed() {
   if ! command -v flatpak >/dev/null; then
     return 0
   fi
-  # Omarchy's T3 Code installer adds fuse3, so a new install needs sudo.
+  # Omarchy's T3 Code installer adds fuse3, so a new install needs sudo. So
+  # does a t3-cli migration that installs the app (setup only; updates never
+  # migrate), so the one prompt up front covers it.
   t3_install_needed && return 0
+  if [[ $updating -eq 0 && ! -e $t3_appimage ]] && t3_cli_installed; then
+    return 0
+  fi
   # A missing Bitwarden desktop becomes Omarchy's package when the feed has it.
   if ! command -v bitwarden >/dev/null && ! bitwarden_flatpak_installed && bitwarden_native_available; then
     return 0
@@ -978,35 +983,65 @@ t3_check_installed() {
   # The updater checks only above 4 KiB. 0 (unknown) makes it read the size itself.
   python3 "$root/scripts/groundwork-update.py" t3-check-installed "$page"
 }
-# Returns 1 when Omarchy's installer did not install the app, and 2 when the
-# app is installed but no build that passes on this kernel is in place.
+# Returns 0 when the app is installed and passed, 1 when Omarchy's installer
+# left no app, 2 when the app is in place but no build that passes on this
+# kernel is, and 3 when the build passed but the installer did not finish.
+# omarchy-install-t3code-app moves the AppImage into place before the rest of
+# omarchy-install-ai-t3-code runs it (its theme step), so a failure there can
+# leave a new, unchecked build. Whatever the installer's status, a build that
+# is in place is checked.
+t3_checked=0
 run_t3_installer() {
+  local status=0
   if ! command -v omarchy-install-ai-t3-code >/dev/null; then
     echo "omarchy-install-ai-t3-code is missing, so T3 Code was not installed. Update Omarchy, then rerun ./install.sh." >&2
     return 1
   fi
   # --no-launch: setup does not start apps. nightly: this layer's channel.
-  if ! timeout --kill-after=5s 600 omarchy-install-ai-t3-code nightly --no-launch; then
-    echo "omarchy-install-ai-t3-code failed, so T3 Code was not installed. Fix the error above, then rerun ./install.sh." >&2
-    return 1
-  fi
+  timeout --kill-after=5s 600 omarchy-install-ai-t3-code nightly --no-launch || status=$?
   if [[ ! -f $t3_appimage ]]; then
-    echo "omarchy-install-ai-t3-code finished, but $t3_appimage is missing. Rerun ./install.sh." >&2
+    if [[ $status -ne 0 ]]; then
+      echo "omarchy-install-ai-t3-code failed (exit $status), so T3 Code was not installed. Fix the error above, then rerun ./install.sh." >&2
+    else
+      echo "omarchy-install-ai-t3-code finished, but $t3_appimage is missing. Rerun ./install.sh." >&2
+    fi
     return 1
   fi
+  if [[ $status -ne 0 ]]; then
+    echo "omarchy-install-ai-t3-code failed (exit $status) after it put $t3_appimage in place. Checking that build." >&2
+  fi
+  t3_checked=1
   if ! t3_check_installed; then
-    echo "T3 Code was installed, but no build that passes on this kernel is in place. See the warning above, then rerun update-all." >&2
+    echo "T3 Code is installed, but it does not pass on this kernel and was not replaced. See the warning above." >&2
     return 2
+  fi
+  if [[ $status -ne 0 ]]; then
+    echo "The installed T3 Code passed, but omarchy-install-ai-t3-code did not finish (exit $status): its theme and package cleanup may be missing. Fix the error above, then run omarchy-install-ai-t3-code nightly --no-launch and rerun ./install.sh." >&2
+    return 3
   fi
 }
 if t3_install_needed; then
   echo "Installing T3 Code with omarchy-install-ai-t3-code nightly…"
   t3_status=0
   run_t3_installer || t3_status=$?
-  # Like a missing package, a failed install stops before home changes. A
-  # build that fails the check leaves the rest of setup to finish first.
+  # Like a missing package, no app at all stops before home changes. A build
+  # that is in place but failed its check, or an unfinished installer, leaves
+  # the rest of setup to finish first.
   [[ $t3_status -ne 1 ]] || exit 1
-  [[ $t3_status -eq 0 ]] || t3_problem="T3 Code did not pass its check on this kernel; see the warning above."
+  case $t3_status in
+    2) t3_problem="T3 Code did not pass its check on this kernel; see the warning above." ;;
+    3) t3_problem="omarchy-install-ai-t3-code did not finish; see the message above." ;;
+  esac
+fi
+# Setup checks any installed AppImage that has not passed yet: one from
+# Omarchy's menu, or one an earlier, failed install left behind. The check
+# returns at once for a file that matches the kept last-good copy, and does
+# nothing on 4 KiB pages. update-all checks it in its own T3 step.
+if [[ $updating -eq 0 && $t3_checked -eq 0 && -f $t3_appimage ]]; then
+  t3_checked=1
+  if ! t3_check_installed; then
+    t3_problem="The installed T3 Code did not pass its check on this kernel; see the warning above."
+  fi
 fi
 
 # The t3 command is the app's bundled CLI, ~/.t3/bin/t3, which the app writes
@@ -1722,10 +1757,14 @@ migrate_t3_cli_to_omarchy() {
   if [[ ! -e $t3_appimage ]]; then
     # The app is missing, so Omarchy's installer runs and its build is checked.
     # The CLI link changes only after that passes.
-    run_t3_installer || {
+    local status=0
+    run_t3_installer || status=$?
+    # 3: the build passed, and only Omarchy's theme step did not finish.
+    if [[ $status -ne 0 && $status -ne 3 ]]; then
       echo "The bun CLI link $t3_link -> $old was kept." >&2
       return 1
-    }
+    fi
+    [[ $status -ne 3 ]] || t3_problem="omarchy-install-ai-t3-code did not finish; see the message above."
   fi
   # An app that is already installed is not reinstalled: that would download
   # an unchecked newest build over a working one. Only the link changes, to

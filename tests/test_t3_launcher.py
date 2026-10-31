@@ -191,6 +191,19 @@ class T3LauncherTests(unittest.TestCase):
         with patch.dict(os.environ, T3CODE_HOME=str(self.home / 'elsewhere')):
             self.assertEqual(launcher.app_running(self.proc, cli=True), (False, ''))
 
+    def test_extract_and_run_counts_as_running(self):
+        self.process(4, '/tmp/appimage_extracted_0123abcd/other')
+        self.assertEqual(launcher.app_running(self.proc), (False, ''))
+        self.process(5, '/tmp/appimage_extracted_0123abcd/t3code')
+        self.assertTrue(launcher.app_running(self.proc)[0])
+
+    def test_running_matches_the_real_path_of_a_linked_t3_home(self):
+        real = self.home / 'data/t3'
+        (real / 'runtime/versions').mkdir(parents=True)
+        (self.home / '.t3').symlink_to(real)
+        self.process(9, str(real / 'runtime/versions/0.1.2-nightly.20261021.3457/t3'))
+        self.assertTrue(launcher.app_running(self.proc, cli=True)[0])
+
     def test_running_command_exit_status(self):
         self.process(1, '/usr/bin/bash')
         with patch.dict(os.environ, GROUNDWORK_TESTING='1', GROUNDWORK_TEST_PROC=str(self.proc)):

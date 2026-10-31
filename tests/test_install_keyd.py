@@ -264,6 +264,9 @@ elif name == 'omarchy-install-ai-t3-code':
         if link.is_symlink():
             link.unlink()
         link.symlink_to(t3_home / 'bin/t3')
+    # The real installer moves the AppImage in first, then runs it for its
+    # theme step, which can fail after the app is in place.
+    sys.exit(int(os.environ.get('FIXTURE_T3_FAIL_AFTER_APP', '0')))
 elif name == 'flatpak':
     app = next((arg for arg in reversed(args) if '.' in arg and not arg.startswith('-')), '')
     marker = {
@@ -582,6 +585,20 @@ class InstallKeydTests(unittest.TestCase):
         # A host XDG or mise directory would point the shim checks at the real home.
         for key in ('XDG_DATA_HOME', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME', 'MISE_DATA_DIR'):
             self.env.pop(key, None)
+
+    def seed_checked_t3_app(self):
+        """T3 Code from the fake Omarchy installer, already recorded as passing its check."""
+        import base64, hashlib
+        subprocess.run([str(self.bin / 'omarchy-install-ai-t3-code'), 'nightly', '--no-launch'],
+                       env=self.env, check=True, timeout=10)
+        (self.root / 'calls.jsonl').unlink(missing_ok=True)
+        data = (self.root / 'home/.local/share/t3code/T3-Code.AppImage').read_bytes()
+        kept = self.root / 'home/.local/state/groundwork/t3'
+        kept.mkdir(parents=True, exist_ok=True)
+        (kept / 'T3-Code.AppImage').write_bytes(data)
+        (kept / 'last-good.json').write_text(json.dumps(
+            {'version': '0.1.6-nightly.20261031.3956',
+             'sha512': base64.b64encode(hashlib.sha512(data).digest()).decode()}))
 
     def run_install(self, *args, success=True):
         result = subprocess.run(['bash', str(REPO / 'install.sh'), *args],

@@ -210,12 +210,64 @@ class T3InstallTests(unittest.TestCase):
         result = self.run_install(success=False)
         self.assertIn(f'T3 Code {VERSION} fails on 16 KiB pages: t3code --version crashed (SIGSEGV)', result.stdout)
         self.assertIn('T3 Code did not pass its check on this kernel', result.stderr)
-        # No older build could be downloaded here, so nothing replaced it.
-        self.assertIn('no older build could be downloaded', result.stderr)
+        # Setup leaves the older-build download to update-all (its 900-second limit).
+        self.assertIn('Do not open T3 Code yet. Run update-all', result.stderr)
+        self.assertNotIn('Downloading T3 Code', result.stdout)
         self.assertTrue(any(call[0] == 'stow' for call in self.calls()))
         rejected = json.loads((self.state / 't3-rejected.json').read_text())
         self.assertEqual(rejected['16384'], [VERSION])
         self.assertEqual(rejected['reasons']['16384'][VERSION], 'smoke-crash')
+
+    def test_a_failed_installer_that_left_a_crashing_build_is_checked_on_every_run(self):
+        # omarchy-install-t3code-app put the AppImage in place, then the theme
+        # step that runs it failed. The build must still be checked and rejected.
+        self.large_pages(crash=True)
+        self.env['FIXTURE_T3_FAIL_AFTER_APP'] = '1'
+        result = self.run_install(success=False)
+        self.assertIn(f'omarchy-install-ai-t3-code failed (exit 1) after it put {self.appimage} in place', result.stderr)
+        self.assertNotIn('T3 Code was not installed', result.stderr)
+        self.assertIn(f'T3 Code {VERSION} fails on 16 KiB pages', result.stdout)
+        self.assertIn('T3 Code did not pass its check on this kernel', result.stderr)
+        self.assertTrue(any(call[0] == 'stow' for call in self.calls()))
+        self.assertEqual(json.loads((self.state / 't3-rejected.json').read_text())['16384'], [VERSION])
+        self.assertFalse((self.state / 't3/last-good.json').exists())
+        # The rerun does not reinstall, and checks and rejects the same build again.
+        self.reset_calls()
+        result = self.run_install(success=False)
+        self.assertEqual(self.installer_calls(), [])
+        self.assertIn(f'T3 Code {VERSION} fails on 16 KiB pages', result.stdout)
+        self.assertIn('The installed T3 Code did not pass its check on this kernel', result.stderr)
+        self.assertFalse((self.state / 't3/last-good.json').exists())
+
+    def test_a_failed_installer_whose_build_passes_is_reported_as_unfinished(self):
+        self.large_pages()
+        self.env['FIXTURE_T3_FAIL_AFTER_APP'] = '1'
+        result = self.run_install(success=False)
+        self.assertIn(f'T3 Code {VERSION} passed; kept a copy for rollback.', result.stdout)
+        self.assertIn('omarchy-install-ai-t3-code did not finish (exit 1)', result.stderr)
+        self.assertTrue((self.state / 't3/last-good.json').exists())
+        self.env.pop('FIXTURE_T3_FAIL_AFTER_APP')
+        result = self.run_install()
+        self.assertEqual(self.installer_calls(), [INSTALLER])
+        self.assertNotIn('Checking the installed T3 Code', result.stdout)
+
+    def test_setup_checks_an_app_installed_from_omarchys_menu(self):
+        self.seed_app()
+        self.large_pages()
+        result = self.run_install()
+        self.assertEqual(self.installer_calls(), [])
+        self.assertIn(f'T3 Code {VERSION} passed; kept a copy for rollback.', result.stdout)
+        self.reset_calls()
+        result = self.run_install()
+        self.assertNotIn('Checking the installed T3 Code', result.stdout)
+
+    def test_setup_checks_an_existing_app_beside_the_bun_cli(self):
+        build, _ = self.seed_cli()
+        self.seed_app()
+        self.large_pages(crash=True)
+        result = self.run_install(success=False)
+        self.assertIn(f'T3 Code {VERSION} fails on 16 KiB pages', result.stdout)
+        self.assertEqual(os.readlink(self.link), str(build))
 
     def test_large_pages_without_bubblewrap_report_it_at_the_end(self):
         self.env.update(FIXTURE_PAGESIZE='16384', FIXTURE_LOAD_ALIGN='0x10000')
