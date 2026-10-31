@@ -59,6 +59,31 @@ Program Headers:
 '''
 
 
+# Decision 0018: the T3 0.1.5 and 0.1.6 nightlies have one LOAD with p_align
+# 0x1000 whose p_offset and p_vaddr are both 64 KiB multiples.
+READELF_RELAXED = '''
+Program Headers:
+  Type           Offset   VirtAddr           PhysAddr           FileSiz  MemSiz   Flg Align
+  LOAD           0x000000 0x0000000000400000 0x0000000000400000 0x41d390 0x41d390 R   0x10000
+  LOAD           0x420000 0x0000000000820000 0x0000000000820000 0x29d82f0 0x29d82f0 R E 0x10000
+  LOAD           0x6dc0000 0x00000000071c0000 0x00000000071c0000 0x000508 0x000508 R   0x1000
+'''
+
+
+def synthetic_elf(segments):
+    """A little-endian ELF64 aarch64 executable header with one LOAD per (p_offset, p_vaddr, p_align).
+
+    Only the headers are written. readelf -lW reads them as they are.
+    """
+    import struct
+    phoff, phentsize = 64, 56
+    header = struct.pack('<4sBBBBB7sHHIQQQIHHHHHH', b'\x7fELF', 2, 1, 1, 0, 0, b'\0' * 7,
+                         2, 183, 1, segments[0][1], phoff, 0, 0, 64, phentsize, len(segments), 64, 0, 0)
+    headers = b''.join(struct.pack('<IIQQQQQQ', 1, 4, offset, vaddr, vaddr, 0, 0x1000, align)
+                       for offset, vaddr, align in segments)
+    return header + headers
+
+
 # A real SIGSEGV death. Exec resets the dumpable flag, so this process clears
 # it (PR_SET_DUMPABLE = 4) immediately before signalling. That is what stops a
 # piped core_pattern. The script does not lower RLIMIT_CORE: the smoke run sets
@@ -776,7 +801,7 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
         output, _ = self.update_all()
         self.assert_t3_kept(output, 'newer linux-arm64 builds crash on 16 KiB pages (pingdotgg/t3code#23433)')
         rejected = json.loads((self.state / 't3-rejected.json').read_text())
-        self.assertEqual(rejected, {'16384': [CANDIDATE]})
+        self.assertEqual(rejected, {'rule': '0018', '16384': [CANDIDATE], 'reasons': {'16384': {CANDIDATE: 'misaligned-load'}}})
         self.assertFalse(self.candidate_smokes())
 
     def test_rejected_candidate_is_not_downloaded_again(self):
@@ -854,7 +879,7 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
         self.assert_t3_kept(output, 'the newest linux-arm64 build does not start on 16 KiB pages '
                             '(crashed (SIGSEGV); pingdotgg/t3code#23433)')
         rejected = json.loads((self.state / 't3-rejected.json').read_text())
-        self.assertEqual(rejected, {'16384': [CANDIDATE]})
+        self.assertEqual(rejected, {'rule': '0018', '16384': [CANDIDATE], 'reasons': {'16384': {CANDIDATE: 'smoke-crash'}}})
         smokes = self.candidate_smokes()
         self.assertEqual(len(smokes), 1)
         self.assert_smoke_is_confined(*smokes[0])
@@ -862,6 +887,97 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
         readelfs = [item[2] for item in self.machine_calls if item[:2] == ['readelf', '-lW']]
         self.assertTrue(readelfs)
         self.assertTrue(all(path.startswith(str(Path(kwargs['cwd']).parent)) for path in readelfs))
+
+    def test_relaxed_aligned_candidate_is_smoke_tested_and_installed(self):
+        self.large_pages()
+        self.readelf = {'t3': READELF_RELAXED}
+        output, receipt = self.update_all()
+        self.assertIn(['t3', 'update', '--channel', 'nightly', '--yes', CANDIDATE], self.machine_calls)
+        self.assertIn(f'T3 Code Nightly updated to {CANDIDATE}', receipt['completed'])
+        smokes = self.candidate_smokes()
+        self.assertEqual(len(smokes), 1)
+        self.assert_smoke_is_confined(*smokes[0])
+        self.assertFalse((self.state / 't3-rejected.json').exists())
+
+    def test_relaxed_aligned_candidate_that_crashes_is_rejected(self):
+        self.large_pages()
+        self.readelf = {'t3': READELF_RELAXED}
+        self.candidate_crashes = True
+        output, _ = self.update_all()
+        self.assert_t3_kept(output, 'the newest linux-arm64 build does not start on 16 KiB pages '
+                            '(crashed (SIGSEGV); pingdotgg/t3code#23433)')
+        self.assertEqual(json.loads((self.state / 't3-rejected.json').read_text()), {'rule': '0018', '16384': [CANDIDATE], 'reasons': {'16384': {CANDIDATE: 'smoke-crash'}}})
+        self.assertEqual(len(self.candidate_smokes()), 1)
+        self.fetched.clear()
+        self.machine_calls.clear()
+        output, _ = self.update_all()
+        self.assert_t3_kept(output, 'newer linux-arm64 builds crash on 16 KiB pages')
+        self.assertFalse(any(url.endswith('.tar.gz') for url in self.fetched))
+        self.assertFalse(self.candidate_smokes())
+
+    def test_legacy_rejected_list_is_dropped_once_and_rechecked(self):
+        self.large_pages()
+        self.readelf = {'t3': READELF_RELAXED}
+        legacy = {'16384': ['0.1.3-nightly.20261024.3617', CANDIDATE], '65536': ['0.1.0-nightly.old']}
+        rejected = self.state / 't3-rejected.json'
+        self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
+        rejected.write_text(json.dumps(legacy))
+        output, receipt = self.update_all()
+        self.assertIn('T3 Code: checking again 3 build(s) rejected before the LOAD rule of decision 0018 '
+                      f'(0.1.0-nightly.old, {CANDIDATE}, 0.1.3-nightly.20261024.3617).', output)
+        self.assertEqual(len(self.candidate_smokes()), 1)
+        self.assertIn(['t3', 'update', '--channel', 'nightly', '--yes', CANDIDATE], self.machine_calls)
+        self.assertIn(f'T3 Code Nightly updated to {CANDIDATE}', receipt['completed'])
+        self.assertEqual(json.loads(rejected.read_text()), {'rule': '0018'})
+
+    def test_legacy_rejected_candidate_that_still_crashes_is_remembered_with_its_reason(self):
+        self.large_pages()
+        self.readelf = {'t3': READELF_RELAXED}
+        self.candidate_crashes = True
+        rejected = self.state / 't3-rejected.json'
+        self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
+        rejected.write_text(json.dumps({'16384': [CANDIDATE]}))
+        output, _ = self.update_all()
+        self.assertIn('checking again 1 build(s)', output)
+        self.assert_t3_kept(output, 'the newest linux-arm64 build does not start on 16 KiB pages')
+        self.assertEqual(len(self.candidate_smokes()), 1)
+        self.assertEqual(json.loads(rejected.read_text()),
+                         {'rule': '0018', '16384': [CANDIDATE], 'reasons': {'16384': {CANDIDATE: 'smoke-crash'}}})
+
+    def test_new_rule_rejection_persists_and_migration_runs_once(self):
+        self.large_pages()
+        self.readelf = {'t3': READELF_BAD}
+        rejected = self.state / 't3-rejected.json'
+        self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
+        rejected.write_text(json.dumps({'16384': ['0.1.3-nightly.20261024.3617']}))
+        output, _ = self.update_all()
+        self.assertIn('checking again 1 build(s)', output)
+        written = json.loads(rejected.read_text())
+        self.assertEqual(written, {'rule': '0018', '16384': [CANDIDATE],
+                                   'reasons': {'16384': {CANDIDATE: 'misaligned-load'}}})
+        for _ in range(2):
+            self.fetched.clear()
+            self.machine_calls.clear()
+            output, _ = self.update_all()
+            self.assertNotIn('checking again', output)
+            self.assert_t3_kept(output, 'newer linux-arm64 builds crash on 16 KiB pages')
+            self.assertFalse(any(url.endswith('.tar.gz') for url in self.fetched))
+            self.assertFalse(self.candidate_smokes())
+            self.assertEqual(json.loads(rejected.read_text()), written)
+
+    def test_migration_leaves_a_missing_file_missing(self):
+        self.large_pages()
+        self.update_all()
+        self.assertFalse((self.state / 't3-rejected.json').exists())
+
+    def test_relaxed_aligned_candidate_with_a_smoke_timeout_is_not_installed(self):
+        self.large_pages()
+        self.readelf = {'t3': READELF_RELAXED}
+        self.candidate_smoke_error = updater.UpdateError(
+            f'bwrap exceeded its {updater.T3_CANDIDATE_SMOKE_SECONDS}-second deadline. Retry after repairing that stage.')
+        output, _ = self.update_all(result='completed_with_warnings')
+        self.assert_t3_kept(output, 'the newest linux-arm64 build was not smoke-tested')
+        self.assertFalse((self.state / 't3-rejected.json').exists())
 
     def test_smoke_timeout_or_wrong_version_is_not_remembered(self):
         self.large_pages()
@@ -946,7 +1062,11 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
                 self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], self.machine_calls)
                 self.assertEqual(rejected.exists(), remembered)
                 if remembered:
-                    self.assertEqual(json.loads(rejected.read_text())['16384'], [CANDIDATE])
+                    written = json.loads(rejected.read_text())
+                    self.assertEqual(written['16384'], [CANDIDATE])
+                    self.assertEqual(written['rule'], '0018')
+                    self.assertEqual(written['reasons']['16384'][CANDIDATE],
+                                     'update-pinned-runtime' if 'Pinned' in detail else 'update-crash')
                 self.assertTrue(any(detail in warning for warning in saved['warnings']))
 
     def test_failed_t3_update_repairs_when_the_installed_binary_no_longer_starts(self):
@@ -1194,6 +1314,48 @@ class T3CandidateTests(unittest.TestCase):
         for alignment in alignments:
             self.assertGreater(alignment, 0)
             self.assertEqual(alignment & (alignment - 1), 0, hex(alignment))
+
+    def test_load_segment_rule(self):
+        page = 16384
+        mappable = updater.t3_load_segment_mappable
+        self.assertTrue(mappable(0x410000, 0x810000, 0x10000, page))
+        self.assertTrue(mappable(0x6dc0000, 0x71c0000, 0x1000, page))
+        self.assertTrue(mappable(0x4000, 0x14000, 0x4, page))
+        self.assertFalse(mappable(0x6dad000, 0x71ac000, 0x1000, page))
+        self.assertFalse(mappable(0x6dac000, 0x71ad000, 0x1000, page))
+        self.assertFalse(mappable(0x6dad000, 0x71ad000, 0x1000, page))
+        self.assertTrue(mappable(0x6dad000, 0x71ad000, 0x1000, 4096))
+        self.assertFalse(mappable(0x4000, 0x14000, 0x4000, 65536))
+
+    @unittest.skipUnless(shutil.which('readelf'), 'readelf is not installed')
+    def test_synthetic_elf_headers_through_readelf(self):
+        cases = {
+            'strict': ([(0, 0x400000, 0x10000), (0x410000, 0x810000, 0x10000)], True),
+            'relaxed': ([(0, 0x400000, 0x10000), (0x6dc0000, 0x71c0000, 0x1000)], True),
+            'offset': ([(0, 0x400000, 0x10000), (0x6dad000, 0x71ac000, 0x1000)], False),
+            'vaddr': ([(0, 0x400000, 0x10000), (0x6dac000, 0x71ad000, 0x1000)], False),
+            'congruent': ([(0, 0x400000, 0x10000), (0x6dad000, 0x71ad000, 0x1000)], False),
+        }
+        for name, (segments, passes) in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                binary = root / f't3-{CANDIDATE}-linux-arm64' / 't3'
+                binary.parent.mkdir()
+                binary.write_bytes(synthetic_elf(segments))
+                self.assertEqual(updater.load_segments(binary), segments)
+                self.assertEqual(updater.load_alignments(binary), [align for _, _, align in segments])
+                self.assertEqual(updater.misaligned_elf_files(root, 16384),
+                                 [] if passes else [f't3-{CANDIDATE}-linux-arm64/t3'])
+                self.assertEqual(updater.misaligned_elf_files(root, 4096), [])
+
+    @unittest.skipUnless(shutil.which('readelf'), 'readelf is not installed')
+    def test_relaxed_rule_is_only_for_t3(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / 'bun'
+            binary.write_bytes(synthetic_elf([(0, 0x400000, 0x10000), (0x6dc0000, 0x71c0000, 0x1000)]))
+            with patch.object(updater, 'page_size', return_value=16384):
+                self.assertIn('is not aligned for 16 KiB pages', updater.bun_alignment_problem(binary))
+                self.assertIn('is not aligned for 16 KiB pages', updater.elf_alignment_problem(binary))
 
     def test_download_is_checksum_verified_and_every_elf_is_checked(self):
         archive = t3_archive(CANDIDATE)
