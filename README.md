@@ -312,6 +312,7 @@ Omarchy keeps its own desktop, tmux file, shell, and Super keybindings. Practice
 | `keyd/default.conf` | Default Caps Lock behavior: tap = Escape, hold = Control, via keyd |
 | `packages.txt` | Optional aarch64 packages that are not part of the Omarchy install |
 | `git/config.local.example` | Placeholder for a name and email. Not applied |
+| `scripts/groundwork-disk-report.py` | Report-only sizes and cleanup commands for the yay cache, journal, and Flatpak installations. Omarchy already trims the pacman cache and ships Disktree ([decision 0019](docs/decisions/0019-disk-cleanup-report-only.md)) |
 | `scripts/omarchy-plugins.py` | Applies the shared Omarchy shell-plugin list through `omarchy plugin` |
 | `omarchy-plugins.exclude.json` | Plugin ids this layer skips, each with a reason |
 | `scripts/groundwork-syncthing.py` | Syncthing as a user service on the tailnet, the `~/Shared` and FreeTube folders, and `groundwork syncthing-pair` |
@@ -405,7 +406,7 @@ If you already used keyd for other mappings, restore your numbered config backup
 
 ## Packages
 
-`packages.txt` lists optional aarch64 packages. Add one with `omarchy pkg add`. Remote-desktop choices are explained in `docs/decisions/0004-remote-access.md`.
+`packages.txt` lists optional aarch64 packages. Add one with `omarchy pkg add`. `dust` is not listed: Omarchy dropped it (migration `1780739888.sh`), so remove a copy you installed yourself with `omarchy pkg drop dust`. To see what is using disk, run `python3 scripts/groundwork-disk-report.py`, which only reports, and open Disktree, which Omarchy installs. Remote-desktop choices are explained in `docs/decisions/0004-remote-access.md`.
 
 ## Accounts
 

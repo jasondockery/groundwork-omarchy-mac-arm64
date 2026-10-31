@@ -22,7 +22,6 @@ keyd
 # Terminal tools.
 atuin
 git-delta
-dust
 duf
 hyperfine
 tokei
