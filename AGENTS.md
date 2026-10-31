@@ -19,7 +19,7 @@ This rule comes before every other rule about apps. Before Groundwork installs o
 2. Omarchy's own installers: the `omarchy-install-*` commands and the `omarchy` menu.
 3. The pkgs.omarchy.org `edge/aarch64` feed (`pacman -Si <name>` against the `omarchy` repo).
 
-When Omarchy provides the app, use Omarchy's path. When Groundwork must own it instead, record the evidence in a decision under `docs/decisions/` or in the app's file under `docs/apps/`: what was checked, the date, why Omarchy's path does not fit here (for example 16 KiB pages or an x86-only build), and a dated recheck. An app that this layer already installs another way is detected and offered a move to Omarchy's path, never forced ([decision 0014](docs/decisions/0014-offer-migration-to-omarchy-installers.md)).
+That list is the order to check, not an order of preference. When Omarchy provides the app, use Omarchy's path, and where Omarchy has its own installer for it, use the installer instead of installing the package directly (for example `omarchy-install-browser brave`, not `omarchy pkg add brave-bin`; decisions [0014](docs/decisions/0014-offer-migration-to-omarchy-installers.md) and [0015](docs/decisions/0015-brave-via-omarchy-installer.md)). When Groundwork must own it instead, record the evidence in a decision under `docs/decisions/` or in the app's file under `docs/apps/`: what was checked, the date, why Omarchy's path does not fit here (for example 16 KiB pages or an x86-only build), and a dated recheck. An app that this layer already installs another way is detected and offered a move to Omarchy's path, never forced ([decision 0014](docs/decisions/0014-offer-migration-to-omarchy-installers.md)).
 
 ## Rules
 
