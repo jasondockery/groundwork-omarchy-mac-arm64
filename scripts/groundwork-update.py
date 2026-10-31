@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Groundwork Omarchy updater. Groundwork owns this layer; Omarchy owns the OS."""
+import base64
 import fcntl
 from contextlib import contextmanager
 import hashlib
 import http.client
-import io
+import importlib.util
 import json
 import os
 from pathlib import Path
 import platform
+import re
 import resource
 import select
 import shutil
@@ -16,7 +18,6 @@ import signal
 import stat
 import subprocess
 import sys
-import tarfile
 import tempfile
 import time
 import urllib.parse
@@ -46,7 +47,8 @@ T3_REPO = 'pingdotgg/t3code'
 T3_RELEASES = f'https://api.github.com/repos/{T3_REPO}/releases?per_page=100'
 T3_DOWNLOADS = f'https://github.com/{T3_REPO}/releases/download'
 T3_PAGE_SIZE_ISSUE = 'pingdotgg/t3code#23433'
-T3_INSTALLER = 'https://t3.codes/install.sh'
+# The feed Omarchy's omarchy-install-t3code-app reads for an arm64 nightly.
+T3_FEED = 'nightly-linux-arm64.yml'
 # Bun on non-4 KiB aarch64 pages is unproven upstream (oven-sh/bun#17627).
 BUN_PAGE_SIZE_ISSUE = 'oven-sh/bun#17627'
 BUN_PAGE_SIZE_URL = 'https://github.com/oven-sh/bun/issues/17627'
@@ -56,14 +58,20 @@ BLIP_ID = 'nixfred.blip'
 SETUP_APPLY_SECONDS = 900
 # Ids in declined_migrations: lowercase letters, digits, and hyphens.
 MIGRATION_ID_CHARACTERS = frozenset('abcdefghijklmnopqrstuvwxyz0123456789-')
-# Last nightly whose ELF files all load on 16 KiB pages (pingdotgg/t3code#23433).
-T3_KNOWN_GOOD_LARGE_PAGE = '0.1.2-nightly.20261021.3499'
-# A downloaded candidate must finish --version inside its temp directory.
+# The extracted t3code must finish --version inside its temp directory.
 T3_CANDIDATE_SMOKE_SECONDS = 30
-# The LOAD rule t3-rejected.json was written under (decision 0018). A file
-# without this marker was written under the old p_align-only rule; its
-# versions are dropped once so they are checked and smoke-run again.
-T3_REJECT_RULE = '0018'
+# The AppImage runtime unpacks itself inside the same sandbox.
+T3_EXTRACT_SECONDS = 180
+# One AppImage download from the release feed.
+T3_DOWNLOAD_SECONDS = 600
+# Older nightlies tried when the installed build fails and no good copy is kept.
+T3_FALLBACK_ATTEMPTS = 3
+# The rule t3-rejected.json was written under (decision 0020: the desktop
+# AppImage, aarch64 ELF files only, with decision 0018's LOAD rule). Files
+# without this marker list bun CLI builds from before 0020 (marker "0018" or
+# none). Those versions are dropped once, so each is checked as an AppImage.
+T3_REJECT_RULE = '0020'
+EM_AARCH64 = 183
 # Private windowed launch used to see whether brave-bin starts on this kernel
 # and desktop: Wayland, GPU process, and a real window, with a throwaway
 # profile. A 16 KiB-page crash is brave/brave-browser#42312. A timeout is not
@@ -80,7 +88,7 @@ BRAVE_EXTENSION_ID = 'nngceckbapebfimnlniiiahkandclblb'
 # read the home directory and open sockets, so a missing bwrap skips this run
 # instead of executing the download. The version is not rejected.
 T3_NO_BWRAP = (
-    'bubblewrap is missing, so the newest build was not smoke-tested or installed '
+    'bubblewrap is missing, so T3 Code builds were not checked '
     '(install flatpak, which ships bwrap)'
 )
 # Captured stages print progress at this interval. Interactive stages own the
@@ -476,7 +484,8 @@ class HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
 https_opener = urllib.request.build_opener(HttpsOnlyRedirects)
 
 
-def fetch(url, deadline=60):
+def fetch(url, deadline=60, out=None):
+    """The body of an https URL. With `out`, chunks are written there and b'' is returned."""
     ends = time.monotonic() + deadline
     request = urllib.request.Request(url, headers={'User-Agent': 'groundwork-omarchy-updater'})
     chunks = []
@@ -494,7 +503,11 @@ def fetch(url, deadline=60):
                     raise UpdateError(f'Downloading {url} exceeded {deadline} seconds.')
                 if sock is not None:
                     sock.settimeout(left)
-                chunks.append(response.read1(1 << 20))
+                chunk = response.read1(1 << 20)
+                if out is None:
+                    chunks.append(chunk)
+                else:
+                    out.write(chunk)
     except TimeoutError as error:
         raise UpdateError(f'Downloading {url} exceeded {deadline} seconds.') from error
     return b''.join(chunks)
@@ -507,41 +520,16 @@ def reported_t3_version(reported):
     return fields[-1].removeprefix('v')
 
 
-def t3_version():
-    return reported_t3_version(run(['t3', '--version']))
-
-
-def t3_latest_nightly():
-    # Same selection as https://t3.codes/install.sh: the newest nightly tag.
+def t3_nightly_versions():
+    """Nightly versions, newest first, as Omarchy's omarchy-install-t3code-app selects them."""
+    versions = []
     for release in json.loads(fetch(T3_RELEASES)):
         tag = release.get('tag_name') or ''
         version = tag.removeprefix('v')
         if (tag.startswith('v') and not release.get('draft') and '-nightly.' in version
                 and all(part.isdigit() for part in version.replace('-nightly.', '.').split('.'))):
-            return version
-    raise UpdateError('No T3 Code nightly release was found.')
-
-
-def t3_download(version, directory):
-    """Verify and unpack one linux-arm64 release archive; return its root."""
-    archive = f't3-{version}-linux-arm64.tar.gz'
-    expected = None
-    for line in fetch(f'{T3_DOWNLOADS}/v{version}/SHA256SUMS').decode().splitlines():
-        fields = line.split()
-        if len(fields) == 2 and fields[1].lstrip('*') == archive:
-            expected = fields[0]
-    if not expected:
-        raise UpdateError(f'{archive} is not listed in SHA256SUMS.')
-    data = fetch(f'{T3_DOWNLOADS}/v{version}/{archive}', deadline=300)
-    if hashlib.sha256(data).hexdigest() != expected:
-        raise UpdateError(f'Checksum mismatch for {archive}.')
-    root = Path(directory) / 'release'
-    with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as bundle:
-        bundle.extractall(root, filter='data')
-    binaries = [path for path in root.glob('*/t3') if path.is_file()]
-    if len(binaries) != 1:
-        raise UpdateError(f'{archive} has no single t3 executable.')
-    return root
+            versions.append(version)
+    return versions
 
 
 def load_segments(binary):
@@ -1032,21 +1020,32 @@ def bun_alignment_problem(binary):
     return None
 
 
-def misaligned_elf_files(root, page):
-    """Return every ELF file under root with a LOAD segment that cannot be mapped with page.
+def elf_machine(path):
+    """e_machine of an ELF file, or None when `path` is not one."""
+    with Path(path).open('rb') as handle:
+        header = handle.read(20)
+    if len(header) < 20 or header[:4] != b'\x7fELF' or header[5] not in (1, 2):
+        return None
+    return int.from_bytes(header[18:20], 'little' if header[5] == 1 else 'big')
 
-    The predicate is `t3_load_segment_mappable`. Passing here is not
-    acceptance: the caller still smoke-runs the candidate.
+
+def misaligned_elf_files(root, page, main='t3code'):
+    """Return every aarch64 ELF file under root with a LOAD segment that cannot be mapped with page.
+
+    The predicate is `t3_load_segment_mappable`. Only files built for this
+    machine (EM_AARCH64) are read: every T3 Code AppImage carries node-pty's
+    prebuilds/linux-x64/pty.node, which never loads here (decision 0020).
+    `main` at the top of root must have LOAD segments. Passing here is not
+    acceptance: the caller still smoke-runs the build.
     """
     misaligned = []
     for path in sorted(root.rglob('*')):
         if path.is_symlink() or not path.is_file():
             continue
-        with path.open('rb') as handle:
-            if handle.read(4) != b'\x7fELF':
-                continue
+        if elf_machine(path) != EM_AARCH64:
+            continue
         segments = load_segments(path)
-        if path.name == 't3' and path.parent.parent == root and not segments:
+        if path.parent == root and path.name == main and not segments:
             raise UpdateError(f'readelf found no LOAD segments in {path.name}.')
         if not all(t3_load_segment_mappable(*segment, page) for segment in segments):
             misaligned.append(str(path.relative_to(root)))
@@ -1097,12 +1096,13 @@ def rejected_t3_document():
 
 
 def migrate_rejected_t3():
-    """Drop versions rejected before decision 0018, once; return them.
+    """Drop versions rejected under an earlier rule, once; return them.
 
-    A file whose `rule` is not T3_REJECT_RULE (every list written before
-    0018) is replaced by one holding only the marker, so those versions are
-    downloaded, checked with the current rule, and smoke-run again. A missing
-    file stays missing. A file that already has the marker is not changed.
+    A file whose `rule` is not T3_REJECT_RULE (the bun CLI lists written
+    before decision 0020, with marker 0018 or none) is replaced by one holding
+    only the marker, so those versions are checked again as AppImages. A
+    missing file stays missing. A file that already has the marker is not
+    changed.
     """
     path = rejected_t3_path()
     check_path(path)
@@ -1124,9 +1124,8 @@ def rejected_t3(page):
 def reject_t3(page, version, reason):
     """Remember `version` for `page` with why it failed, under T3_REJECT_RULE.
 
-    `reason` is one of `misaligned-load`, `smoke-crash`, `smoke-pinned-runtime`,
-    `update-crash`, `update-pinned-runtime`. A list written under another rule
-    is not carried into the new file.
+    `reason` is one of `misaligned-load`, `extract-crash`, `smoke-crash`.
+    A list written under another rule is not carried into the new file.
     """
     path = rejected_t3_path()
     value = rejected_t3_document()
@@ -1144,9 +1143,6 @@ def reject_t3(page, version, reason):
     atomic_write(path, json.dumps(value, indent=2) + '\n')
 
 
-def t3_rejection_reason(stage, error):
-    """`<stage>-pinned-runtime` or `<stage>-crash` for an error t3_candidate_rejected accepts."""
-    return f'{stage}-pinned-runtime' if 'PinnedRuntimeInstallError' in str(error) else f'{stage}-crash'
 
 
 def bitwarden_version():
@@ -1286,10 +1282,6 @@ def accept_brave_version(page, version):
     reject_version(accepted_brave_path(), page, version)
 
 
-def page_size_reason(page):
-    return f'newer linux-arm64 builds crash on {page // 1024} KiB pages ({T3_PAGE_SIZE_ISSUE})'
-
-
 def t3_signal_number(error):
     """Signal number when `error` is a signal death, else None.
 
@@ -1319,21 +1311,17 @@ def t3_signal_number(error):
 
 
 def t3_candidate_rejected(error):
-    """True only when this build itself failed to start.
+    """True only when this build itself died by a signal.
 
     A deadline, a transport failure, or any other OS error can succeed on the
     next run, so those must not be written to t3-rejected.json.
     """
-    if 'PinnedRuntimeInstallError' in str(error):
-        return True
     return t3_signal_number(error) is not None
 
 
 def t3_failure_reason(error):
-    """One line naming the actual reason a candidate was not installed."""
+    """One line naming the actual reason a build was not accepted."""
     text = str(error).strip()
-    if 'PinnedRuntimeInstallError' in text:
-        return 'pinned runtime refused to start (PinnedRuntimeInstallError)'
     number = t3_signal_number(error)
     if number is not None:
         return f'crashed ({signal.Signals(number).name})'
@@ -1373,27 +1361,28 @@ def t3_resolved_smoke_paths(binary, directory):
     Bubblewrap binds that directory, then chdirs to the executable's parent.
     TMPDIR or /tmp is often a symlink. Binding the real path and then naming
     the symlink in --chdir, the executable, cwd, or HOME/TMPDIR/XDG_* makes
-    bwrap exit 1 with "Can't chdir", so every newer nightly is skipped.
+    bwrap exit 1 with "Can't chdir", so every build is skipped.
     """
     directory = os.path.realpath(directory)
     binary = Path(os.path.realpath(binary))
     return binary, directory
 
 
-def t3_sandbox_command(binary, directory):
-    """Confined `t3 --version`, or None when bubblewrap is not installed.
+def t3_sandbox_command(binary, directory, args=('--version',), unshare=()):
+    """Confined `binary --version` (or `args`), or None when bubblewrap is not installed.
 
     `binary` and `directory` are the real paths from `t3_resolved_smoke_paths`.
     System directories are read-only. The download directory is the only
     writable path. The home directory is not mounted. `--unshare-pid` plus
-    `--die-with-parent` reaps a double-fork when bwrap exits.
+    `--die-with-parent` reaps a double-fork when bwrap exits. `unshare` adds
+    namespaces (the AppImage extraction also drops IPC and UTS).
     """
     bwrap = shutil.which('bwrap')
     if not bwrap:
         return None
     binary = Path(binary)
     directory = str(directory)
-    argv = [bwrap, '--die-with-parent', '--unshare-pid', '--unshare-net']
+    argv = [bwrap, '--die-with-parent', '--unshare-pid', '--unshare-net', *unshare]
     for path in ('/usr', '/etc'):
         if Path(path).is_dir() and not Path(path).is_symlink():
             argv.extend(['--ro-bind', path, path])
@@ -1409,158 +1398,438 @@ def t3_sandbox_command(binary, directory):
         acc = acc / part
         argv.extend(['--dir', str(acc)])
     argv.extend(['--bind', directory, directory, '--chdir', str(binary.parent),
-                 '--', str(binary), '--version'])
+                 '--', str(binary), *args])
     return argv
 
 
-def t3_remember_skip(warnings, reason):
-    if warnings is not None:
-        warnings.append(reason)
-    return reason
+# --- T3 Code desktop app (decision 0020) -------------------------------------
+# Omarchy's omarchy-install-ai-t3-code owns the install. The app updates
+# itself: electron-updater stages the next AppImage in the pending directory
+# and swaps it in when the app quits. update-all checks that staged build
+# before it is applied, and the installed AppImage after, on kernels with
+# pages larger than 4 KiB.
+
+T3_SEMVER = re.compile(r'\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?')
+T3_APPIMAGE_NAME = re.compile(r'T3-Code-[A-Za-z0-9._-]+\.AppImage')
 
 
-def t3_candidate_check(installed, page, warnings=None):
-    """Return (reason the newest nightly must not be installed or None, candidate).
+class T3Check:
+    """Result of checking one AppImage: `status` is pass, reject, or skip.
 
-    An executable or shared object with a LOAD segment the kernel cannot map
-    with its page size is rejected (pingdotgg/t3code#23433). The rule is
-    `t3_load_segment_mappable`: p_align of at least the page, or p_offset and
-    p_vaddr both page-aligned (decision 0018). A build that passes is
-    smoke-tested with `--version` from its own directory and installed only
-    when that run prints the candidate.
-    Only a signal death is remembered. A timeout or an OS error skips this
-    run; the same version is checked again on the next update-all.
+    reject means the build itself failed, and `reason` is the t3-rejected.json
+    reason. skip means it could not be checked this run (`detail` says why),
+    and nothing is remembered.
     """
-    candidate = t3_latest_nightly()
-    if candidate == installed:
-        return None, candidate
+
+    def __init__(self, status, version=None, reason=None, detail='', sha512=None):
+        self.status, self.version, self.reason, self.detail, self.sha512 = status, version, reason, detail, sha512
+
+
+def t3_appimage_path():
+    """Where omarchy-install-t3code-app puts the app. It does not read XDG_DATA_HOME."""
+    return Path.home() / '.local/share/t3code/T3-Code.AppImage'
+
+
+def t3_pending_dir():
+    """electron-updater's staging directory for T3 Code (updaterCacheDirName t3code-updater)."""
+    return xdg_base('XDG_CACHE_HOME', Path.home() / '.cache') / 't3code-updater/pending'
+
+
+def t3_last_good_dir():
+    """One copy of the last AppImage that passed, for a rollback."""
+    return STATE / 't3'
+
+
+def t3_appimage_version(name):
+    """The version in an AppImage file name (T3-Code-<version>[-arm64].AppImage), or None."""
+    if not T3_APPIMAGE_NAME.fullmatch(name or ''):
+        return None
+    stem = name[len('T3-Code-'):-len('.AppImage')]
+    for arch in ('-arm64', '-aarch64'):
+        if stem.endswith(arch):
+            stem = stem[:-len(arch)]
+            break
+    return stem if T3_SEMVER.fullmatch(stem) else None
+
+
+def t3_sha512(path):
+    """Base64 sha512 of a file, the form electron-updater and the release feed use."""
+    digest = hashlib.sha512()
+    with Path(path).open('rb') as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b''):
+            digest.update(chunk)
+    return base64.b64encode(digest.digest()).decode()
+
+
+def t3_desktop_version(root):
+    """X-AppImage-Version from the AppImage's own t3code.desktop, or None.
+
+    A symbolic link is not followed: the AppImage could point it anywhere.
+    """
+    entry = Path(root) / 't3code.desktop'
+    if entry.is_symlink():
+        return None
+    try:
+        lines = entry.read_text(errors='replace').splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        key, _, value = line.partition('=')
+        if key.strip() == 'X-AppImage-Version' and T3_SEMVER.fullmatch(value.strip()):
+            return value.strip()
+    return None
+
+
+def t3_sandboxed(binary, directory, args, deadline, unshare=()):
+    """Run `binary args` confined, from its directory, with no home and core limit 1."""
+    return run(t3_sandbox_command(binary, directory, args, unshare), cwd=str(Path(binary).parent),
+               deadline=deadline, stdin=subprocess.DEVNULL,
+               env=t3_smoke_environment(directory), limit_core=True)
+
+
+def t3_work_dir():
+    """Where AppImages are copied and unpacked: disk, not a RAM-backed /tmp.
+
+    An unpacked T3 Code is several hundred MB. ~/.cache/groundwork holds only
+    groundwork-t3-* temporary directories, each removed when its check ends.
+    """
+    directory = xdg_base('XDG_CACHE_HOME', Path.home() / '.cache') / 'groundwork'
+    directory.mkdir(parents=True, exist_ok=True)
+    return str(directory)
+
+
+def t3_killed(error):
+    """True for SIGKILL (exit -9 or 137): most likely the OOM killer, not the build."""
+    return t3_signal_number(error) == signal.SIGKILL
+
+
+def t3_check_appimage(path, page, version=None, sha512=None, keep=None):
+    """Check one T3 Code AppImage for `page`-sized pages. Return a T3Check.
+
+    The file is copied into a private temp directory first, so it cannot
+    change while it is checked, and `sha512` (when given) is verified on that
+    copy. Then: the AppImage runtime's LOAD segments; extraction with
+    --appimage-extract inside the bubblewrap sandbox (the app itself is not
+    started); every aarch64 ELF file under squashfs-root with decision 0018's
+    rule; and the smoke run, `t3code --version` in the same sandbox, which
+    must print the version under test. That version is `version`, else the
+    AppImage's own X-AppImage-Version, else what the smoke run prints.
+    With `keep`, a copy that passed is written there atomically. A SIGKILL is
+    a skip, not a rejection: that is usually memory pressure.
+    """
+    with tempfile.TemporaryDirectory(prefix='groundwork-t3-', dir=t3_work_dir()) as directory:
+        directory = os.path.realpath(directory)
+        copy = Path(directory) / 'T3-Code.AppImage'
+        shutil.copyfile(path, copy)
+        copy.chmod(0o700)
+        actual = t3_sha512(copy)
+        if sha512 is not None and actual != sha512:
+            return T3Check('skip', version, detail=f'{Path(path).name} does not match its sha512', sha512=actual)
+        if elf_machine(copy) != EM_AARCH64:
+            return T3Check('skip', version, detail=f'{Path(path).name} is not an aarch64 AppImage', sha512=actual)
+        segments = load_segments(copy)
+        if not segments or not all(t3_load_segment_mappable(*segment, page) for segment in segments):
+            return T3Check('reject', version, 'misaligned-load', 'its AppImage runtime cannot be mapped', actual)
+        try:
+            t3_sandboxed(copy, directory, ('--appimage-extract',), T3_EXTRACT_SECONDS,
+                         unshare=('--unshare-ipc', '--unshare-uts'))
+        except (UpdateError, OSError) as error:
+            if t3_candidate_rejected(error) and not t3_killed(error):
+                return T3Check('reject', version, 'extract-crash',
+                               f'its AppImage runtime {t3_failure_reason(error)}', actual)
+            return T3Check('skip', version, detail=f'it could not be extracted ({t3_failure_reason(error)})',
+                           sha512=actual)
+        root = Path(directory) / 'squashfs-root'
+        binary = root / 't3code'
+        if root.is_symlink() or binary.is_symlink() or not binary.is_file() or elf_machine(binary) != EM_AARCH64:
+            return T3Check('skip', version, detail='it has no aarch64 t3code executable', sha512=actual)
+        embedded = t3_desktop_version(root)
+        if version and embedded and embedded != version:
+            return T3Check('skip', version, detail=f'it says it is {embedded}', sha512=actual)
+        version = version or embedded
+        misaligned = misaligned_elf_files(root, page)
+        if misaligned:
+            return T3Check('reject', version, 'misaligned-load',
+                           f'{len(misaligned)} ELF file(s) cannot be mapped ({", ".join(misaligned[:3])})', actual)
+        try:
+            got = reported_t3_version(t3_sandboxed(binary, directory, ('--version',), T3_CANDIDATE_SMOKE_SECONDS))
+        except (UpdateError, OSError, ValueError) as error:
+            if t3_candidate_rejected(error) and not t3_killed(error):
+                return T3Check('reject', version, 'smoke-crash', f't3code --version {t3_failure_reason(error)}', actual)
+            return T3Check('skip', version, detail=f'it was not smoke-tested ({t3_failure_reason(error)})',
+                           sha512=actual)
+        if version and got != version:
+            return T3Check('skip', version, detail=f't3code --version printed {got}, not {version}', sha512=actual)
+        if not T3_SEMVER.fullmatch(got):
+            return T3Check('skip', version, detail=f't3code --version printed {got!r}', sha512=actual)
+        if keep is not None:
+            t3_place(copy, keep)
+        return T3Check('pass', got, sha512=actual)
+
+
+def t3_place(source, destination):
+    """Copy `source` over `destination` atomically, mode 755."""
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f'.{destination.name}.groundwork-{os.getpid()}')
+    try:
+        shutil.copyfile(source, temporary)
+        temporary.chmod(0o755)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def t3_running(source):
+    """(running, reason) from groundwork-t3-launcher.py in the checkout.
+
+    The app and its bundled `t3` both run from an AppImage mount. Unsure
+    counts as running, so nothing is replaced.
+    """
+    path = Path(source) / 'scripts/groundwork-t3-launcher.py'
+    try:
+        spec = importlib.util.spec_from_file_location('groundwork_t3_launcher', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.app_running()
+    except (OSError, ImportError, SyntaxError, AttributeError) as error:
+        return True, f'the T3 Code process check could not run ({error})'
+
+
+def t3_last_good():
+    """(path, record) of the kept copy when it is intact, else (None, None)."""
+    directory = t3_last_good_dir()
+    check_path(directory / 'last-good.json')
+    try:
+        record = json.loads((directory / 'last-good.json').read_text())
+    except (OSError, ValueError):
+        return None, None
+    copy = directory / 'T3-Code.AppImage'
+    if (not isinstance(record, dict) or not isinstance(record.get('version'), str)
+            or not isinstance(record.get('sha512'), str) or copy.is_symlink() or not copy.is_file()):
+        return None, None
+    return copy, record
+
+
+def t3_remember_good(version, sha512):
+    atomic_write(t3_last_good_dir() / 'last-good.json',
+                 json.dumps({'version': version, 'sha512': sha512}, indent=2) + '\n')
+
+
+def t3_hold(page, version, reason, detail):
+    """Remember a rejected version. The message names the version and why."""
+    if version:
+        reject_t3(page, version, reason)
+        return f'T3 Code {version} fails on {page // 1024} KiB pages: {detail} ({T3_PAGE_SIZE_ISSUE}). It is remembered as rejected.'
+    return f'This T3 Code build fails on {page // 1024} KiB pages: {detail} ({T3_PAGE_SIZE_ISSUE}).'
+
+
+def t3_check_pending(page, completed, warnings):
+    """Check the update the app has staged. A rejected build is removed from pending."""
+    pending = t3_pending_dir()
+    info_path = pending / 'update-info.json'
+    if pending.is_symlink() or info_path.is_symlink():
+        warnings.append(f'T3 Code staged update not checked: {pending} or its update-info.json is a symbolic link.')
+        return
+    if not info_path.is_file():
+        return
+    try:
+        info = json.loads(info_path.read_text())
+    except (OSError, ValueError) as error:
+        warnings.append(f'T3 Code staged update not checked: {info_path} cannot be read ({error}).')
+        return
+    name = info.get('fileName') if isinstance(info, dict) else None
+    sha512 = info.get('sha512') if isinstance(info, dict) else None
+    version = t3_appimage_version(name)
+    if not version or not isinstance(sha512, str):
+        warnings.append(f'T3 Code staged update not checked: {info_path} does not name a T3 Code AppImage and its sha512.')
+        return
+    staged = pending / name
+    if staged.is_symlink():
+        warnings.append(f'T3 Code staged update not checked: {staged} is a symbolic link.')
+        return
+    if not staged.is_file():
+        # Still downloading, or already applied. The next run checks it.
+        return
+
+    def remove():
+        for path in (staged, info_path):
+            path.unlink(missing_ok=True)
+
+    if version in rejected_t3(page):
+        remove()
+        print(f'T3 Code {version} was staged again and is still rejected on {page // 1024} KiB pages; '
+              'removed it from the pending update.', flush=True)
+        completed.append(f'T3 Code staged {version} removed (rejected)')
+        return
+    print(f'Checking the staged T3 Code {version} for {page // 1024} KiB pages…', flush=True)
+    result = t3_check_appimage(staged, page, version=version, sha512=sha512)
+    if result.status == 'pass':
+        print(f'T3 Code {version} passed; T3 Code applies it when it quits.', flush=True)
+        completed.append(f'T3 Code staged {version} checked')
+    elif result.status == 'reject':
+        print(t3_hold(page, version, result.reason, result.detail), flush=True)
+        remove()
+        print(f'Removed {staged.name} and update-info.json from {pending}.', flush=True)
+        completed.append(f'T3 Code staged {version} rejected and removed')
+    elif result.sha512 is not None and sha512 != result.sha512:
+        # A staged file that does not match its own record is never applied unchecked.
+        remove()
+        warnings.append(f'T3 Code staged {version} did not match its sha512 and was removed; T3 Code downloads it again.')
+    else:
+        warnings.append(f'T3 Code staged {version} was not checked: {result.detail}. It stays staged, and '
+                        'T3 Code applies it unchecked when it quits; rerun update-all before quitting T3 Code.')
+
+
+def t3_install_checked(page, source, completed, warnings, exclude):
+    """Download the newest nightly that is not rejected, check it, and put it in place.
+
+    Return True when an AppImage that passed is installed. The release's
+    nightly-linux-arm64.yml names the file and its sha512, as for Omarchy's
+    installer.
+    """
+    rejected = set(rejected_t3(page)) | set(exclude)
+    tried = 0
+    for version in t3_nightly_versions():
+        if version in rejected:
+            continue
+        if tried >= T3_FALLBACK_ATTEMPTS:
+            break
+        tried += 1
+        feed = fetch(f'{T3_DOWNLOADS}/v{version}/{T3_FEED}').decode(errors='replace')
+        fields = {}
+        for line in feed.splitlines():
+            key, _, value = line.partition(':')
+            if key in ('version', 'path', 'sha512') and key not in fields:
+                fields[key] = value.strip().strip('\'"')
+        if fields.get('version') != version or t3_appimage_version(fields.get('path')) != version or not fields.get('sha512'):
+            raise UpdateError(f'The {T3_FEED} of T3 Code {version} is not in the expected format.')
+        print(f'Downloading T3 Code {version} to check it…', flush=True)
+        with tempfile.TemporaryDirectory(prefix='groundwork-t3-download-', dir=t3_work_dir()) as directory:
+            download = Path(directory) / fields['path']
+            with download.open('wb') as handle:
+                fetch(f'{T3_DOWNLOADS}/v{version}/{fields["path"]}', deadline=T3_DOWNLOAD_SECONDS, out=handle)
+            if t3_sha512(download) != fields['sha512']:
+                raise UpdateError(f'The T3 Code {version} download does not match its sha512.')
+            result = t3_check_appimage(download, page, version=version, sha512=fields['sha512'],
+                                       keep=t3_last_good_dir() / 'T3-Code.AppImage')
+            if result.status == 'reject':
+                print(t3_hold(page, version, result.reason, result.detail), flush=True)
+                continue
+            if result.status == 'skip':
+                warnings.append(f'T3 Code {version} could not be checked: {result.detail}.')
+                return False
+            t3_remember_good(version, result.sha512)
+            running, reason = t3_running(source)
+            if running:
+                warnings.append(f'T3 Code {version} passed and is kept, but was not put in place: {reason}. '
+                                'Quit T3 Code, then rerun update-all.')
+                return False
+            t3_place(t3_last_good_dir() / 'T3-Code.AppImage', t3_appimage_path())
+            print(f'Installed T3 Code {version}, which passed on {page // 1024} KiB pages.', flush=True)
+            completed.append(f'T3 Code replaced with checked {version}')
+            return True
+    warnings.append(f'No T3 Code nightly that passes on {page // 1024} KiB pages was found. '
+                    'Quit T3 Code if it crashes and rerun update-all after the next nightly.')
+    return False
+
+
+def t3_check_installed(page, source, completed, warnings, download=True):
+    """Check the installed AppImage. Roll back a failing one while T3 Code is not running.
+
+    Return True when the installed AppImage is one that passed. Without
+    `download` (setup, which has a 900-second limit), no older build is
+    downloaded; update-all does that.
+    """
+    appimage = t3_appimage_path()
+    if appimage.is_symlink() or not appimage.is_file():
+        return True
+    copy, record = t3_last_good()
+    sha512 = t3_sha512(appimage)
+    if record and record['sha512'] == sha512:
+        completed.append(f'T3 Code {record["version"]} already checked')
+        return True
+    print(f'Checking the installed T3 Code for {page // 1024} KiB pages…', flush=True)
+    result = t3_check_appimage(appimage, page, keep=t3_last_good_dir() / 'T3-Code.AppImage')
+    if result.status == 'pass':
+        t3_remember_good(result.version, result.sha512)
+        print(f'T3 Code {result.version} passed; kept a copy for rollback.', flush=True)
+        completed.append(f'T3 Code {result.version} checked')
+        return True
+    if result.status == 'skip':
+        warnings.append(f'The installed T3 Code was not checked: {result.detail}.')
+        return False
+    print(t3_hold(page, result.version, result.reason, result.detail), flush=True)
+    running, reason = t3_running(source)
+    if running:
+        warnings.append(f'The installed T3 Code fails on {page // 1024} KiB pages, and {reason}, so nothing was '
+                        'replaced. Quit T3 Code, then rerun update-all.')
+        return False
+    if copy is not None and record['version'] not in rejected_t3(page) and t3_sha512(copy) == record['sha512']:
+        t3_place(copy, appimage)
+        print(f'Restored the last T3 Code that passed, {record["version"]}.', flush=True)
+        completed.append(f'T3 Code restored to {record["version"]}')
+        return True
+    if not download:
+        warnings.append(f'The installed T3 Code fails on {page // 1024} KiB pages and no checked copy is kept. '
+                        'Do not open T3 Code yet. Run update-all: it downloads and checks an older nightly.')
+        return False
+    exclude = {result.version} if result.version else set()
+    try:
+        return t3_install_checked(page, source, completed, warnings, exclude)
+    except T3_CHECK_ERRORS as error:
+        warnings.append(f'The installed T3 Code fails on {page // 1024} KiB pages, and no older build '
+                        f'could be downloaded ({error}).')
+        return False
+
+
+T3_CHECK_ERRORS = (UpdateError, OSError, ValueError, http.client.HTTPException)
+
+
+def t3_gate(source, completed, warnings, pending=True, page=None, download=True):
+    """Run the decision 0020 checks on a large-page kernel. Return False when one did not pass."""
+    page = page or page_size()
+    if page <= 4096 or not t3_appimage_path().is_file():
+        return True
     dropped = migrate_rejected_t3()
     if dropped:
-        print(f'T3 Code: checking again {len(dropped)} build(s) rejected before the LOAD rule of decision 0018 '
+        print(f'T3 Code: checking again {len(dropped)} build(s) rejected before decision 0020 '
               f'({", ".join(dropped)}).', flush=True)
-    if candidate in rejected_t3(page):
-        return page_size_reason(page), candidate
+    staged = pending and (t3_pending_dir() / 'update-info.json').exists()
+    _, record = t3_last_good()
+    if not staged and record and record['sha512'] == t3_sha512(t3_appimage_path()):
+        # Nothing new to check, so neither readelf nor bwrap is needed.
+        completed.append(f'T3 Code {record["version"]} already checked')
+        return True
     if not shutil.which('readelf'):
-        return 'readelf is missing, so the newest build cannot be checked (install binutils)', candidate
+        warnings.append('readelf is missing, so T3 Code builds were not checked (install binutils).')
+        return False
     if shutil.which('bwrap') is None:
-        return t3_remember_skip(warnings, T3_NO_BWRAP), candidate
-    with tempfile.TemporaryDirectory(prefix='groundwork-t3-') as directory:
-        root = t3_download(candidate, directory)
-        if misaligned_elf_files(root, page):
-            reject_t3(page, candidate, 'misaligned-load')
-            return page_size_reason(page), candidate
-        binary = next(path for path in root.glob('*/t3') if path.is_file())
-        binary, directory = t3_resolved_smoke_paths(binary, directory)
+        warnings.append(T3_NO_BWRAP)
+        return False
+    count = len(warnings)
+    if pending:
         try:
-            reported = run(t3_sandbox_command(binary, directory), cwd=str(binary.parent),
-                           deadline=T3_CANDIDATE_SMOKE_SECONDS, stdin=subprocess.DEVNULL,
-                           env=t3_smoke_environment(directory), limit_core=True)
-            got = reported_t3_version(reported)
-        except (UpdateError, OSError, ValueError) as error:
-            if t3_candidate_rejected(error):
-                reject_t3(page, candidate, t3_rejection_reason('smoke', error))
-                return (f'the newest linux-arm64 build does not start on {page // 1024} KiB pages '
-                        f'({t3_failure_reason(error)}; {T3_PAGE_SIZE_ISSUE})'), candidate
-            return t3_remember_skip(
-                warnings, f'the newest linux-arm64 build was not smoke-tested ({t3_failure_reason(error)})'), candidate
-        if got != candidate:
-            return t3_remember_skip(
-                warnings, f'the newest linux-arm64 build reported {got}, not {candidate}'), candidate
-    return None, candidate
-
-
-def install_t3_version(version):
-    with tempfile.TemporaryDirectory(prefix='groundwork-t3-installer-') as directory:
-        installer = Path(directory) / 'install.sh'
-        installer.write_bytes(fetch(T3_INSTALLER))
-        run(['sh', str(installer)], deadline=300, capture=False,
-            extra_env=dict(T3CODE_CHANNEL='nightly', T3CODE_VERSION=version))
-    if t3_version() != version:
-        raise UpdateError(f'T3 Code did not report {version} after installing it.')
-
-
-def repair_t3(completed, warnings, versions, problem):
-    print(f'{problem} Reinstalling a build that starts on this kernel…', flush=True)
-    for version in dict.fromkeys(version for version in versions if version):
-        try:
-            install_t3_version(version)
-        except (UpdateError, OSError, ValueError, http.client.HTTPException) as error:
-            print(f'Installing T3 Code {version} failed: {error}', file=sys.stderr, flush=True)
-            continue
-        print(f'T3 Code {version} installed. Restart its background service if one is running.', flush=True)
-        completed.append(f'T3 Code repaired with {version}')
-        return
-    print(f'T3 Code is still not starting. Restore it with: curl -fsSL {T3_INSTALLER} | '
-          f'T3CODE_CHANNEL=nightly T3CODE_VERSION={T3_KNOWN_GOOD_LARGE_PAGE} sh', file=sys.stderr, flush=True)
-    completed.append('T3 Code repair failed; restore command printed')
-    warnings.append('T3 Code does not start and could not be repaired; run the printed restore command.')
-
-
-T3_CHECK_ERRORS = (UpdateError, OSError, ValueError, tarfile.TarError, http.client.HTTPException)
-
-
-def update_t3(completed, warnings):
-    page = page_size()
-    if page <= 4096:
-        print('Updating T3 Code Nightly (its background service may restart)…', flush=True)
-        run(['t3', 'update', '--channel', 'nightly', '--yes'], deadline=300, capture=False)
-        if '-nightly.' not in run(['t3', '--version']):
-            raise UpdateError('T3 Code did not report the selected Nightly channel after updating.')
-        completed.append('T3 Code Nightly update command completed')
-        return
+            t3_check_pending(page, completed, warnings)
+        except T3_CHECK_ERRORS as error:
+            warnings.append(f'T3 Code staged update not checked ({error}).')
     try:
-        installed = t3_version()
-    except (UpdateError, OSError) as error:
-        installed, broken = None, error
-    try:
-        reason, candidate = t3_candidate_check(installed, page, warnings)
+        installed = t3_check_installed(page, source, completed, warnings, download)
     except T3_CHECK_ERRORS as error:
-        reason, candidate = f'the newest linux-arm64 build could not be checked for {page // 1024} KiB pages ({error})', None
-    if installed is None:
-        repair_t3(completed, warnings, [None if reason else candidate, T3_KNOWN_GOOD_LARGE_PAGE],
-                  f'The installed T3 Code does not start ({broken}).')
+        warnings.append(f'The installed T3 Code was not checked ({error}).')
+        installed = False
+    return installed and len(warnings) == count
+
+
+def update_t3(completed, warnings, source):
+    """update-all's T3 Code step. The app updates itself; this only checks its builds."""
+    if page_size() <= 4096:
+        completed.append('T3 Code updates itself; no page-size check on 4 KiB pages')
         return
-    if reason:
-        print(f'T3 Code update skipped: {reason}; keeping {installed}.', flush=True)
-        completed.append(f'T3 Code update skipped on {page // 1024} KiB pages; kept {installed}')
+    if not t3_appimage_path().is_file():
+        completed.append('T3 Code app not installed; its check was skipped')
         return
-    if candidate == installed:
-        print(f'T3 Code Nightly is already {installed}.', flush=True)
-        completed.append(f'T3 Code Nightly already current ({installed})')
-        return
-    # Install exactly the build that was checked, never a newer unchecked one.
-    print(f'Updating T3 Code Nightly to {candidate} (its background service may restart)…', flush=True)
-    try:
-        run(['t3', 'update', '--channel', 'nightly', '--yes', candidate], deadline=300, capture=False)
-    except (UpdateError, OSError) as error:
-        try:
-            kept = t3_version()
-        except (UpdateError, OSError):
-            repair_t3(completed, warnings, [installed, T3_KNOWN_GOOD_LARGE_PAGE],
-                      f'T3 Code {candidate} does not start after updating ({T3_PAGE_SIZE_ISSUE}).')
-            return
-        # The installed build still starts. Remember the candidate only when
-        # that build itself failed (signal exit or PinnedRuntimeInstallError).
-        # A 300s deadline, a transport error, or any other OSError is retried
-        # on the next update-all and is not written to t3-rejected.json.
-        if kept != installed:
-            raise
-        detail = t3_failure_reason(error)
-        if t3_candidate_rejected(error):
-            reject_t3(page, candidate, t3_rejection_reason('update', error))
-        print(f'T3 Code {candidate} was not installed ({detail}). Keeping {installed}.', flush=True)
-        warnings.append(f'T3 Code {candidate} was not installed ({detail}); kept {installed}.')
-        completed.append(f'T3 Code update skipped on {page // 1024} KiB pages; kept {installed}')
-        return
-    try:
-        updated = t3_version()
-    except (UpdateError, OSError):
-        repair_t3(completed, warnings, [installed, T3_KNOWN_GOOD_LARGE_PAGE],
-                  f'T3 Code {candidate} does not start after updating ({T3_PAGE_SIZE_ISSUE}).')
-        return
-    if updated != candidate:
-        raise UpdateError(f'T3 Code reported {updated} after updating to {candidate}.')
-    completed.append(f'T3 Code Nightly updated to {candidate}')
+    t3_gate(source, completed, warnings)
 
 
 def git(source, *args, **kwargs):
@@ -1775,7 +2044,7 @@ def update(scope, check=False):
                 atomic_write(CONFIG, json.dumps(value, indent=2) + '\n')
             completed.append('Groundwork configuration applied')
             if scope == 'all':
-                update_t3(completed, warnings)
+                update_t3(completed, warnings, source)
                 try:
                     run([sys.executable, str(source / 'scripts/groundwork-t3-launcher.py'), 'reconcile'],
                         capture=False)
@@ -1846,6 +2115,17 @@ def main(args):
     if args and args[0] == 'verify-lock' and len(args) == 1:
         verify_lock()
         return 0
+    if args and args[0] == 't3-check-installed' and len(args) == 2 and args[1].isdigit():
+        # Setup and the t3-cli migration, after omarchy-install-ai-t3-code
+        # (decision 0020). Runs inside apply-layer.sh's transaction. The page
+        # size is setup's getconf PAGESIZE; 0 means read it here.
+        verify_lock()
+        completed, warnings = [], []
+        passed = t3_gate(Path(__file__).resolve().parents[1], completed, warnings, pending=False,
+                         page=int(args[1]) or None, download=False)
+        for warning in warnings:
+            print(f'Warning: {warning}', file=sys.stderr)
+        return 0 if passed else 1
     if args and args[0] == 'check-load-alignment' and len(args) == 2:
         problem = bun_alignment_problem(args[1])
         if problem:
@@ -2017,7 +2297,7 @@ def main(args):
         print(f'Usage: {"update-all" if scope == "all" else "groundwork-update"} [--check]')
         print('Synchronize and apply this Groundwork layer using saved setup choices.')
         if scope == 'all':
-            print('Also run omarchy update, update listed Omarchy shell plugins, update T3 Nightly (including its background service), and update the installed Bitwarden and FreeTube user Flatpaks.')
+            print('Also run omarchy update, update listed Omarchy shell plugins, check T3 Code\'s staged and installed builds on kernels with pages larger than 4 KiB, and update the installed Bitwarden and FreeTube user Flatpaks.')
             print(f'When Blip is opted in, update {BLIP_ID} only in an interactive terminal, without --yes, so its diff can be reviewed.')
         else:
             print('Listed shell plugins are installed or retired. Existing plugin checkouts stay at their current revisions.')

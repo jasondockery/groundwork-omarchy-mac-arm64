@@ -24,7 +24,7 @@ less install.sh
 
 For an existing checkout, use `git status` and review local edits before updating it; do not clone over it or reset it. Public HTTPS clones need no GitHub login. For a private copy, use an authorized account or your chosen SSH host alias/key instead. The installer does not configure GitHub credentials. `./install.sh` checks out the pinned `core` submodule; a separate recursive clone is unnecessary.
 
-The default installs T3 Code Nightly, Herdr, Tailscale, keyd, Obsidian, Bitwarden (desktop and CLI), and FreeTube, starts `tailscaled` and keyd, applies the trackpad preferences, and makes Caps Lock Escape on tap and Control while held. Different existing input/keyd files are backed up. `--without-keyd` skips keyd setup. Omarchy continues to own the desktop shortcuts, tmux, shell, editor, and terminal configuration. T3 Code and agent providers still need your local authentication. Follow the [desktop apps guide](docs/apps.md) for Bitwarden sign-in, the local Obsidian vault, previous plugin choices, and free cross-platform sync. Existing notes are never moved automatically.
+The default installs T3 Code Nightly (through Omarchy's own installer), Herdr, Tailscale, keyd, Obsidian, Bitwarden (desktop and CLI), and FreeTube, starts `tailscaled` and keyd, applies the trackpad preferences, and makes Caps Lock Escape on tap and Control while held. Different existing input/keyd files are backed up. `--without-keyd` skips keyd setup. Omarchy continues to own the desktop shortcuts, tmux, shell, editor, and terminal configuration. T3 Code and agent providers still need your local authentication. Follow the [desktop apps guide](docs/apps.md) for Bitwarden sign-in, the local Obsidian vault, previous plugin choices, and free cross-platform sync. Existing notes are never moved automatically.
 
 WayVNC screen sharing is also configured automatically. It starts with the logged-in desktop and listens only on the current online Tailscale address. Show its generated password locally with `groundwork-screen-share password`, then connect from the Mac's Screen Sharing app using `vnc://MACHINE`. On that virtual keyboard, Command follows Omarchy's Super bindings and Option follows the Alt bindings. Follow [desktop-sharing setup](docs/remote-access.md#automatic-desktop-sharing) for the port grant, modifier check, acceptance, and recovery. `--without-screen-sharing` skips it without disabling an existing service. Tailscale sign-in and OS login remain local steps.
 
@@ -53,7 +53,7 @@ Only enable SSH after reviewing that guide and your effective tailnet policy. No
 - Tap Caps Lock to leave Neovim insert mode; hold Caps Lock with `L` to send `Ctrl+L`, and with Space to send the multiplexer prefix. Physical Escape and Control still work.
 - `systemctl is-active tailscaled keyd` reports both services active for the default setup. `tailscale status` shows the device connected after sign-in and approval. Use the separate keyd recovery instructions below if needed.
 - `Super+Space` opens the Omarchy menu; `Super+K` shows desktop bindings. Launch tmux with `Super+Alt+Return` and Herdr with `Super+Ctrl+Return`. In either, use `Ctrl+Space`, then `?` for live help, and practice the [same pane keys](docs/keybindings.md).
-- Check that `t3 --version` identifies a Nightly build, then run `t3`, open its local interface, authenticate a provider already installed on this machine, and complete one small task in a disposable project. Installing the UI does not authenticate Codex or Claude.
+- Open T3 Code from the app launcher (`Super+Space`, T3 Code). The first launch writes its `t3` command, `~/.t3/bin/t3`, which `~/.local/bin/t3` points at. Then `t3 --version` works in a new terminal. Authenticate a provider already installed on this machine and complete one small task in a disposable project. Installing the app does not authenticate Codex or Claude. `xdg-open t3code://` opens T3 Code, and the launcher shows one T3 Code entry.
 - Open Obsidian with `Super+Shift+O` and select the local vault printed by setup. A new vault has Vim mode enabled; existing settings are preserved. Verify your notes and the chosen sync path using the [apps guide](docs/apps.md).
 - Launch Bitwarden from the app menu and finish sign-in/MFA. Restart Chromium to load the registered official extension, approve/enable it if prompted in each profile, and test autofill. `bw --version` checks CLI availability; it does not prove vault sign-in. A new install uses Omarchy's `bitwarden` package when the feed has it and it passes setup's checks, and otherwise the user Flatpak. User Flatpak updates use `flatpak --user update` separately from Omarchy updates.
 - When setup installed Brave and its launch check passed, setup made it the default (it opens a Brave window with a throwaway profile for a few seconds to check), and `omarchy default browser` prints `brave`. Open one page, then `brave://policy`, and confirm the groundwork-core rows. Approve Bitwarden if Brave offers it. Open one web app with `omarchy-launch-webapp` and confirm it opens in Brave; a sign-in that exists only in Chromium stays in Chromium. Chromium itself stays installed. If Brave failed the page-size or launch check, Chromium remains the default and setup says so. See the [apps guide](docs/apps.md#brave).
@@ -74,9 +74,9 @@ update-all
 ```
 
 It checks this repo, runs the supported `omarchy update`, fast-forwards and
-applies your personal settings, updates listed Omarchy shell plugins, updates
-T3 Code Nightly, and updates the installed Bitwarden and FreeTube user Flatpaks. `omarchy update`
-does not update those plugin checkouts. T3's background service may restart. When screen
+applies your personal settings, updates listed Omarchy shell plugins, checks
+T3 Code's builds (below), and updates the installed Bitwarden and FreeTube user Flatpaks. `omarchy update`
+does not update those plugin checkouts. When screen
 sharing's unit, helper, or WayVNC config changed and `WAYLAND_DISPLAY` is unset (SSH or cron),
 an inactive unit stays stopped and the restart record is cleared. When `WAYLAND_DISPLAY` is set,
 the unit restarts even if it is inactive. The drop warning prints only when a restart actually runs.
@@ -84,33 +84,50 @@ See [desktop sharing](docs/remote-access.md#automatic-desktop-sharing). Other Fl
 application sign-in remain outside this command. Omarchy owns the OS, Arch
 packages, default tools, and desktop; no second system updater is installed.
 
-On a kernel with pages larger than 4 KiB (Apple Silicon uses 16 KiB),
-`update-all` first downloads the newest T3 Nightly, verifies its checksum, and
-checks the LOAD segments of every ELF file with `readelf -lW` (from `binutils`,
-which setup installs). A LOAD passes when its `p_align` is at least the page
-size, or when its `p_offset` and `p_vaddr` are both page multiples
-([decision 0018](docs/decisions/0018-t3-load-segment-rule.md)). A misaligned build is remembered in
-`~/.local/state/groundwork/t3-rejected.json` and is not downloaded again
-([pingdotgg/t3code#23433](https://github.com/pingdotgg/t3code/issues/23433)).
-An aligned build is smoke-tested with `t3 --version` from the directory that
-contains that binary. The child gets a fresh environment (`HOME`, `TMPDIR`, and
-`XDG_*` inside the download, and `PATH=/usr/bin:/bin`) and runs under
-`bwrap --die-with-parent --unshare-pid --unshare-net`, with system directories
-read-only and the download writable. Omarchy ships `bwrap` with Flatpak. A
-scrubbed environment alone is not confinement — the binary could still read the
-home directory and use the network — so a missing `bwrap` skips that run with a
-warning and does not execute the candidate. The smoke test is accepted only
-when `--version` prints that candidate. A signal death, or T3's
-`PinnedRuntimeInstallError` from `t3 update`, is remembered like a misaligned
-build. A timeout, transport error, or other OS error warns and is retried on
-the next `update-all` without writing `t3-rejected.json`. If `t3 update` fails
-and the installed version is unchanged and still starts, the stage is a
-warning, not a failure. If the installed T3 no longer starts, `update-all`
-reinstalls the checked build or the last known-good
-`0.1.2-nightly.20261021.3499`. If neither works, it prints a restore command,
-finishes the other stages, records `completed_with_warnings`, and exits
-non-zero. Setup on such a kernel keeps a Nightly that already starts and
-installs the known-good build only when T3 is missing, broken, or not a Nightly.
+T3 Code is Omarchy's self-updating AppImage
+([decision 0020](docs/decisions/0020-t3-code-through-omarchy-installer.md)). Setup installs it with
+`omarchy-install-ai-t3-code nightly --no-launch`, which needs administrator permission once (it adds
+`fuse3`). The app downloads its next build into `~/.cache/t3code-updater/pending/` and applies it when
+it quits. `update-all` runs no T3 update command.
+
+On a kernel with pages larger than 4 KiB (Apple Silicon uses 16 KiB), `update-all` checks T3 Code's
+builds ([pingdotgg/t3code#23433](https://github.com/pingdotgg/t3code/issues/23433)):
+
+- **The staged update.** It verifies the staged AppImage against the sha512 in
+  `update-info.json`, then runs the check below. A build that passes stays staged. A build that fails
+  is removed from the pending directory (that file and `update-info.json`, nothing else) and is
+  remembered in `~/.local/state/groundwork/t3-rejected.json` with its reason. When the app stages a
+  rejected version again, the next run removes it again without checking it. A newer build clears this.
+- **The installed AppImage.** It runs the same check on `~/.local/share/t3code/T3-Code.AppImage` and
+  keeps one copy of the last build that passed under `~/.local/state/groundwork/t3/` (about the size
+  of the AppImage). When the installed build fails and T3 Code is not running, that copy is put back.
+  With no copy, it downloads the newest nightly that is not rejected, using the release's
+  `nightly-linux-arm64.yml` and its sha512, checks it, and puts it in place. While T3 Code runs,
+  nothing is replaced, and the warning says to quit it and rerun `update-all`.
+
+The check copies the AppImage into a temporary directory under `~/.cache/groundwork` (on disk, removed afterwards) and unpacks it there with
+`--appimage-extract`, inside `bwrap --die-with-parent --unshare-pid --unshare-net` with system
+directories read-only, the temporary directory writable, no home directory, and a fresh environment
+(`HOME`, `TMPDIR`, and `XDG_*` inside it, `PATH=/usr/bin:/bin`, core limit 1). The app is not started.
+Every ELF file built for aarch64 is read with `readelf -lW` (from `binutils`, which setup installs).
+Files built for another machine, such as node-pty's `prebuilds/linux-x64/pty.node`, are skipped,
+because they never load here. A LOAD passes when its `p_align` is at least the page size, or when its
+`p_offset` and `p_vaddr` are both page multiples
+([decision 0018](docs/decisions/0018-t3-load-segment-rule.md)). Then the unpacked `t3code --version`
+runs in the same sandbox for at most 30 seconds and must print the version under test. Omarchy ships
+`bwrap` with Flatpak. A missing `bwrap` skips the check with a warning and runs nothing. A misaligned
+LOAD or a signal death is remembered. A timeout, a transport error, or a wrong version warns, is not
+remembered, and is checked again on the next `update-all`, as is a SIGKILL (usually low memory). Warnings finish the other stages, record
+`completed_with_warnings`, and exit non-zero.
+
+Setup checks the installed AppImage too, whenever it does not match the kept copy, including one
+that a failed `omarchy-install-ai-t3-code` left in place. Setup restores a kept copy but does not
+download an older build; it says to run `update-all`, which does.
+
+One race remains. The app can apply a staged build when it quits before `update-all` has checked it.
+The next `update-all` then finds the installed build failing and restores the last good copy.
+
+On 4 KiB pages there is no check. The app updates itself.
 
 When Blip is opted in, `update-all` runs `omarchy plugin update nixfred.blip`
 only in an interactive terminal, without `--yes`, so you can read the diff.
@@ -152,7 +169,7 @@ naming the current and preferred methods and the migration id. Run
 including after an earlier no. The flag runs every offer that is still pending.
 App data is kept; see the
 [apps guide](docs/apps.md#moving-from-the-flatpak-to-omarchys-package)
-and [Brave](docs/apps.md#brave).
+[Brave](docs/apps.md#brave), and [T3 Code](docs/apps.md#t3-code).
 A `cursor` that no pacman package owns is only reported, with
 [manual steps](docs/apps.md#cursor).
 
@@ -201,7 +218,7 @@ and omit onboarding. They preserve application data and provider authentication.
 
 ## Repository checks
 
-Installation checks that the selected tools are actually available. If another `t3` shadows the Nightly symlink, it stops before applying input settings and prints the installed directory to prepend to your user PATH. Start a fresh shell and rerun after fixing PATH; existing npm/system installations are preserved. The effective `t3 --version` must identify Nightly. Package-feed skips also fail explicitly instead of claiming a missing tool was installed.
+Installation checks that the selected tools are actually available. Once T3 Code has written its `t3` command, if another `t3` shadows `~/.local/bin/t3`, setup stops before applying input settings and prints the directory to prepend to your user PATH. Start a fresh shell and rerun after fixing PATH; existing npm/system installations are preserved. `~/.local/bin/t3 --version` must then print a version. A `t3` of your own at `~/.local/bin/t3` is left alone, as Omarchy's installer leaves it. Package-feed skips also fail explicitly instead of claiming a missing tool was installed.
 
 Run `bash -n install.sh scripts/apply-layer.sh scripts/migrate-from-groundwork.sh` and `python3 -B -m unittest discover -s tests -v`. CI runs the same shell and isolated installer checks. They do not install packages, start host services, or change the developer's home directory. The shared Renovate preset is declared in `renovate.json`; the central runner must also grant this repo access before updates can arrive.
 
@@ -282,11 +299,11 @@ omarchy pkg add stow
 ./install.sh
 ```
 
-`./install.sh` links the trackpad override, reloads and checks a detected Hyprland session, installs Herdr, Tailscale, keyd, Obsidian, Bitwarden, and FreeTube, enables the Tailscale and keyd services, and installs T3 Code Nightly's official ARM64 CLI. It seeds Vim mode only for an Obsidian vault without app settings. Caps Lock sends Escape when tapped and Control while held by default, matching the Karabiner habit on macOS. Reboot or log out if it asks, then complete the first-run acceptance above. Use `--without-keyd` to skip keyboard remapping.
+`./install.sh` links the trackpad override, reloads and checks a detected Hyprland session, installs Herdr, Tailscale, keyd, Obsidian, Bitwarden, and FreeTube, enables the Tailscale and keyd services, and installs T3 Code Nightly with `omarchy-install-ai-t3-code`. It seeds Vim mode only for an Obsidian vault without app settings. Caps Lock sends Escape when tapped and Control while held by default, matching the Karabiner habit on macOS. Reboot or log out if it asks, then complete the first-run acceptance above. Use `--without-keyd` to skip keyboard remapping.
 
 Still in an Omarchy terminal, complete the [private remote-access setup](docs/remote-access.md). This repo stores neither tailnet credentials nor your GitHub SSH key.
 
-Start T3 Code with `t3`. It opens the local web UI. Sign in to at least one provider, such as Codex or Claude, in T3 Code before starting an agent. Herdr opens with Omarchy's `Super+Ctrl+Return` shortcut and from a terminal.
+Open T3 Code from the app launcher; after its first launch, `t3` also starts it from a terminal. Sign in to at least one provider, such as Codex or Claude, in T3 Code before starting an agent. Herdr opens with Omarchy's `Super+Ctrl+Return` shortcut and from a terminal.
 
 The installer is a one-time OS install. Ongoing fixes come from `omarchy update` on the edge channel. Before a later reinstall, read the upstream installer releases again. The signed edge catalog may select a newer image, and an existing install still has to be removed first.
 
@@ -376,7 +393,7 @@ omarchy pkg add stow
 ./install.sh
 ```
 
-That links the trackpad override, installs Herdr, Tailscale, keyd, Obsidian, Bitwarden, and FreeTube, enables `tailscaled` and `keyd`, and installs T3 Code's ARM64 CLI. Pass `--with-blip` only when you want the iMessage client; the default leaves it off. Pass `--with-local-inference` only when you want the Ollama packages; the default leaves them off and downloads no model. See [local inference](docs/local-inference.md). If `~/.config/hypr/input.lua` already exists, the script moves it to `input.lua.bak-omarchy-groundwork`, preserving numbered predecessors if necessary, and then links the copy from this repo. It does not configure Git/SSH accounts. Complete the [Tailscale setup](docs/remote-access.md) and [desktop apps setup](docs/apps.md) after install.
+That links the trackpad override, installs Herdr, Tailscale, keyd, Obsidian, Bitwarden, and FreeTube, enables `tailscaled` and `keyd`, and installs the T3 Code app through Omarchy's installer. Pass `--with-blip` only when you want the iMessage client; the default leaves it off. Pass `--with-local-inference` only when you want the Ollama packages; the default leaves them off and downloads no model. See [local inference](docs/local-inference.md). If `~/.config/hypr/input.lua` already exists, the script moves it to `input.lua.bak-omarchy-groundwork`, preserving numbered predecessors if necessary, and then links the copy from this repo. It does not configure Git/SSH accounts. Complete the [Tailscale setup](docs/remote-access.md) and [desktop apps setup](docs/apps.md) after install.
 
 ### Caps Lock: Escape on tap, Control while held
 

@@ -62,6 +62,18 @@ Rerunning this layer reuses an installed desktop app. If its installation fails,
 
 To remove a layer-installed Bitwarden Flatpak, use `flatpak --user uninstall com.bitwarden.desktop`. Keep its local data unless you deliberately choose to remove it after checking account recovery. The shared Flathub remote and Flatpak runtime may serve other apps; leave those in place. Native apps and browser extensions are removed through their own package/browser controls.
 
+## T3 Code
+
+Setup installs T3 Code Nightly with Omarchy's own installer, `omarchy-install-ai-t3-code nightly --no-launch` (Install > AI > T3 Code), as [decision 0020](decisions/0020-t3-code-through-omarchy-installer.md) records. That is the self-updating AppImage at `~/.local/share/t3code/T3-Code.AppImage`, with one launcher entry, `t3code.desktop`, which also opens `t3code://` links. The app updates itself; switch between Stable and Nightly in its settings. Its `t3` command is the app's own CLI, `~/.t3/bin/t3`, which the app writes on its first launch, linked from `~/.local/bin/t3`. Until you open T3 Code once, setup says so instead of checking `t3 --version`. On kernels with pages larger than 4 KiB, setup and `update-all` check each build first; see the [README](../README.md#updating-this-layer).
+
+Setup no longer runs `t3.codes/install.sh` or `t3 update`. If `~/.local/bin/t3` is still that installer's link into `~/.t3/runtime/versions/`, setup keeps it and offers the move (migration id `t3-cli`). It never forces it. `./install.sh` in a terminal asks `[y/N]`. Updates and runs without a terminal print one line. The move is refused, with nothing changed, while T3 Code or that CLI is running, so quit both first. To move later, or after a no:
+
+```bash
+./install.sh --migrate-to-omarchy-installers
+```
+
+When the T3 Code app is not installed yet, the move runs Omarchy's installer first and checks that build. When the app is already there, it is not reinstalled. Either way, `~/.local/bin/t3` then points at `~/.t3/bin/t3`. `~/.t3` (threads, settings, theme), `~/.config/t3code`, `~/.config/t3code-v2`, `~/.config/t3code-flags.conf` and `~/.cache/t3code-updater` are kept. The old CLI builds in `~/.t3/runtime/versions` are safe to delete afterwards. To undo, point the link back at one of them, as the move prints: `ln -sfn ~/.t3/runtime/versions/<version>/t3 ~/.local/bin/t3`.
+
 ## Cursor
 
 Setup installs Cursor with the `cursor-bin` package, as Omarchy's Install menu does, and adds the GNOME keyring setting to `~/.config/Cursor/argv.json` ([decision 0009](decisions/0009-install-cursor-through-omarchy.md)). If the `cursor` first on `PATH` is not owned by a pacman package, setup prints one line saying so. An example is an AppImage from the older Omarchy Mac `omarchy-install-cursor`. Setup does not remove it, and `--migrate-to-omarchy-installers` does not touch it. To move it by hand:

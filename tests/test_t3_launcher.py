@@ -168,6 +168,59 @@ class T3LauncherTests(unittest.TestCase):
             self.duplicate.unlink()
             self.assertEqual(launcher.reconcile(self.proc), [])
 
+    def test_omarchy_installer_entry_with_an_escaped_percent(self):
+        # omarchy-install-t3code-app writes Exec="<path>" %U with % doubled, and TryExec unescaped.
+        appimage = self.home / '.local/share/t3code%dir/T3-Code.AppImage'
+        escaped = str(appimage).replace('%', '%%')
+        self.primary.write_text('[Desktop Entry]\nName=T3 Code (Nightly)\n'
+                                f'Exec="{escaped}" %U\nTryExec={appimage}\n'
+                                'MimeType=x-scheme-handler/t3code;x-scheme-handler/t3code-dev;\n')
+        self.assertIn(str(appimage), launcher.exec_paths(self.primary))
+        self.assertNotIn(escaped, launcher.exec_paths(self.primary))
+        self.process(3, str(appimage))
+        self.assertIn('running', self.reconcile()[0])
+        self.assertTrue(self.duplicate.exists())
+
+    def test_running_counts_the_bun_cli_only_when_asked(self):
+        cli = self.home / '.t3/runtime/versions/0.1.2-nightly.20261021.3457/t3'
+        self.process(9, str(cli))
+        self.assertEqual(launcher.app_running(self.proc), (False, ''))
+        running, reason = launcher.app_running(self.proc, cli=True)
+        self.assertTrue(running)
+        self.assertIn('process 9', reason)
+        with patch.dict(os.environ, T3CODE_HOME=str(self.home / 'elsewhere')):
+            self.assertEqual(launcher.app_running(self.proc, cli=True), (False, ''))
+
+    def test_extract_and_run_counts_as_running(self):
+        self.process(4, '/tmp/appimage_extracted_0123abcd/other')
+        self.assertEqual(launcher.app_running(self.proc), (False, ''))
+        self.process(5, '/tmp/appimage_extracted_0123abcd/t3code')
+        self.assertTrue(launcher.app_running(self.proc)[0])
+
+    def test_running_matches_the_real_path_of_a_linked_t3_home(self):
+        real = self.home / 'data/t3'
+        (real / 'runtime/versions').mkdir(parents=True)
+        (self.home / '.t3').symlink_to(real)
+        self.process(9, str(real / 'runtime/versions/0.1.2-nightly.20261021.3457/t3'))
+        self.assertTrue(launcher.app_running(self.proc, cli=True)[0])
+
+    def test_running_command_exit_status(self):
+        self.process(1, '/usr/bin/bash')
+        with patch.dict(os.environ, GROUNDWORK_TESTING='1', GROUNDWORK_TEST_PROC=str(self.proc)):
+            self.assertEqual(launcher.main(['launcher', 'running']), 1)
+            self.process(2, '/tmp/.mount_T3-CodAbCdEf/t3code')
+            with patch('sys.stdout'):
+                self.assertEqual(launcher.main(['launcher', 'running']), 0)
+        # Unsure counts as running.
+        with patch.dict(os.environ, GROUNDWORK_TESTING='1', GROUNDWORK_TEST_PROC=str(self.proc / 'missing')), \
+                patch('sys.stdout'):
+            self.assertEqual(launcher.main(['launcher', 'running']), 0)
+
+    def test_the_fixture_proc_needs_the_testing_switch(self):
+        with patch.dict(os.environ, GROUNDWORK_TEST_PROC=str(self.proc)):
+            os.environ.pop('GROUNDWORK_TESTING', None)
+            self.assertEqual(launcher.proc_root(), Path('/proc'))
+
     def test_message_names_the_commands_to_rerun(self):
         self.process(1, str(self.appimage))
         self.assertIn('update-all', self.reconcile()[0])
@@ -180,14 +233,15 @@ class HookTests(unittest.TestCase):
     def test_apply_layer_runs_it_only_outside_an_update(self):
         text = (self.ROOT / 'scripts/apply-layer.sh').read_text()
         call = 'python3 "$root/scripts/groundwork-t3-launcher.py" reconcile'
-        self.assertEqual(text.count('groundwork-t3-launcher.py'), 1)
+        self.assertEqual(text.count(call), 1)
         before = text[:text.index(call)]
         self.assertTrue(before.rstrip().endswith('if [[ $updating -eq 0 ]]; then'))
 
-    def test_update_all_runs_it_after_the_t3_update(self):
+    def test_update_all_runs_it_after_the_t3_check(self):
         text = (self.ROOT / 'scripts/groundwork-update.py').read_text()
-        self.assertEqual(text.count('groundwork-t3-launcher.py'), 1)
-        self.assertLess(text.index('update_t3(completed, warnings)\n'), text.index('groundwork-t3-launcher.py'))
+        call = "str(source / 'scripts/groundwork-t3-launcher.py'), 'reconcile'"
+        self.assertEqual(text.count(call), 1)
+        self.assertLess(text.index('update_t3(completed, warnings, source)\n'), text.index(call))
 
 
 if __name__ == '__main__':
