@@ -64,6 +64,8 @@ T3_CANDIDATE_SMOKE_SECONDS = 30
 T3_EXTRACT_SECONDS = 180
 # One AppImage download from the release feed.
 T3_DOWNLOAD_SECONDS = 600
+# A groundwork-t3-* work directory this old is left from a killed check.
+T3_STALE_WORK_SECONDS = 3600
 # Older nightlies tried when the installed build fails and no good copy is kept.
 T3_FALLBACK_ATTEMPTS = 3
 # The rule t3-rejected.json was written under (decision 0020: the desktop
@@ -1487,14 +1489,35 @@ def t3_sandboxed(binary, directory, args, deadline, unshare=()):
                env=t3_smoke_environment(directory), limit_core=True)
 
 
-def t3_work_dir():
+def t3_work_dir(now=None):
     """Where AppImages are copied and unpacked: disk, not a RAM-backed /tmp.
 
     An unpacked T3 Code is several hundred MB. ~/.cache/groundwork holds only
     groundwork-t3-* temporary directories, each removed when its check ends.
+    A check that was killed (for example by setup's deadline) leaves one
+    behind, so each check first removes those older than
+    T3_STALE_WORK_SECONDS: directly in this directory, named groundwork-t3-*,
+    real directories, not symbolic links. Every check runs under update.lock
+    (update() holds it; the setup adapter verifies the inherited lock), so no
+    other check can be using one. A symbolic link here is refused, and the
+    caller reports the check as not run.
     """
     directory = xdg_base('XDG_CACHE_HOME', Path.home() / '.cache') / 'groundwork'
+    if directory.is_symlink():
+        raise UpdateError(f'{directory} is a symbolic link, so T3 Code builds are not unpacked there. '
+                          'Replace it with a directory, then rerun update-all')
     directory.mkdir(parents=True, exist_ok=True)
+    now = time.time() if now is None else now
+    for entry in sorted(directory.iterdir()):
+        try:
+            if (not entry.name.startswith('groundwork-t3-') or entry.is_symlink() or not entry.is_dir()
+                    or now - entry.lstat().st_mtime < T3_STALE_WORK_SECONDS):
+                continue
+            shutil.rmtree(entry)
+        except OSError as error:
+            print(f'Could not remove the stale T3 Code work directory {entry} ({error}).', file=sys.stderr, flush=True)
+            continue
+        print(f'Removed the stale T3 Code work directory {entry}.', flush=True)
     return str(directory)
 
 
