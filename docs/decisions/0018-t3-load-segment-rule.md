@@ -37,6 +37,22 @@ The `linux-arm64.tar.gz` of each nightly was checksum-verified against its `SHA2
 
 The desktop `arm64.AppImage` of the same nightlies is not checked or installed by the updater. Its runtime and its arm64 ELF files pass the old rule. Its one failing file is node-pty's `prebuilds/linux-x64/pty.node`, an x86-64 file that never loads on arm64.
 
-## Versions already in t3-rejected.json
+## t3-rejected.json carries the rule and the reason
 
-The file records versions only, not why each was rejected. Versions refused by the old rule stay refused, because the updater cannot tell them apart from smoke crashes. That covers 0.1.6-nightly.20261031.3956 on the mini. The next nightly published after this change is checked with the new rule. To check a version already in the file again, delete that version from the `"16384"` list in `~/.local/state/groundwork/t3-rejected.json` and run `update-all`.
+The old file mapped a page size to a list of versions. It did not say which rule refused a version, or why. Now it also has the rule marker and a reason for each version:
+
+```json
+{"rule": "0018", "16384": ["<version>"], "reasons": {"16384": {"<version>": "misaligned-load"}}}
+```
+
+The reason is one of these:
+
+- `misaligned-load`: the LOAD check above failed.
+- `smoke-crash` or `smoke-pinned-runtime`: the bubblewrap `--version` run died by a signal, or printed `PinnedRuntimeInstallError`.
+- `update-crash` or `update-pinned-runtime`: `t3 update` failed in the same way while the installed build still started.
+
+A wrong version string, a timeout, or a transport error is still not remembered and is checked again on the next run. That is how it worked before this decision.
+
+A file without `"rule": "0018"` was written under the old rule. The first T3 check under this rule replaces that file with `{"rule": "0018"}`, once. It prints one line naming the versions it dropped. Each one is downloaded, checked with this rule, and smoke-run again when it is next the newest nightly. That covers every page size, and smoke crashes as well as alignment refusals: the old file cannot tell them apart, and the smoke launch still decides whether a build is installed. A build that crashes again is written back with its reason. A file that already has the marker is never dropped again. A missing file stays missing until the first rejection. A later rule change can set a new marker and use the reasons to choose which versions to drop.
+
+On the mini, a copy of the real file (11 versions from 0.1.3-nightly.20261024.3617 to 0.1.6-nightly.20261031.3956) was migrated in a temporary state directory. 3956 was then checked and smoke-run and would be installed. A second run did not migrate again.

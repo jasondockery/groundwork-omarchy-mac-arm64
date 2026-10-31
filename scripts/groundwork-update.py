@@ -60,6 +60,10 @@ MIGRATION_ID_CHARACTERS = frozenset('abcdefghijklmnopqrstuvwxyz0123456789-')
 T3_KNOWN_GOOD_LARGE_PAGE = '0.1.2-nightly.20261021.3499'
 # A downloaded candidate must finish --version inside its temp directory.
 T3_CANDIDATE_SMOKE_SECONDS = 30
+# The LOAD rule t3-rejected.json was written under (decision 0018). A file
+# without this marker was written under the old p_align-only rule; its
+# versions are dropped once so they are checked and smoke-run again.
+T3_REJECT_RULE = '0018'
 # Private windowed launch used to see whether brave-bin starts on this kernel
 # and desktop: Wayland, GPU process, and a real window, with a throwaway
 # profile. A 16 KiB-page crash is brave/brave-browser#42312. A timeout is not
@@ -1081,12 +1085,68 @@ def reject_version(path, page, version):
     atomic_write(path, json.dumps(value, indent=2) + '\n')
 
 
+def rejected_t3_document():
+    """The t3-rejected.json mapping, or {} when it is missing or not a JSON object."""
+    path = rejected_t3_path()
+    check_path(path)
+    try:
+        value = json.loads(path.read_text()) if path.exists() else {}
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def migrate_rejected_t3():
+    """Drop versions rejected before decision 0018, once; return them.
+
+    A file whose `rule` is not T3_REJECT_RULE (every list written before
+    0018) is replaced by one holding only the marker, so those versions are
+    downloaded, checked with the current rule, and smoke-run again. A missing
+    file stays missing. A file that already has the marker is not changed.
+    """
+    path = rejected_t3_path()
+    check_path(path)
+    if not path.exists():
+        return []
+    value = rejected_t3_document()
+    if value.get('rule') == T3_REJECT_RULE:
+        return []
+    dropped = sorted({version for key, versions in value.items() if key.isdigit() and isinstance(versions, list)
+                      for version in versions if isinstance(version, str)})
+    atomic_write(path, json.dumps({'rule': T3_REJECT_RULE}, indent=2) + '\n')
+    return dropped
+
+
 def rejected_t3(page):
     return rejected_versions(rejected_t3_path(), page)
 
 
-def reject_t3(page, version):
-    reject_version(rejected_t3_path(), page, version)
+def reject_t3(page, version, reason):
+    """Remember `version` for `page` with why it failed, under T3_REJECT_RULE.
+
+    `reason` is one of `misaligned-load`, `smoke-crash`, `smoke-pinned-runtime`,
+    `update-crash`, `update-pinned-runtime`. A list written under another rule
+    is not carried into the new file.
+    """
+    path = rejected_t3_path()
+    value = rejected_t3_document()
+    if value.get('rule') != T3_REJECT_RULE:
+        value = {}
+    key = str(page)
+    previous = rejected_versions(path, page) if value else []
+    versions = sorted(set([*previous, version][-50:]))
+    reasons = value.get('reasons') if isinstance(value.get('reasons'), dict) else {}
+    known = reasons.get(key) if isinstance(reasons.get(key), dict) else {}
+    known = {item: why for item, why in known.items() if item in versions and isinstance(why, str)}
+    known[version] = reason
+    reasons[key] = known
+    value.update({'rule': T3_REJECT_RULE, key: versions, 'reasons': reasons})
+    atomic_write(path, json.dumps(value, indent=2) + '\n')
+
+
+def t3_rejection_reason(stage, error):
+    """`<stage>-pinned-runtime` or `<stage>-crash` for an error t3_candidate_rejected accepts."""
+    return f'{stage}-pinned-runtime' if 'PinnedRuntimeInstallError' in str(error) else f'{stage}-crash'
 
 
 def bitwarden_version():
@@ -1374,6 +1434,10 @@ def t3_candidate_check(installed, page, warnings=None):
     candidate = t3_latest_nightly()
     if candidate == installed:
         return None, candidate
+    dropped = migrate_rejected_t3()
+    if dropped:
+        print(f'T3 Code: checking again {len(dropped)} build(s) rejected before the LOAD rule of decision 0018 '
+              f'({", ".join(dropped)}).', flush=True)
     if candidate in rejected_t3(page):
         return page_size_reason(page), candidate
     if not shutil.which('readelf'):
@@ -1383,7 +1447,7 @@ def t3_candidate_check(installed, page, warnings=None):
     with tempfile.TemporaryDirectory(prefix='groundwork-t3-') as directory:
         root = t3_download(candidate, directory)
         if misaligned_elf_files(root, page):
-            reject_t3(page, candidate)
+            reject_t3(page, candidate, 'misaligned-load')
             return page_size_reason(page), candidate
         binary = next(path for path in root.glob('*/t3') if path.is_file())
         binary, directory = t3_resolved_smoke_paths(binary, directory)
@@ -1394,7 +1458,7 @@ def t3_candidate_check(installed, page, warnings=None):
             got = reported_t3_version(reported)
         except (UpdateError, OSError, ValueError) as error:
             if t3_candidate_rejected(error):
-                reject_t3(page, candidate)
+                reject_t3(page, candidate, t3_rejection_reason('smoke', error))
                 return (f'the newest linux-arm64 build does not start on {page // 1024} KiB pages '
                         f'({t3_failure_reason(error)}; {T3_PAGE_SIZE_ISSUE})'), candidate
             return t3_remember_skip(
@@ -1483,7 +1547,7 @@ def update_t3(completed, warnings):
             raise
         detail = t3_failure_reason(error)
         if t3_candidate_rejected(error):
-            reject_t3(page, candidate)
+            reject_t3(page, candidate, t3_rejection_reason('update', error))
         print(f'T3 Code {candidate} was not installed ({detail}). Keeping {installed}.', flush=True)
         warnings.append(f'T3 Code {candidate} was not installed ({detail}); kept {installed}.')
         completed.append(f'T3 Code update skipped on {page // 1024} KiB pages; kept {installed}')

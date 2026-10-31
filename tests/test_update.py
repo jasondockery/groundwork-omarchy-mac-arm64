@@ -801,7 +801,7 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
         output, _ = self.update_all()
         self.assert_t3_kept(output, 'newer linux-arm64 builds crash on 16 KiB pages (pingdotgg/t3code#23433)')
         rejected = json.loads((self.state / 't3-rejected.json').read_text())
-        self.assertEqual(rejected, {'16384': [CANDIDATE]})
+        self.assertEqual(rejected, {'rule': '0018', '16384': [CANDIDATE], 'reasons': {'16384': {CANDIDATE: 'misaligned-load'}}})
         self.assertFalse(self.candidate_smokes())
 
     def test_rejected_candidate_is_not_downloaded_again(self):
@@ -879,7 +879,7 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
         self.assert_t3_kept(output, 'the newest linux-arm64 build does not start on 16 KiB pages '
                             '(crashed (SIGSEGV); pingdotgg/t3code#23433)')
         rejected = json.loads((self.state / 't3-rejected.json').read_text())
-        self.assertEqual(rejected, {'16384': [CANDIDATE]})
+        self.assertEqual(rejected, {'rule': '0018', '16384': [CANDIDATE], 'reasons': {'16384': {CANDIDATE: 'smoke-crash'}}})
         smokes = self.candidate_smokes()
         self.assertEqual(len(smokes), 1)
         self.assert_smoke_is_confined(*smokes[0])
@@ -906,7 +906,7 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
         output, _ = self.update_all()
         self.assert_t3_kept(output, 'the newest linux-arm64 build does not start on 16 KiB pages '
                             '(crashed (SIGSEGV); pingdotgg/t3code#23433)')
-        self.assertEqual(json.loads((self.state / 't3-rejected.json').read_text()), {'16384': [CANDIDATE]})
+        self.assertEqual(json.loads((self.state / 't3-rejected.json').read_text()), {'rule': '0018', '16384': [CANDIDATE], 'reasons': {'16384': {CANDIDATE: 'smoke-crash'}}})
         self.assertEqual(len(self.candidate_smokes()), 1)
         self.fetched.clear()
         self.machine_calls.clear()
@@ -914,6 +914,61 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
         self.assert_t3_kept(output, 'newer linux-arm64 builds crash on 16 KiB pages')
         self.assertFalse(any(url.endswith('.tar.gz') for url in self.fetched))
         self.assertFalse(self.candidate_smokes())
+
+    def test_legacy_rejected_list_is_dropped_once_and_rechecked(self):
+        self.large_pages()
+        self.readelf = {'t3': READELF_RELAXED}
+        legacy = {'16384': ['0.1.3-nightly.20261024.3617', CANDIDATE], '65536': ['0.1.0-nightly.old']}
+        rejected = self.state / 't3-rejected.json'
+        self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
+        rejected.write_text(json.dumps(legacy))
+        output, receipt = self.update_all()
+        self.assertIn('T3 Code: checking again 3 build(s) rejected before the LOAD rule of decision 0018 '
+                      f'(0.1.0-nightly.old, {CANDIDATE}, 0.1.3-nightly.20261024.3617).', output)
+        self.assertEqual(len(self.candidate_smokes()), 1)
+        self.assertIn(['t3', 'update', '--channel', 'nightly', '--yes', CANDIDATE], self.machine_calls)
+        self.assertIn(f'T3 Code Nightly updated to {CANDIDATE}', receipt['completed'])
+        self.assertEqual(json.loads(rejected.read_text()), {'rule': '0018'})
+
+    def test_legacy_rejected_candidate_that_still_crashes_is_remembered_with_its_reason(self):
+        self.large_pages()
+        self.readelf = {'t3': READELF_RELAXED}
+        self.candidate_crashes = True
+        rejected = self.state / 't3-rejected.json'
+        self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
+        rejected.write_text(json.dumps({'16384': [CANDIDATE]}))
+        output, _ = self.update_all()
+        self.assertIn('checking again 1 build(s)', output)
+        self.assert_t3_kept(output, 'the newest linux-arm64 build does not start on 16 KiB pages')
+        self.assertEqual(len(self.candidate_smokes()), 1)
+        self.assertEqual(json.loads(rejected.read_text()),
+                         {'rule': '0018', '16384': [CANDIDATE], 'reasons': {'16384': {CANDIDATE: 'smoke-crash'}}})
+
+    def test_new_rule_rejection_persists_and_migration_runs_once(self):
+        self.large_pages()
+        self.readelf = {'t3': READELF_BAD}
+        rejected = self.state / 't3-rejected.json'
+        self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
+        rejected.write_text(json.dumps({'16384': ['0.1.3-nightly.20261024.3617']}))
+        output, _ = self.update_all()
+        self.assertIn('checking again 1 build(s)', output)
+        written = json.loads(rejected.read_text())
+        self.assertEqual(written, {'rule': '0018', '16384': [CANDIDATE],
+                                   'reasons': {'16384': {CANDIDATE: 'misaligned-load'}}})
+        for _ in range(2):
+            self.fetched.clear()
+            self.machine_calls.clear()
+            output, _ = self.update_all()
+            self.assertNotIn('checking again', output)
+            self.assert_t3_kept(output, 'newer linux-arm64 builds crash on 16 KiB pages')
+            self.assertFalse(any(url.endswith('.tar.gz') for url in self.fetched))
+            self.assertFalse(self.candidate_smokes())
+            self.assertEqual(json.loads(rejected.read_text()), written)
+
+    def test_migration_leaves_a_missing_file_missing(self):
+        self.large_pages()
+        self.update_all()
+        self.assertFalse((self.state / 't3-rejected.json').exists())
 
     def test_relaxed_aligned_candidate_with_a_smoke_timeout_is_not_installed(self):
         self.large_pages()
@@ -1007,7 +1062,11 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
                 self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], self.machine_calls)
                 self.assertEqual(rejected.exists(), remembered)
                 if remembered:
-                    self.assertEqual(json.loads(rejected.read_text())['16384'], [CANDIDATE])
+                    written = json.loads(rejected.read_text())
+                    self.assertEqual(written['16384'], [CANDIDATE])
+                    self.assertEqual(written['rule'], '0018')
+                    self.assertEqual(written['reasons']['16384'][CANDIDATE],
+                                     'update-pinned-runtime' if 'Pinned' in detail else 'update-crash')
                 self.assertTrue(any(detail in warning for warning in saved['warnings']))
 
     def test_failed_t3_update_repairs_when_the_installed_binary_no_longer_starts(self):
