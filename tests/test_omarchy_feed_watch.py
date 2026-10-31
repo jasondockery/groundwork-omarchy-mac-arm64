@@ -9,6 +9,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+import unittest.mock
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / 'scripts/omarchy-feed-watch.py'
@@ -63,9 +64,10 @@ FIXTURE_TABLE = {
             'id': 'vault', 'name': 'Vault', 'groundwork_method': 'user Flatpak org.example.Vault',
             'probe': {'flatpak': 'org.example.Vault'}, 'migration_id': 'vault-flatpak',
             'candidates': [
-                {'installer': 'omarchy-install-and-launch', 'command': 'cd {repo} && ./install.sh --migrate-to-omarchy-installers',
-                 'requires_packages': ['vault']},
+                {'package': 'vault', 'menu': 'Install > Service > Vault',
+                 'command': 'cd {repo} && ./install.sh --migrate-to-omarchy-installers'},
             ],
+            'installer_keywords': ['vault'],
             'offer': 'Setup moves it with your yes.',
             'self_install': {'needed': False, 'evidence': 'fallback only', 'checked': '2026-10-01', 'recheck': '2026-12-01'},
         },
@@ -75,6 +77,17 @@ FIXTURE_TABLE = {
             'installer_keywords': ['tube'],
             'offer': 'Omarchy ships Tube now.',
             'self_install': {'needed': True, 'evidence': 'absent on 2026-10-24', 'checked': '2026-10-24',
+                             'recheck': '2026-11-30'},
+        },
+        {
+            # Like Cursor: Groundwork already uses Omarchy's package, and only a command that
+            # package does not own is reported.
+            'id': 'editor', 'name': 'Editor', 'groundwork_method': 'omarchy pkg add editor-bin',
+            'probe': {'command': 'editor', 'owner': 'editor-bin'},
+            'candidates': [{'package': 'editor-bin', 'menu': 'Install > Editor > Editor',
+                            'command': 'omarchy pkg add editor-bin'}],
+            'offer': 'This move is manual and is not done for you.',
+            'self_install': {'needed': False, 'evidence': 'already Omarchy\'s method', 'checked': '2026-10-31',
                              'recheck': '2026-11-30'},
         },
     ],
@@ -200,16 +213,44 @@ class ReportTests(FeedWatchFixture):
         apps, _ = self.report()
         self.assertIs(apps['tube']['provided'], False)
 
-    def test_an_installer_whose_package_is_missing_from_the_feed_does_not_count(self):
-        executable(self.bin / 'omarchy-install-and-launch')
+    def test_a_menu_package_is_the_package_route_with_its_menu_and_command(self):
+        # Omarchy's menu runs a generic helper for it: omarchy-install-and-launch Vault 'vault vault-cli' vault.
+        executable(self.bin / 'omarchy-install-and-launch',
+                   '#!/bin/sh\n# omarchy:args=<display-name> <packages> <desktop-id>\nexit 0\n')
         self.install_flatpak('org.example.Vault')
         apps, _ = self.report()
         self.assertIs(apps['vault']['provided'], False)
         write_db(self.sync / 'omarchy.db', {'vault': '1-1'})
         apps, _ = self.report()
-        self.assertTrue(apps['vault']['provided'])
-        self.assertTrue(apps['vault']['offer']['command'].endswith('&& ./install.sh --migrate-to-omarchy-installers'))
-        self.assertIn(str(REPO), apps['vault']['offer']['command'])
+        vault = apps['vault']
+        self.assertEqual([(p['how'], p['name'], p['menu']) for p in vault['providers']],
+                         [('package', 'vault', 'Install > Service > Vault')])
+        self.assertEqual(vault['routes'], ['package:omarchy/vault'])
+        self.assertTrue(vault['offer']['command'].endswith('&& ./install.sh --migrate-to-omarchy-installers'))
+        self.assertIn(str(REPO), vault['offer']['command'])
+        text = self.run_watch('report').stdout
+        self.assertIn('Vault: Omarchy provides omarchy/vault 1-1 (Install > Service > Vault).', text)
+
+    def test_package_list_helpers_are_never_an_apps_installer(self):
+        for name in ('omarchy-install-and-launch', 'omarchy-install-app'):
+            executable(self.bin / name)
+        # Any helper whose header takes a package list is the same kind of helper.
+        executable(self.bin / 'omarchy-install-tube-pkgs', '#!/bin/sh\n# omarchy:args=<display-name> <packages>\nexit 0\n')
+        executable(self.bin / 'omarchy-install-tube-font', '#!/bin/sh\n# omarchy:args=<name> <package> <family>\nexit 0\n')
+        table = json.loads(self.table.read_text())
+        table['apps'][2]['installer_keywords'] = ['tube', 'omarchy-install-a']
+        self.table.write_text(json.dumps(table))
+        apps, _ = self.report()
+        self.assertIs(apps['tube']['provided'], False)
+        self.assertEqual(apps['tube']['providers'], [])
+
+    def test_a_table_that_lists_a_package_list_helper_is_refused(self):
+        table = json.loads(self.table.read_text())
+        table['apps'][1]['candidates'] = [{'installer': 'omarchy-install-and-launch'}]
+        self.table.write_text(json.dumps(table))
+        result = self.run_watch('report')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('list the package instead', result.stderr)
 
     def test_a_migration_declined_at_setup_counts_as_dismissed(self):
         executable(self.bin / 'omarchy-install-and-launch')
@@ -245,6 +286,64 @@ class ReportTests(FeedWatchFixture):
         self.run_watch('report')
         self.run_watch('report', '--json')
         self.assertEqual(sorted(p for p in self.root.rglob('*')), before)
+
+
+class OwnedCommandTests(FeedWatchFixture):
+    def setUp(self):
+        super().setUp()
+        write_db(self.sync / 'omarchy.db', {'editor-bin': '3.27.22-1'})
+        executable(self.bin / 'editor')
+
+    def owner(self, script_body):
+        executable(self.bin / 'pacman', '#!/bin/sh\n[ "$1" = -Qoq ] || exit 9\n' + script_body)
+
+    def test_a_command_its_omarchy_package_owns_is_quiet(self):
+        self.owner('echo editor-bin\n')
+        apps, _ = self.report()
+        editor = apps['editor']
+        self.assertTrue(editor['aligned'])
+        self.assertIsNone(editor['offer'])
+        self.assertIn(f"Editor: provided Omarchy's way; {self.bin / 'editor'} belongs to editor-bin. Nothing to move.",
+                      self.run_watch('report').stdout)
+        self.assertEqual(self.run_watch('report', '--brief').stdout, '')
+        self.assertEqual(self.run_watch('dismiss', 'editor').returncode, 0)
+
+    def test_a_command_no_package_owns_gets_the_manual_move_offer(self):
+        self.owner('echo "error: No package owns $2" >&2\nexit 1\n')
+        apps, _ = self.report()
+        editor = apps['editor']
+        self.assertFalse(editor['aligned'])
+        self.assertIs(editor['installed_by_groundwork'], True)
+        self.assertIsNone(editor['found_owner'])
+        self.assertEqual(editor['offer']['command'], 'omarchy pkg add editor-bin')
+        text = self.run_watch('report').stdout
+        self.assertIn(f"Found {self.bin / 'editor'}, owned by no package.", text)
+        self.assertIn('Offer: This move is manual and is not done for you. Command: omarchy pkg add editor-bin', text)
+        self.assertIn('Editor (editor): Omarchy provides omarchy/editor-bin 3.27.22-1',
+                      self.run_watch('report', '--brief').stdout)
+
+    def test_a_command_another_package_owns_is_reported_with_that_owner(self):
+        self.owner('echo some-editor-git\n')
+        apps, _ = self.report()
+        self.assertEqual(apps['editor']['found_owner'], 'some-editor-git')
+        self.assertIsNotNone(apps['editor']['offer'])
+
+    def test_without_pacman_ownership_is_unknown_and_nothing_is_offered(self):
+        apps, _ = self.report()
+        self.assertIsNone(apps['editor']['offer'])
+        self.assertFalse(apps['editor']['aligned'])
+
+    def test_a_pacman_error_other_than_no_owner_offers_nothing(self):
+        self.owner('echo "error: could not open database" >&2\nexit 1\n')
+        apps, _ = self.report()
+        self.assertIsNone(apps['editor']['offer'])
+
+    def test_no_command_on_path_offers_nothing(self):
+        self.owner('echo "error: No package owns $2" >&2\nexit 1\n')
+        (self.bin / 'editor').unlink()
+        apps, _ = self.report()
+        self.assertIs(apps['editor']['installed_by_groundwork'], False)
+        self.assertIsNone(apps['editor']['offer'])
 
 
 class FallbackTests(FeedWatchFixture):
@@ -283,6 +382,28 @@ class FallbackTests(FeedWatchFixture):
         self.assertTrue(report['online'])
         self.assertEqual(report['sources']['omarchy']['via'], 'downloaded')
         self.assertFalse(Path(report['sources']['omarchy']['path']).exists())
+
+    def test_online_download_over_the_size_cap_is_refused_and_not_kept(self):
+        feed = self.root / 'feed/omarchy.db'
+        write_db(feed, {'tube': '0.26.0-1'}, mode='w')
+        result = self.run_watch('report', extra=('--online', '--feed-url', feed.as_uri(), '--max-feed-bytes', '1024'))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('larger than 1024 bytes, so it was not read', result.stderr)
+        self.assertEqual(result.stdout, '')
+
+    def test_download_cap_also_applies_without_a_length_header(self):
+        feed = self.root / 'feed/omarchy.db'
+        feed.parent.mkdir(parents=True)
+        feed.write_bytes(b'x' * 4096)
+
+        class Response(io.BytesIO):
+            headers = {}
+
+        with tempfile.TemporaryDirectory() as directory, \
+                unittest.mock.patch.object(watch.urllib.request, 'urlopen', lambda *a, **k: Response(b'x' * 4096)):
+            with self.assertRaises(watch.FeedTooLarge):
+                watch.download_feed('https://example.invalid/omarchy.db', directory, limit=1000)
+            self.assertEqual(list(Path(directory).iterdir()), [])
 
     def test_online_failure_exits_nonzero_with_the_url(self):
         result = self.run_watch('report', extra=('--online', '--feed-url', (self.root / 'none.db').as_uri()))
@@ -375,6 +496,25 @@ class TableTests(unittest.TestCase):
             self.assertRegex(record.get('checked', ''), r'^\d{4}-\d{2}-\d{2}$', app['id'])
             self.assertRegex(record.get('recheck', ''), r'^\d{4}-\d{2}-\d{2}$', app['id'])
             self.assertTrue(record.get('evidence'), app['id'])
+
+    def test_t3_is_offered_only_through_omarchys_installer_per_decision_0020(self):
+        t3 = {app['id']: app for app in watch.load_table(TABLE)}['t3-code']
+        self.assertEqual([c.get('installer') for c in t3['candidates']], ['omarchy-install-ai-t3-code'])
+        for text in (t3['offer'], t3['self_install']['evidence']):
+            self.assertIn('0020-t3-code-through-omarchy-installer.md', text)
+
+    def test_bitwarden_is_its_package_not_the_menus_generic_helper(self):
+        bitwarden = {app['id']: app for app in watch.load_table(TABLE)}['bitwarden-desktop']
+        self.assertEqual([c.get('package') for c in bitwarden['candidates']], ['bitwarden'])
+        self.assertEqual(bitwarden['candidates'][0]['menu'], 'Install > Service > Bitwarden')
+
+    def test_cursor_is_the_cursor_bin_package_and_only_an_unowned_command_is_reported(self):
+        cursor = {app['id']: app for app in watch.load_table(TABLE)}['cursor']
+        self.assertEqual(cursor['candidates'], [{'package': 'cursor-bin', 'menu': 'Install > Editor > Cursor',
+                                                 'command': 'omarchy pkg add cursor-bin'}])
+        self.assertEqual(cursor['probe'], {'command': 'cursor', 'owner': 'cursor-bin'})
+        self.assertNotIn('migration_id', cursor)
+        self.assertIn('manual', cursor['offer'])
 
     def test_migration_ids_in_the_table_exist_in_apply_layer(self):
         layer = (REPO / 'scripts/apply-layer.sh').read_text()

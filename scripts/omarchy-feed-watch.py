@@ -45,7 +45,16 @@ STATE_FILE = 'feed-watch.json'
 APP_ID = re.compile(r'^[a-z0-9][a-z0-9-]*$')
 PACMAN_SECONDS = 30
 DOWNLOAD_SECONDS = 30
+# The edge feed database is well under 1 MiB; anything this large is not it.
+MAX_FEED_BYTES = 64 * 1024 * 1024
 HEADER_BYTES = 4096
+# Generic helpers that install whatever package list they are given, such as
+# Install > Service > Bitwarden's `omarchy-install-and-launch Bitwarden
+# 'bitwarden bitwarden-cli' bitwarden`. They are omarchy-pkg-add, not an app's
+# own installer, so the package is the candidate (an `<package>` or
+# `<packages>` argument in the header marks the same kind of helper).
+PACKAGE_HELPERS = frozenset({'omarchy-install-and-launch', 'omarchy-install-app'})
+PACKAGE_ARGS = re.compile(r'^# omarchy:args=.*<packages?>', re.M)
 
 
 def xdg_base(name, default):
@@ -90,6 +99,9 @@ def load_table(path):
         for candidate in app.get('candidates', []):
             if not isinstance(candidate, dict) or ('installer' in candidate) == ('package' in candidate):
                 raise TableError(f'{path}: {app_id} has a candidate that is not exactly one installer or package')
+            if candidate.get('installer') in PACKAGE_HELPERS:
+                raise TableError(f"{path}: {app_id} lists {candidate['installer']}, which only adds the packages "
+                                 'it is given; list the package instead')
         if not isinstance(app.get('self_install'), dict):
             raise TableError(f'{path}: {app_id} needs self_install')
     return apps
@@ -201,10 +213,28 @@ class Feed:
         return results
 
 
-def download_feed(url, directory):
+class FeedTooLarge(OSError):
+    pass
+
+
+def download_feed(url, directory, limit=MAX_FEED_BYTES):
+    """Copy the feed database into directory, refusing more than limit bytes."""
     target = Path(directory) / 'omarchy.db'
-    with urllib.request.urlopen(url, timeout=DOWNLOAD_SECONDS) as response, open(target, 'wb') as out:
-        shutil.copyfileobj(response, out)
+    too_large = FeedTooLarge(f'larger than {limit} bytes, so it was not read')
+    with urllib.request.urlopen(url, timeout=DOWNLOAD_SECONDS) as response:
+        length = response.headers.get('Content-Length') if hasattr(response, 'headers') else None
+        if length and length.isdigit() and int(length) > limit:
+            raise too_large
+        total = 0
+        with open(target, 'wb') as out:
+            while chunk := response.read(1024 * 1024):
+                total += len(chunk)
+                if total > limit:
+                    break
+                out.write(chunk)
+    if total > limit:
+        target.unlink(missing_ok=True)
+        raise too_large
     return target
 
 
@@ -225,27 +255,68 @@ def installers_on_path(path_value=None):
     return found
 
 
-def hidden_installer(path):
-    """Omarchy marks helper installers that are not meant to be run directly."""
+def installer_header(path):
     try:
         with open(path, 'rb') as handle:
-            head = handle.read(HEADER_BYTES).decode('utf-8', 'replace')
+            return handle.read(HEADER_BYTES).decode('utf-8', 'replace')
     except OSError:
+        return ''
+
+
+def app_installer(name, path):
+    """An app's own Omarchy installer: not a package-list helper, and not one Omarchy hides."""
+    if name in PACKAGE_HELPERS:
         return False
-    return '# omarchy:hidden=true' in head
+    head = installer_header(path)
+    return '# omarchy:hidden=true' not in head and not PACKAGE_ARGS.search(head)
 
 
 # Machine probe -------------------------------------------------------------
 
-def self_install_present(probe):
-    """True or False when the table says how to see Groundwork's own install here, else None."""
-    if not probe:
+def pacman_owner(path, pacman='pacman'):
+    """The package that owns path, '' when none does, or None when pacman cannot say."""
+    if not shutil.which(pacman):
         return None
+    try:
+        result = subprocess.run([pacman, '-Qoq', str(path)], capture_output=True, text=True,
+                                timeout=PACMAN_SECONDS, env={**os.environ, 'LC_ALL': 'C'})
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode == 0:
+        return result.stdout.strip()
+    return '' if 'No package owns' in result.stderr else None
+
+
+def probe_install(probe, pacman='pacman'):
+    """What the table's probe sees here.
+
+    present: True or False when the probe can tell whether the install to move
+    is here, else None. aligned: the app is already installed Omarchy's way,
+    so nothing is offered. A command probe with an owner (Cursor) counts only
+    a command that package does not own, and never offers on a guess.
+    """
+    found = {'present': None, 'aligned': False, 'path': None}
+    if not probe:
+        return found
     if 'flatpak' in probe:
-        return (Path.home() / '.local/share/flatpak/app' / probe['flatpak']).is_dir()
-    if 'path' in probe:
-        return Path(os.path.expanduser(probe['path'])).exists()
-    return None
+        found['present'] = (Path.home() / '.local/share/flatpak/app' / probe['flatpak']).is_dir()
+    elif 'path' in probe:
+        found['present'] = Path(os.path.expanduser(probe['path'])).exists()
+    elif 'command' in probe:
+        path = shutil.which(probe['command'])
+        found['path'] = path
+        if not path:
+            found['present'] = False
+        else:
+            owner = pacman_owner(path, pacman)
+            if owner is None:
+                found['present'] = False
+            elif owner == probe.get('owner'):
+                found.update(present=False, aligned=True)
+            else:
+                found['present'] = True
+                found['owner'] = owner or None
+    return found
 
 
 # State ---------------------------------------------------------------------
@@ -306,12 +377,10 @@ def wanted_packages(apps):
         for candidate in app.get('candidates', []):
             if 'package' in candidate:
                 wanted.setdefault(candidate.get('repo', FEED_REPO), set()).add(candidate['package'])
-            for name in candidate.get('requires_packages', []):
-                wanted.setdefault(FEED_REPO, set()).add(name)
     return wanted
 
 
-def evaluate(apps, packages, installers, state, declined, today):
+def evaluate(apps, packages, installers, state, declined, today, pacman='pacman'):
     results = []
     for app in apps:
         providers, unknown, listed = [], False, set()
@@ -319,14 +388,7 @@ def evaluate(apps, packages, installers, state, declined, today):
             if 'installer' in candidate:
                 name = candidate['installer']
                 listed.add(name)
-                if name not in installers:
-                    continue
-                needs = candidate.get('requires_packages', [])
-                feed = packages.get(FEED_REPO)
-                if needs and feed is None:
-                    unknown = True
-                    continue
-                if any(n not in feed for n in needs):
+                if name not in installers or not app_installer(name, installers[name]):
                     continue
                 command = candidate.get('command', name).replace('{repo}', shlex.quote(str(REPO)))
                 providers.append({'how': 'installer', 'installer': name, 'path': installers[name],
@@ -337,12 +399,14 @@ def evaluate(apps, packages, installers, state, declined, today):
                 if found is None:
                     unknown = True
                 elif name in found:
+                    command = candidate.get('command', f'omarchy pkg add {name}')
                     providers.append({'how': 'package', 'repo': repo, 'name': name,
                                       'version': found[name]['version'], 'arch': found[name]['arch'],
-                                      'command': f'omarchy pkg add {name}'})
+                                      'command': command.replace('{repo}', shlex.quote(str(REPO))),
+                                      'menu': candidate.get('menu')})
         for keyword in app.get('installer_keywords', []):
             for name, path in sorted(installers.items()):
-                if keyword in name and name not in listed and not hidden_installer(path):
+                if keyword in name and name not in listed and app_installer(name, path):
                     listed.add(name)
                     providers.append({'how': 'installer', 'installer': name, 'path': path,
                                       'command': name, 'menu': None, 'listed': False})
@@ -350,7 +414,8 @@ def evaluate(apps, packages, installers, state, declined, today):
         providers.sort(key=lambda p: p['how'] != 'installer')
         provided = True if providers else (None if unknown else False)
 
-        present = self_install_present(app.get('probe'))
+        probe = probe_install(app.get('probe'), pacman)
+        present = probe['present']
         routes = sorted(route_key(p) for p in providers)
         dismissed_routes = set(state['dismissed'].get(app['id'], []))
         dismissed_by = None
@@ -360,7 +425,7 @@ def evaluate(apps, packages, installers, state, declined, today):
             dismissed_by = 'dismiss'
 
         offer = None
-        if providers and present is not False:
+        if providers and present is not False and not probe['aligned']:
             offer = {'text': app['offer'], 'command': providers[0]['command'],
                      'dismiss': f"{script_command()} dismiss {app['id']}",
                      'dismissed': dismissed_by is not None, 'dismissed_by': dismissed_by}
@@ -371,7 +436,9 @@ def evaluate(apps, packages, installers, state, declined, today):
         results.append({
             'id': app['id'], 'name': app['name'], 'doc': app.get('doc'),
             'groundwork_method': app['groundwork_method'],
-            'installed_by_groundwork': present,
+            'installed_by_groundwork': present, 'aligned': probe['aligned'],
+            'found_at': probe['path'], 'found_owner': probe.get('owner'),
+            'probe_owner': (app.get('probe') or {}).get('owner'),
             'provided': provided, 'providers': providers, 'routes': routes,
             'offer': offer, 'self_install': record,
         })
@@ -384,7 +451,8 @@ def describe(provider):
     if provider['how'] == 'installer':
         menu = f", {provider['menu']}" if provider.get('menu') else ''
         return f"{provider['installer']} (installer{menu})"
-    return f"{provider['repo']}/{provider['name']} {provider['version']}"
+    menu = f" ({provider['menu']})" if provider.get('menu') else ''
+    return f"{provider['repo']}/{provider['name']} {provider['version']}{menu}"
 
 
 def recheck_text(record):
@@ -412,6 +480,10 @@ def human_report(report, brief=False):
                         else 'Groundwork no longer needs its own install')
                 lines.append(f"{app['name']} ({app['id']}): Omarchy provides {describe(app['providers'][0])}. {keep}.")
             continue
+        if app['aligned']:
+            lines.append(f"{app['name']}: provided Omarchy's way; {app['found_at']} belongs to "
+                         f"{app['probe_owner']}. Nothing to move.")
+            continue
         if app['provided'] is None:
             lines.append(f"{app['name']}: unknown, the package database could not be read. "
                          f"Groundwork's method: {app['groundwork_method']}.")
@@ -432,6 +504,9 @@ def human_report(report, brief=False):
                    else f"dismissed; {script_command()} undismiss {app['id']} shows it again")
             lines.append(f'  Offer {how}.')
         elif offer:
+            if app['found_at']:
+                owner = f"package {app['found_owner']}" if app['found_owner'] else 'no package'
+                lines.append(f"  Found {app['found_at']}, owned by {owner}.")
             lines.append(f"  Offer: {offer['text']} Command: {offer['command']}")
             lines.append(f"  To stop this offer: {offer['dismiss']}")
         state = 'still needed' if record.get('needed') else 'no longer needed'
@@ -456,7 +531,7 @@ def build_report(args, online_db=None):
     packages = feed.lookup(wanted_packages(apps))
     installers = installers_on_path()
     today = args.today or datetime.date.today().isoformat()
-    results = evaluate(apps, packages, installers, state, declined_migrations(args.config), today)
+    results = evaluate(apps, packages, installers, state, declined_migrations(args.config), today, args.pacman)
     return {'schema': 1, 'checked': today, 'online': online_db is not None,
             'sources': feed.sources, 'apps': results}
 
@@ -467,7 +542,7 @@ def run_report(args):
         url = args.feed_url or FEED_URL.format(arch=arch)
         with tempfile.TemporaryDirectory(prefix='omarchy-feed-watch.') as directory:
             try:
-                db = download_feed(url, directory)
+                db = download_feed(url, directory, args.max_feed_bytes)
             except OSError as error:
                 print(f'Could not download {url}: {error}', file=sys.stderr)
                 return 1
@@ -538,6 +613,7 @@ def parser():
                         help='download the pkgs.omarchy.org edge feed database instead of the local copy')
     report.add_argument('--arch', default=None, help=argparse.SUPPRESS)
     report.add_argument('--feed-url', default=None, help=argparse.SUPPRESS)
+    report.add_argument('--max-feed-bytes', type=int, default=MAX_FEED_BYTES, help=argparse.SUPPRESS)
     for name in ('dismiss', 'undismiss'):
         command = commands.add_parser(name, parents=[common],
                                       help=f'{name} the offer for one app')
