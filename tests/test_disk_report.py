@@ -1,4 +1,4 @@
-"""Disk report: fixture HOME and fake commands only (decision 0018). Nothing is deleted."""
+"""Disk report: fixture HOME and fake commands only (decision 0019). Nothing is deleted."""
 import importlib.util
 import io
 import os

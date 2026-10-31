@@ -1,4 +1,4 @@
-# 0018. Disk cleanup: follow Omarchy, report the rest, delete nothing
+# 0019. Disk cleanup: follow Omarchy, report the rest, delete nothing
 
 Checked 2026-10-31 on the M1 mini (`omarchy-dev` 4.0.0.r7442). Part of #103.
 

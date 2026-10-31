@@ -310,7 +310,7 @@ Omarchy keeps its own desktop, tmux file, shell, and Super keybindings. Practice
 | `keyd/default.conf` | Default Caps Lock behavior: tap = Escape, hold = Control, via keyd |
 | `packages.txt` | Optional aarch64 packages that are not part of the Omarchy install |
 | `git/config.local.example` | Placeholder for a name and email. Not applied |
-| `scripts/groundwork-disk-report.py` | Report-only sizes and cleanup commands for the yay cache, journal, and unused Flatpak runtimes. Omarchy already trims the pacman cache and ships Disktree ([decision 0018](docs/decisions/0018-disk-cleanup-report-only.md)) |
+| `scripts/groundwork-disk-report.py` | Report-only sizes and cleanup commands for the yay cache, journal, and unused Flatpak runtimes. Omarchy already trims the pacman cache and ships Disktree ([decision 0019](docs/decisions/0019-disk-cleanup-report-only.md)) |
 | `scripts/omarchy-plugins.py` | Applies the shared Omarchy shell-plugin list through `omarchy plugin` |
 | `omarchy-plugins.exclude.json` | Plugin ids this layer skips, each with a reason |
 | `scripts/groundwork-syncthing.py` | Syncthing as a user service on the tailnet, the `~/Shared` and FreeTube folders, and `groundwork syncthing-pair` |

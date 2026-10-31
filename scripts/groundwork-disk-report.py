@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Groundwork disk report (decision 0018)
+# Groundwork disk report (decision 0019)
 """Report what could be cleaned up and print the command for each. Deletes nothing.
 
 Omarchy already prunes the pacman cache during `omarchy-update` (paccache -rk2),
