@@ -36,6 +36,7 @@ Exit status: 0 done or nothing to do, 1 a step failed, 2 usage.
 """
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -205,7 +206,7 @@ def include_keys(guard):
     glob = owner_glob()
     keys = []
     for line in path.read_text().splitlines():
-        line = line.strip()
+        line = re.sub(r'\s+#.*$', '', line.strip())
         if line and not line.startswith('#') and '<owner>' in line:
             keys.append(f"includeIf.hasconfig:remote.*.url:{line.replace('<owner>', glob)}.path")
     if not keys:
@@ -229,7 +230,7 @@ def config_value(file, key):
     return result.stdout.strip() if result.returncode == 0 else ''
 
 
-def set_hooks_path(guard):
+def set_hooks_path(keys):
     """Scope core.hooksPath to repositories with an owned GitHub remote."""
     hooks = str(hooks_dir())
     target = config_home() / 'git' / 'config'
@@ -254,7 +255,7 @@ def set_hooks_path(guard):
         write_atomic(include, text, 0o644)
         changed = True
     target.parent.mkdir(parents=True, exist_ok=True)
-    for key in include_keys(guard):
+    for key in keys:
         if config_value(target, key) != str(include):
             subprocess.run(['git', 'config', '--file', str(target), key, str(include)], check=True)
             changed = True
@@ -311,8 +312,9 @@ def apply(guard):
         say(f'{guard} is not in this checkout (is the core submodule checked out?); skipped.')
         return 0
     try:
+        keys = include_keys(guard)  # before any write, so a bad pin leaves nothing behind
         changed = install_hook_files(guard)
-        changed = set_hooks_path(guard) or changed
+        changed = set_hooks_path(keys) or changed
         changed = ensure_denylist() or changed
         changed = merge_attribution() or changed
     except (OSError, subprocess.CalledProcessError) as error:

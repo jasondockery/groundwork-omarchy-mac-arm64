@@ -195,6 +195,19 @@ class CommitGuardTests(unittest.TestCase):
         self.assertIn('hooks apply to repositories', self.helper('doctor').stdout)
         self.assertNotEqual(self.snapshot(), before)
 
+    def test_inline_comments_in_pattern_list_are_stripped(self):
+        pin = self.home / 'pin/commit-guard'
+        pin.mkdir(parents=True)
+        (pin / 'commit-identity-guard.sh').write_text(GUARD.read_text())
+        (pin / 'commit-identity-guard.sh').chmod(0o755)
+        (pin / 'owner-remote-patterns').write_text('# c\nhttps://github.com/<owner>/**  # inline\n')
+        result = self.helper('apply', '--guard', str(pin / 'commit-identity-guard.sh'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        keys = subprocess.run(['git', 'config', '--file', str(self.home / '.config/git/config'), '--name-only', '--list'],
+                              env=self.env, text=True, capture_output=True).stdout.split()
+        self.assertEqual([k for k in keys if k.startswith('includeif.')],
+                         ['includeif.hasconfig:remote.*.url:https://github.com/[jJ][aA][sS][oO][nN][dD][oO][cC][kK][eE][rR][yY]/**.path'])
+
     def test_missing_pattern_list_fails_closed(self):
         fake = self.home / 'pin/commit-guard'
         fake.mkdir(parents=True)
@@ -207,6 +220,8 @@ class CommitGuardTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn('owner-remote-patterns', result.stderr)
         self.assertFalse((self.home / '.config/git/config').exists())
+        self.assertFalse(self.hooks.exists())
+        self.assertFalse((self.gw / 'commit-guard.gitconfig').exists())
 
     def test_userinfo_urls_are_not_matched(self):
         self.apply()

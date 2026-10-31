@@ -122,6 +122,8 @@ class MigrationTests(unittest.TestCase):
     def test_redact_url_passes_core_shared_vectors(self):
         checker = REPO / 'core/redaction/check-redact-url.sh'
         if not checker.exists():
+            if os.environ.get('CI'):
+                self.fail('core submodule is not checked out')
             self.skipTest('core submodule is not checked out')
         script = REPO / 'scripts/migrate-from-groundwork.sh'
         function = subprocess.run(['sed', '-n', '/^redact_url() {/,/^}/p', str(script)],
