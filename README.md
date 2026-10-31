@@ -313,6 +313,7 @@ Omarchy keeps its own desktop, tmux file, shell, and Super keybindings. Practice
 | `scripts/omarchy-plugins.py` | Applies the shared Omarchy shell-plugin list through `omarchy plugin` |
 | `omarchy-plugins.exclude.json` | Plugin ids this layer skips, each with a reason |
 | `scripts/groundwork-syncthing.py` | Syncthing as a user service on the tailnet, the `~/Shared` and FreeTube folders, and `groundwork syncthing-pair` |
+| `scripts/groundwork-path-shadow.py` | Read-only report of PATH entries that shadow a managed command (pacman or Omarchy package, mise, Groundwork-installed `t3`), with the shell file that sets the winning entry. Run it from the checkout; `--json` and `--strict` are available. It never deletes or edits anything. |
 
 ## Syncthing shared folders
 

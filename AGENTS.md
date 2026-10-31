@@ -53,6 +53,7 @@ That list is the order to check, not an order of preference. When Omarchy provid
 | `docs/machines/` | One file per computer. |
 | `scripts/omarchy-plugins.py` | Applies the shared Omarchy shell-plugin list. |
 | `scripts/groundwork-syncthing.py` | Syncthing apply (tailnet listeners, shared folders) and `groundwork syncthing-pair`. Copied to `~/.local/bin/groundwork-syncthing`. |
+| `scripts/groundwork-path-shadow.py` | Read-only report of PATH entries that shadow a managed command (pacman or Omarchy package, mise, Groundwork-installed `t3`), with the shell file that sets the winning entry. Run it from the checkout; `--json` and `--strict` are available. It never deletes or edits anything. |
 | `scripts/verify-local-inference.py` | Opt-in M1 GPU check for Ollama Vulkan. A passing run on hardware is the record; the repo does not contain one. |
 | `docs/local-inference.md` | Apple Silicon install, proof, update, stop, and removal. |
 | `omarchy-plugins.exclude.json` | Plugin ids this layer skips, each with a reason. |
