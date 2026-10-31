@@ -41,6 +41,8 @@ Brave's two offers, the page-size and launch checks, and the policy file are [de
 
 The bun CLI from `t3.codes/install.sh` (a `~/.local/bin/t3` link into `~/.t3/runtime/versions/`) uses id `t3-cli`. Omarchy's method is `omarchy-install-ai-t3-code nightly --no-launch` and the app's bundled `t3` ([decision 0020](0020-t3-code-through-omarchy-installer.md)). The move is refused while T3 Code or that CLI runs. It installs the app only when the app is missing, then points the link at `~/.t3/bin/t3`. `~/.t3` and `~/.config/t3code*` stay. The steps are in [the apps guide](../apps.md#t3-code).
 
+Decision 0020 has one narrow exception to this rule: setup and `update-all` switch the link on their own when the app passed its check, its CLI exists, nothing runs, and `t3-cli` was never declined. The guards and the undo are in [decision 0020](0020-t3-code-through-omarchy-installer.md).
+
 ## Cursor: report only
 
 Current Omarchy has no `omarchy-install-cursor`. Its Install menu adds the `cursor-bin` package, which is what this layer installs ([decision 0009](0009-install-cursor-through-omarchy.md)). A pacman-owned `cursor-bin` is Omarchy's own method there, so it is never offered a migration and never removed.

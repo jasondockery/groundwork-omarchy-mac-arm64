@@ -7,7 +7,7 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip] [--with-local-inference|--without-local-inference] [--with-git-filter-repo|--without-git-filter-repo] [--migrate-to-omarchy-installers]"
+  echo "Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip] [--with-local-inference|--without-local-inference] [--with-git-filter-repo|--without-git-filter-repo] [--migrate-to-omarchy-installers] [--keep-standalone-t3]"
   echo "Caps Lock defaults to Escape on tap and Control while held."
   echo "Saved setup choices are reused; explicit options change those choices."
   echo "--without-keyd leaves any existing keyd configuration and service unchanged."
@@ -20,6 +20,8 @@ usage() {
   echo "--without-git-filter-repo records that preference as off and leaves an installed copy alone. See docs/git-filter-repo.md."
   echo "--migrate-to-omarchy-installers moves apps installed another way to Omarchy's own installer,"
   echo "  even after an earlier no. Without it, setup asks first and updates only report."
+  echo "--keep-standalone-t3 points ~/.local/bin/t3 back at the standalone t3 CLI that setup switched"
+  echo "  away from on its own, and saves that choice so it is not switched again."
 }
 
 with_keyd=1
@@ -35,6 +37,7 @@ git_filter_repo_choice=""
 updating=0
 update_plugins=0
 migrate_requested=0
+keep_standalone_t3=0
 for arg in "$@"; do
   case "$arg" in
     --with-keyd | --without-keyd)
@@ -84,6 +87,7 @@ for arg in "$@"; do
     --update) updating=1 ;;
     --update-plugins) update_plugins=1 ;;
     --migrate-to-omarchy-installers) migrate_requested=1 ;;
+    --keep-standalone-t3) keep_standalone_t3=1 ;;
     *)
       echo "Unknown argument: $arg" >&2
       usage >&2
@@ -93,6 +97,10 @@ for arg in "$@"; do
 done
 if [[ $updating -eq 1 && $migrate_requested -eq 1 ]]; then
   echo "--migrate-to-omarchy-installers is a setup option. Run ./install.sh --migrate-to-omarchy-installers; nothing was changed." >&2
+  exit 64
+fi
+if [[ $keep_standalone_t3 -eq 1 && ( $updating -eq 1 || $migrate_requested -eq 1 ) ]]; then
+  echo "--keep-standalone-t3 is a setup option on its own. Run ./install.sh --keep-standalone-t3; nothing was changed." >&2
   exit 64
 fi
 
@@ -553,11 +561,13 @@ publish_brave_policy() {
 # T3 Code (decision 0020). Omarchy's omarchy-install-ai-t3-code owns the app,
 # its desktop entry, and the ~/.local/bin/t3 link to the app's bundled CLI.
 # The standalone bun CLI from t3.codes/install.sh is retired: an existing one
-# is offered a move (t3-cli), never forced.
+# is offered a move (t3-cli). The one exception, a switch made without asking,
+# is decision 0020's and is guarded by auto_switch_t3_cli below.
 t3_home=${T3CODE_HOME:-$HOME/.t3}
 t3_appimage=$HOME/.local/share/t3code/T3-Code.AppImage
 t3_link=$HOME/.local/bin/t3
 t3_app_cli=$t3_home/bin/t3
+t3_switch_marker=${XDG_STATE_HOME:-$HOME/.local/state}/groundwork/t3-cli-switched
 t3_problem=""
 # 0 when ~/.local/bin/t3 is the bun CLI's link into ~/.t3/runtime/versions.
 t3_cli_installed() {
@@ -1042,7 +1052,7 @@ fi
 
 # The t3 command is the app's bundled CLI, ~/.t3/bin/t3, which the app writes
 # on its first launch. Omarchy's installer links ~/.local/bin/t3 to it unless a
-# t3 of the user's own is there. A bun CLI link is the t3-cli offer's job.
+# t3 of the user's own is there. A bun CLI link is the t3-cli switch's or offer's job.
 hash -r
 if t3_cli_installed; then
   :
@@ -1738,8 +1748,40 @@ if [[ $brave_first_acceptance -eq 1 && $brave_usable -eq 1 ]]; then
   python3 "$root/scripts/groundwork-update.py" accept-brave >/dev/null
 fi
 # T3 Code (decision 0020, id t3-cli). The bun CLI from t3.codes/install.sh
-# moves to Omarchy's installer only with consent, and never while T3 Code or
-# that CLI runs. ~/.t3, ~/.config/t3code*, and ~/.cache/t3code-updater stay.
+# moves to Omarchy's installer with consent, or on its own in the one case
+# below, and never while T3 Code or that CLI runs. ~/.t3, ~/.config/t3code*,
+# and ~/.cache/t3code-updater stay.
+# Points ~/.local/bin/t3 at the app's CLI, in place of the link to $1. After
+# the swap, the old target is recorded: --keep-standalone-t3 restores it, and a
+# link that points back into the runtime builds after a switch is never
+# switched again without asking. A failed swap records nothing, so a later run
+# can still switch; a failed record puts the old link back.
+switch_t3_link() {
+  local old=$1 temporary
+  temporary="$t3_link.groundwork-$$"
+  if ! ln -s "$t3_app_cli" "$temporary" || ! mv -Tf "$temporary" "$t3_link"; then
+    rm -f -- "$temporary"
+    echo "$t3_link could not be pointed at $t3_app_cli. It still points at $old." >&2
+    return 1
+  fi
+  if [[ $(readlink "$t3_link") != "$t3_app_cli" ]]; then
+    echo "$t3_link does not point at $t3_app_cli after the change. Check it, then rerun." >&2
+    return 1
+  fi
+  if ! python3 "$root/scripts/groundwork-update.py" marker write t3-cli-switched "$old"; then
+    if ln -s "$old" "$temporary" && mv -Tf "$temporary" "$t3_link"; then
+      echo "Could not record the old t3 link in $t3_switch_marker, so $t3_link was put back on $old." >&2
+    else
+      rm -f -- "$temporary"
+      echo "Could not record the old t3 link in $t3_switch_marker. $t3_link now points at $t3_app_cli; to go back, point it at $old." >&2
+    fi
+    return 1
+  fi
+  echo "t3 now runs T3 Code's bundled CLI ($t3_link -> $t3_app_cli)."
+  [[ -x $t3_app_cli ]] || echo "Open T3 Code once from the app launcher; it then writes $t3_app_cli."
+  echo "Kept $t3_home (threads, settings, theme), ~/.config/t3code, ~/.config/t3code-v2, ~/.config/t3code-flags.conf, and ~/.cache/t3code-updater."
+  echo "The old CLI builds in $t3_home/runtime/versions are safe to delete. To undo, run: $(printf 'cd %q && ./install.sh --keep-standalone-t3' "$root")"
+}
 migrate_t3_cli_to_omarchy() {
   local old reason temporary
   old=$(readlink "$t3_link") || {
@@ -1765,25 +1807,102 @@ migrate_t3_cli_to_omarchy() {
   # An app that is already installed is not reinstalled: that would download
   # an unchecked newest build over a working one. Only the link changes, to
   # the one Omarchy's installer makes (it leaves a link to elsewhere alone).
-  temporary="$t3_link.groundwork-$$"
-  if ! ln -s "$t3_app_cli" "$temporary" || ! mv -Tf "$temporary" "$t3_link"; then
-    rm -f -- "$temporary"
-    echo "$t3_link could not be pointed at $t3_app_cli. It still points at $old." >&2
-    return 1
-  fi
-  if [[ $(readlink "$t3_link") != "$t3_app_cli" ]]; then
-    echo "$t3_link does not point at $t3_app_cli after the change. Check it, then rerun." >&2
-    return 1
-  fi
-  echo "t3 now runs T3 Code's bundled CLI ($t3_link -> $t3_app_cli)."
-  [[ -x $t3_app_cli ]] || echo "Open T3 Code once from the app launcher; it then writes $t3_app_cli."
-  echo "Kept $t3_home (threads, settings, theme), ~/.config/t3code, ~/.config/t3code-v2, ~/.config/t3code-flags.conf, and ~/.cache/t3code-updater."
-  echo "The old CLI builds in $t3_home/runtime/versions are safe to delete. To undo, run: ln -sfn $(printf '%q' "$old") $(printf '%q' "$t3_link")"
+  switch_t3_link "$old"
 }
-if t3_cli_installed && command -v omarchy-install-ai-t3-code >/dev/null; then
+# The one move made without asking (decision 0020's exception to 0014). Returns
+# 0 when the link was switched, 2 when it waits because T3 Code or the bun CLI
+# runs (the next run tries again), and 1 when a condition does not hold, so the
+# offer or the notice runs as before. Every condition must hold:
+# - no saved decline of t3-cli, and no earlier switch by this layer (an undo sticks);
+# - the link is T3's own installer's: T3CODE_INSTALL_BIN_DIR, when set, is
+#   ~/.local/bin, and the link resolves to a file inside $t3_home/runtime/versions;
+# - the AppImage is installed and matches last-good.json, the record of the
+#   build that passed the gate;
+# - the app's CLI, $t3_app_cli, is an executable file;
+# - neither T3 Code nor the bun CLI runs.
+t3_app_checked() {
+  [[ -f $t3_appimage && ! -L $t3_appimage ]] || return 1
+  # The updater's own helpers read last-good.json and hash the AppImage.
+  python3 -B - "$root/scripts/groundwork-update.py" <<'EOF'
+import importlib.util
+import sys
+spec = importlib.util.spec_from_file_location('groundwork_update', sys.argv[1])
+updater = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(updater)
+try:
+    _, record = updater.t3_last_good()
+    passed = record is not None and record['sha512'] == updater.t3_sha512(updater.t3_appimage_path())
+except (updater.UpdateError, OSError, ValueError):
+    passed = False
+sys.exit(0 if passed else 1)
+EOF
+}
+auto_switch_t3_cli() {
+  local old real versions reason status=0
+  ! migration_declined t3-cli || return 1
+  [[ ! -e $t3_switch_marker && ! -L $t3_switch_marker ]] || return 1
+  [[ -z ${T3CODE_INSTALL_BIN_DIR:-} || $T3CODE_INSTALL_BIN_DIR -ef $(dirname "$t3_link") ]] || return 1
+  old=$(readlink "$t3_link") || return 1
+  real=$(readlink -e -- "$t3_link" 2>/dev/null) || return 1
+  versions=$(readlink -e -- "$t3_home/runtime/versions" 2>/dev/null) || return 1
+  [[ $real == "$versions/"* && -f $real ]] || return 1
+  [[ -f $t3_app_cli && -x $t3_app_cli ]] || return 1
+  t3_app_checked || return 1
+  reason=$(python3 "$root/scripts/groundwork-t3-launcher.py" running) || status=$?
+  if [[ $status -ne 1 ]]; then
+    # An explicit --migrate-to-omarchy-installers gets the offer's refusal.
+    [[ $migrate_requested -eq 0 ]] || return 1
+    echo "T3 Code's t3 will move to the app's bundled CLI on a later run: ${reason:-T3 Code may be running}."
+    return 2
+  fi
+  echo "Switching $t3_link from the bun CLI ($old) to the T3 Code app's bundled CLI, which passed its check (decision 0020)."
+  switch_t3_link "$old" || return 1
+}
+# --keep-standalone-t3: undo the automatic switch, and save t3-cli as declined
+# so no later run switches it again. --migrate-to-omarchy-installers clears it.
+keep_standalone_t3_cli() {
+  local old real versions temporary
+  if t3_cli_installed; then
+    old=$(readlink "$t3_link")
+  else
+    if [[ -L $t3_switch_marker || ! -f $t3_switch_marker ]]; then
+      t3_problem+="${t3_problem:+ }--keep-standalone-t3: this layer has not switched $t3_link, so there is nothing to undo. Nothing was changed."
+      return 1
+    fi
+    old=$(<"$t3_switch_marker")
+    if [[ $(readlink "$t3_link" 2>/dev/null) != "$t3_app_cli" ]]; then
+      t3_problem+="${t3_problem:+ }--keep-standalone-t3: $t3_link no longer points at $t3_app_cli, so it was left alone. Nothing was changed."
+      return 1
+    fi
+    real=$(readlink -e -- "$old" 2>/dev/null) || real=""
+    versions=$(readlink -e -- "$t3_home/runtime/versions" 2>/dev/null) || versions=""
+    # The record is only trusted for an executable file inside the runtime
+    # builds, after every symlink and .. is resolved.
+    if [[ $old != "$t3_home/runtime/versions/"* || -z $real || -z $versions || $real != "$versions/"* || ! -f $real || ! -x $real ]]; then
+      t3_problem+="${t3_problem:+ }--keep-standalone-t3: the recorded t3 CLI $old is not an executable build in $t3_home/runtime/versions, so $t3_link was left on $t3_app_cli. Nothing was changed."
+      return 1
+    fi
+    temporary="$t3_link.groundwork-$$"
+    if ! ln -s "$old" "$temporary" || ! mv -Tf "$temporary" "$t3_link"; then
+      rm -f -- "$temporary"
+      t3_problem+="${t3_problem:+ }--keep-standalone-t3: $t3_link could not be pointed back at $old. Nothing was changed."
+      return 1
+    fi
+    echo "t3 runs the standalone CLI again ($t3_link -> $old)."
+  fi
+  remember_migration_decline t3-cli
+  echo "Saved t3-cli as declined, so setup and update-all keep $t3_link on the standalone CLI. To move to the app's CLI later, run: $(printf 'cd %q && ./install.sh --migrate-to-omarchy-installers' "$root")"
+}
+[[ $keep_standalone_t3 -eq 0 ]] || keep_standalone_t3_cli || true
+t3_auto_status=1
+if t3_cli_installed; then
+  auto_switch_t3_cli || t3_auto_status=$?
+  [[ $t3_auto_status -ne 0 ]] || migration_offered=1
+fi
+if [[ $t3_auto_status -eq 1 ]] && t3_cli_installed && command -v omarchy-install-ai-t3-code >/dev/null; then
   offer_omarchy_migration t3-cli "T3 Code" "the standalone t3 CLI from t3.codes/install.sh ($t3_link -> $(readlink "$t3_link"))" \
     "omarchy-install-ai-t3-code nightly, the T3 Code app with its bundled t3" \
-    "Migrating points $t3_link at the app's own CLI, $t3_app_cli, as Omarchy's installer does. When the T3 Code app is missing, it first runs omarchy-install-ai-t3-code nightly --no-launch and checks that build on this kernel. An installed app is not reinstalled. $t3_home (threads, settings, theme, and the old CLI builds), ~/.config/t3code*, and ~/.cache/t3code-updater are kept. To undo, point $t3_link back at a build in $t3_home/runtime/versions. Quit T3 Code and its t3 CLI first." \
+    "Migrating points $t3_link at the app's own CLI, $t3_app_cli, as Omarchy's installer does. When the T3 Code app is missing, it first runs omarchy-install-ai-t3-code nightly --no-launch and checks that build on this kernel. An installed app is not reinstalled. $t3_home (threads, settings, theme, and the old CLI builds), ~/.config/t3code*, and ~/.cache/t3code-updater are kept. To undo, run ./install.sh --keep-standalone-t3. Quit T3 Code and its t3 CLI first." \
     migrate_t3_cli_to_omarchy
 fi
 # Save a decline before publishing policy. A symlink refusal exits, and the no
