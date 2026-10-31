@@ -5,7 +5,8 @@
 Omarchy already prunes the pacman cache during `omarchy-update` (paccache -rk2),
 refuses an update under 10 GiB free, and ships Disktree as its graphical disk
 usage tool. This only measures the pieces Omarchy leaves alone: the AUR helper
-cache, the systemd journal, and Flatpak runtimes nothing uses. Every action line
+cache, the systemd journal, and Flatpak installations (unused runtimes are removed
+with flatpak's own prompt; this does not count them). Every action line
 is a command for the person to read and run themselves.
 
 Exit status: 0 always for a finished report, 2 for bad usage.
@@ -20,6 +21,7 @@ import sys
 GIB = 1024 ** 3
 OMARCHY_UPDATE_MIN_FREE = 10 * GIB  # omarchy-update-requires-free-space
 PACMAN_CACHE = Path('/var/cache/pacman/pkg')
+FLATPAK_SYSTEM = Path('/var/lib/flatpak')
 
 
 def human(n):
@@ -73,12 +75,9 @@ def journal_bytes(text):
     return int(float(match.group(1)) * scale)
 
 
-def unused_flatpak_refs(text):
-    """Count rows of the numbered table `flatpak uninstall --unused --assumeno` prints."""
-    return sum(1 for line in (text or '').splitlines() if re.match(r'\s*\d+\.\s+\S', line))
-
-
-def collect(home, run=run, tree_size=tree_size, free_bytes=None):
+def collect(home, run=None, tree_size=None, free_bytes=None):
+    run = run or globals()['run']
+    tree_size = tree_size or globals()['tree_size']
     home = Path(home)
     cache_home = Path(os.environ.get('XDG_CACHE_HOME') or home / '.cache')
     data_home = Path(os.environ.get('XDG_DATA_HOME') or home / '.local/share')
@@ -102,14 +101,13 @@ def collect(home, run=run, tree_size=tree_size, free_bytes=None):
     rows.append(('systemd journal', 'unknown' if size is None else human(size),
                  'Keeps old logs for debugging; vacuum only if you do not need them.',
                  'sudo journalctl --vacuum-size=500M' if size else None))
-    for scope, flag, root in (('user', '--user', data_home / 'flatpak'), ('system', '--system', Path('/var/lib/flatpak'))):
+    for scope, flag, root in (('user', '--user', data_home / 'flatpak'), ('system', '--system', FLATPAK_SYSTEM)):
         size = tree_size(root)
         if size is None:
             continue
-        count = unused_flatpak_refs(run(['flatpak', 'uninstall', flag, '--unused', '--assumeno']))
         rows.append((f'Flatpak {scope} installation', human(size),
-                     f'{count} unused runtime(s) or extension(s) listed by flatpak.',
-                     f'flatpak uninstall {flag} --unused' if count else None))
+                     'Unused runtimes are not counted here. The command below shows its own list and asks before it removes anything.',
+                     f'flatpak uninstall {flag} --unused'))
     return rows
 
 

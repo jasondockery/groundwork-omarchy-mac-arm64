@@ -15,12 +15,6 @@ spec = importlib.util.spec_from_file_location('groundwork_disk_report', SCRIPT)
 report = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(report)
 
-FLATPAK_TABLE = (
-    'Info: runtimes marked for removal:\n\n'
-    ' ID                               Branch  Op\n'
-    ' 1. org.freedesktop.Platform      23.08   r\n'
-    ' 2. org.gnome.Platform            45      r\n'
-)
 
 
 class DiskReport(unittest.TestCase):
@@ -43,8 +37,6 @@ class DiskReport(unittest.TestCase):
         self.commands.append(argv)
         if argv[0] == 'journalctl':
             return 'Archived and active journals take up 1.5G in the file system.\n'
-        if argv[0] == 'flatpak':
-            return FLATPAK_TABLE
         return None
 
     def sizes(self, path):
@@ -63,18 +55,26 @@ class DiskReport(unittest.TestCase):
         self.assertEqual(rows['systemd journal'][1], '1.5 GiB')
         self.assertIn('--vacuum-size', rows['systemd journal'][3])
         flat = rows['Flatpak user installation']
-        self.assertIn('2 unused', flat[2])
+        self.assertNotIn('unused runtime(s)', flat[2])
         self.assertEqual(flat[3], 'flatpak uninstall --user --unused')
         self.assertNotIn('Flatpak system installation', rows)
+
+    def test_system_flatpak_command_is_listed_when_that_installation_exists(self):
+        sizes = lambda p: 1024 if str(p) == '/var/lib/flatpak' else self.sizes(p)
+        rows = {r[0]: r for r in report.collect(self.home, run=self.fake_run, tree_size=sizes, free_bytes=report.GIB)}
+        self.assertEqual(rows['Flatpak system installation'][3], 'flatpak uninstall --system --unused')
+
+    def test_failing_commands_show_unknown_not_a_healthy_number(self):
+        rows = {r[0]: r for r in report.collect(
+            self.home, run=lambda argv: None, tree_size=self.sizes, free_bytes=report.GIB)}
+        self.assertEqual(rows['systemd journal'][1], 'unknown')
+        self.assertIsNone(rows['systemd journal'][3])
+        self.assertNotIn('0 unused', ' '.join(str(c) for r in rows.values() for c in r))
 
     def test_only_read_only_commands_are_run(self):
         self.collect()
         for argv in self.commands:
-            self.assertIn(argv[0], ('journalctl', 'flatpak'))
-            if argv[0] == 'flatpak':
-                self.assertIn('--assumeno', argv)
-            else:
-                self.assertEqual(argv, ['journalctl', '--disk-usage'])
+            self.assertEqual(argv, ['journalctl', '--disk-usage'])
 
     def test_low_free_space_is_flagged_against_omarchys_threshold(self):
         self.assertIn('under that now', self.collect(free=5 * report.GIB)['Free space on /'][2])
@@ -93,16 +93,19 @@ class DiskReport(unittest.TestCase):
     def test_parsers(self):
         self.assertEqual(report.journal_bytes('take up 323.8M in'), int(323.8 * 1024 ** 2))
         self.assertIsNone(report.journal_bytes('garbage'))
-        self.assertEqual(report.unused_flatpak_refs(FLATPAK_TABLE), 2)
-        self.assertEqual(report.unused_flatpak_refs(''), 0)
 
-    def test_cli_prints_and_rejects_arguments(self):
-        env = {'PATH': '/usr/bin:/bin', 'HOME': str(self.home), 'XDG_CACHE_HOME': str(self.home / '.cache'),
-               'XDG_DATA_HOME': str(self.home / '.local/share')}
-        done = subprocess.run([sys.executable, '-I', str(SCRIPT)], env=env, capture_output=True, text=True)
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertIn('deletes nothing', done.stdout)
-        self.assertIn('disktree', done.stdout)
+    def test_cli_prints_without_touching_the_system(self):
+        out = io.StringIO()
+        with patch.object(report, 'run', self.fake_run), patch.object(report, 'tree_size', self.sizes), \
+                patch.object(report.shutil, 'disk_usage', return_value=type('U', (), {'free': 50 * report.GIB})()), \
+                patch.object(sys, 'stdout', out):
+            self.assertEqual(report.main([]), 0)
+        self.assertIn('deletes nothing', out.getvalue())
+        self.assertIn('disktree', out.getvalue())
+        self.assertIn('flatpak uninstall --user --unused', out.getvalue())
+
+    def test_cli_rejects_arguments_before_measuring_anything(self):
+        env = {'PATH': '/nonexistent', 'HOME': str(self.home)}
         bad = subprocess.run([sys.executable, '-I', str(SCRIPT), '--delete'], env=env, capture_output=True, text=True)
         self.assertEqual(bad.returncode, 2)
         self.assertTrue((self.home / '.cache/yay/pkg/a').exists())
