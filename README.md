@@ -134,6 +134,11 @@ only in an interactive terminal, without `--yes`, so you can read the diff.
 If that diff touches `bridge/`, it reminds you to re-run `blip-setup` and does
 not run the wizard. `groundwork-update` does not update the plugin.
 
+When an update changes the updater itself, the stages after apply (T3 Code, the
+Flatpaks, Blip, and the receipt) run the newly installed updater in the same
+run. It takes over once, holding the update lock, and is told the stages already
+done. If it cannot start, the run finishes with the previous updater and warns.
+
 For only repository configuration, run `groundwork-update`. It preserves saved
 keyd, screen-sharing, Blip, and Obsidian vault choices and does not request routine
 system or app upgrades. It installs and retires listed shell plugins and leaves
