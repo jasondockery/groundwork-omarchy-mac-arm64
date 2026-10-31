@@ -87,7 +87,9 @@ packages, default tools, and desktop; no second system updater is installed.
 On a kernel with pages larger than 4 KiB (Apple Silicon uses 16 KiB),
 `update-all` first downloads the newest T3 Nightly, verifies its checksum, and
 checks the LOAD segments of every ELF file with `readelf -lW` (from `binutils`,
-which setup installs). A misaligned build is remembered in
+which setup installs). A LOAD passes when its `p_align` is at least the page
+size, or when its `p_offset` and `p_vaddr` are both page multiples
+([decision 0018](docs/decisions/0018-t3-load-segment-rule.md)). A misaligned build is remembered in
 `~/.local/state/groundwork/t3-rejected.json` and is not downloaded again
 ([pingdotgg/t3code#23433](https://github.com/pingdotgg/t3code/issues/23433)).
 An aligned build is smoke-tested with `t3 --version` from the directory that

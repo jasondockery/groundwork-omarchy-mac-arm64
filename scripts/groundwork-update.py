@@ -540,13 +540,35 @@ def t3_download(version, directory):
     return root
 
 
-def load_alignments(binary):
-    alignments = []
+def load_segments(binary):
+    """(p_offset, p_vaddr, p_align) of every LOAD program header, from readelf -lW."""
+    segments = []
     for line in run(['readelf', '-lW', str(binary)]).splitlines():
         fields = line.split()
         if fields[:1] == ['LOAD']:
-            alignments.append(int(fields[-1], 16))
-    return alignments
+            segments.append((int(fields[1], 16), int(fields[2], 16), int(fields[-1], 16)))
+    return segments
+
+
+def load_alignments(binary):
+    return [align for _, _, align in load_segments(binary)]
+
+
+def t3_load_segment_mappable(offset, vaddr, align, page):
+    """True when the kernel and ld.so can map this LOAD segment with `page`-sized pages.
+
+    mmap needs p_offset congruent to p_vaddr modulo the page size, with the
+    mapping starting on a page boundary. p_align is what the linker promised,
+    not what the loader checks. A p_align of at least the page passes, as it
+    always has. A smaller p_align passes only when p_offset and p_vaddr are
+    both multiples of the page: then the segment starts on its own page, so it
+    cannot share a page with the segment before it. This is the T3 rule only
+    (decision 0018): such a build must still pass the smoke launch before it
+    is installed.
+    """
+    if align >= page:
+        return True
+    return offset % page == 0 and vaddr % page == 0
 
 
 def verified_bun_executable(directory):
@@ -600,7 +622,8 @@ def elf_alignment_problem(binary):
     page = page_size()
     path = Path(binary)
     try:
-        header = path.open('rb').read(4)
+        with path.open('rb') as handle:
+            header = handle.read(4)
     except OSError as error:
         return f'Could not read {binary} ({error}).'
     if header != b'\x7fELF':
@@ -986,7 +1009,7 @@ def brave_launch_result(binary):
 def bun_alignment_problem(binary):
     """Reason `binary` cannot be mapped on this kernel, or None.
 
-    Calls `load_alignments`, the same readelf -lW LOAD check the T3 guard uses.
+    Calls `load_alignments`, the same readelf -lW LOAD parse the T3 guard uses, with the strict rule.
     No LOAD segment is a refusal: the file was not shown to be mappable.
     """
     page = page_size()
@@ -998,14 +1021,19 @@ def bun_alignment_problem(binary):
         alignments = load_alignments(binary)
     except UpdateError as error:
         return f'Could not read LOAD alignment for {binary} ({error}). {issue}'
-    # Same predicate as misaligned_elf_files: a LOAD alignment below the page cannot be mapped.
+    # The strict predicate: a LOAD alignment below the page is refused. Bun has
+    # no smoke launch, so the T3 relaxed rule (decision 0018) does not apply.
     if not alignments or any(alignment < page for alignment in alignments):
         return f'{binary} is not aligned for {page // 1024} KiB pages and cannot start. {issue}'
     return None
 
 
 def misaligned_elf_files(root, page):
-    """Return every ELF file under root with a LOAD segment aligned below page."""
+    """Return every ELF file under root with a LOAD segment that cannot be mapped with page.
+
+    The predicate is `t3_load_segment_mappable`. Passing here is not
+    acceptance: the caller still smoke-runs the candidate.
+    """
     misaligned = []
     for path in sorted(root.rglob('*')):
         if path.is_symlink() or not path.is_file():
@@ -1013,10 +1041,10 @@ def misaligned_elf_files(root, page):
         with path.open('rb') as handle:
             if handle.read(4) != b'\x7fELF':
                 continue
-        alignments = load_alignments(path)
-        if path.name == 't3' and path.parent.parent == root and not alignments:
+        segments = load_segments(path)
+        if path.name == 't3' and path.parent.parent == root and not segments:
             raise UpdateError(f'readelf found no LOAD segments in {path.name}.')
-        if any(alignment < page for alignment in alignments):
+        if not all(t3_load_segment_mappable(*segment, page) for segment in segments):
             misaligned.append(str(path.relative_to(root)))
     return misaligned
 
@@ -1334,9 +1362,12 @@ def t3_remember_skip(warnings, reason):
 def t3_candidate_check(installed, page, warnings=None):
     """Return (reason the newest nightly must not be installed or None, candidate).
 
-    An executable or shared object whose LOAD segment is aligned below the
-    kernel page size cannot be mapped there (pingdotgg/t3code#23433). An
-    aligned build is smoke-tested with `--version` from its own directory.
+    An executable or shared object with a LOAD segment the kernel cannot map
+    with its page size is rejected (pingdotgg/t3code#23433). The rule is
+    `t3_load_segment_mappable`: p_align of at least the page, or p_offset and
+    p_vaddr both page-aligned (decision 0018). A build that passes is
+    smoke-tested with `--version` from its own directory and installed only
+    when that run prints the candidate.
     Only a signal death is remembered. A timeout or an OS error skips this
     run; the same version is checked again on the next update-all.
     """
