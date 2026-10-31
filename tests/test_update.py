@@ -11,6 +11,7 @@ import resource
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -1743,6 +1744,86 @@ class T3GateTests(unittest.TestCase):
         self.assertEqual(plain.read_text(), 'not a directory')
         self.assertEqual(sorted(path.name for path in work.iterdir()),
                          ['groundwork-t3-file', 'groundwork-t3-fresh', 'groundwork-t3-link', 'other-old'])
+
+    def test_a_read_only_folder_does_not_block_a_stale_sweep(self):
+        work = self.home / '.cache/groundwork'
+        stale = work / 'groundwork-t3-readonly'
+        locked = stale / 'squashfs-root/resources'
+        (locked / 'inner').mkdir(parents=True)
+        (locked / 'inner/app.asar').write_bytes(b'unpacked')
+        (locked / 'file').write_bytes(b'unpacked')
+        (locked / 'inner').chmod(0o500)
+        locked.chmod(0o500)
+        self.addCleanup(lambda: [path.chmod(0o700) for path in (locked, locked / 'inner') if path.exists()])
+        outside = self.root / 'outside'
+        (outside / 'kept').mkdir(parents=True)
+        outside.chmod(0o500)
+        self.addCleanup(outside.chmod, 0o700)
+        (locked.parent / 'link').symlink_to(outside)
+        old = time.time() - updater.T3_STALE_WORK_SECONDS - 60
+        os.utime(stale, (old, old))
+        output, errors = io.StringIO(), io.StringIO()
+        with redirect_stdout(output), patch('sys.stderr', errors):
+            self.assertEqual(updater.t3_work_dir(), str(work))
+        self.assertFalse(stale.exists())
+        self.assertIn(f'Removed the stale T3 Code work directory {stale}.', output.getvalue())
+        self.assertEqual(errors.getvalue(), '')
+        # The symbolic link was removed, not followed: its target keeps its mode.
+        self.assertTrue((outside / 'kept').is_dir())
+        self.assertEqual(stat.S_IMODE(outside.stat().st_mode), 0o500)
+
+    def test_remove_tree_raises_what_a_retry_cannot_fix(self):
+        missing = self.root / 'missing'
+        with self.assertRaises(FileNotFoundError):
+            updater.remove_tree(missing)
+        tree = self.root / 'tree'
+        (tree / 'sub').mkdir(parents=True)
+        (tree / 'sub/file').write_text('x')
+        real_unlink = os.unlink
+        def denied(path, *args, **kwargs):
+            if str(path).endswith('file'):
+                raise PermissionError(13, 'denied', str(path))
+            return real_unlink(path, *args, **kwargs)
+        # shutil and the updater share the os module, so this covers both.
+        with patch.object(updater.os, 'unlink', side_effect=denied), self.assertRaises(PermissionError):
+            updater.remove_tree(tree)
+        self.assertTrue((tree / 'sub/file').exists())
+
+    def test_the_sweep_skips_the_callers_own_work_directory(self):
+        work = self.home / '.cache/groundwork'
+        old = time.time() - updater.T3_STALE_WORK_SECONDS - 60
+        own = work / 'groundwork-t3-download-own'
+        own.mkdir(parents=True)
+        (own / 'T3-Code.AppImage').write_bytes(b'downloading')
+        other = work / 'groundwork-t3-download-other'
+        other.mkdir()
+        for path in (own, other):
+            os.utime(path, (old, old))
+        with redirect_stdout(io.StringIO()):
+            updater.t3_work_dir(keep=own / 'T3-Code.AppImage')
+        self.assertEqual((own / 'T3-Code.AppImage').read_bytes(), b'downloading')
+        self.assertFalse(other.exists())
+
+    def test_a_download_that_looks_stale_after_suspend_is_still_checked_and_installed(self):
+        # The download's own directory ages past the stale limit while it is
+        # still in use, as wall-clock time does across a long suspend.
+        crash = fake_appimage(CANDIDATE, extract='crash')
+        self.releases = {INSTALLED: fake_appimage(INSTALLED)}
+        self.install(crash)
+        real_fetch = self.fake_fetch
+        old = time.time() - updater.T3_STALE_WORK_SECONDS - 60
+        def suspended(url, deadline=60, out=None):
+            result = real_fetch(url, deadline=deadline, out=out)
+            if out is not None:
+                os.utime(Path(out.name).parent, (old, old))
+            return result
+        with patch.object(updater, 'fetch', side_effect=suspended):
+            completed, warnings, output = self.gate()
+        self.assertEqual(warnings, [])
+        self.assertEqual(completed, [f'T3 Code replaced with checked {INSTALLED}'])
+        self.assertNotIn('Removed the stale T3 Code work directory', output)
+        self.assertEqual(self.app.read_bytes(), self.releases[INSTALLED])
+        self.assertEqual(list((self.home / '.cache/groundwork').iterdir()), [])
 
     def test_a_symlinked_work_directory_is_refused(self):
         target = self.root / 'elsewhere'
