@@ -116,6 +116,9 @@ SKIP_REPORTS_ENV = 'GROUNDWORK_SKIP_REPORTS'
 # run so far (HANDOFF_SCHEMA). Keep that entry point and schema stable; an
 # older updater hands off to whatever this file becomes.
 RESUME_COMMAND = 'resume-update'
+# How an updater that reads the hand-off declares it. newer_updater() looks for
+# this exact line, so keep it verbatim.
+RESUME_ENTRY = "RESUME_COMMAND = 'resume-update'"
 HANDOFF_SCHEMA = 1
 REEXEC_ENV = 'GROUNDWORK_UPDATE_REEXEC'
 # The code this process started with. Setup may replace the file underneath it.
@@ -2172,7 +2175,9 @@ def installed_updater():
 def newer_updater():
     """The installed updater when it is not the code this process started with, else None.
 
-    Never after a hand-off (REEXEC_ENV), so a run re-executes at most once.
+    Never after a hand-off (REEXEC_ENV), so a run re-executes at most once. An
+    installed updater without RESUME_COMMAND (for example after a checkout is
+    moved back to an older release) cannot take over, so this run finishes.
     """
     if os.environ.get(REEXEC_ENV) or RUNNING_SHA256 is None:
         return None
@@ -2185,6 +2190,8 @@ def newer_updater():
     except (UpdateError, OSError):
         return None
     if MARKER.encode() not in data or hashlib.sha256(data).hexdigest() == RUNNING_SHA256:
+        return None
+    if RESUME_ENTRY.encode() not in data:
         return None
     return path
 

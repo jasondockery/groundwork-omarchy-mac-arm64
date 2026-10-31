@@ -155,6 +155,8 @@ When an update changes the updater itself, the stages after apply (T3 Code, the
 Flatpaks, Blip, the receipt, and these reports) run the newly installed updater
 in the same run. It takes over once, holding the update lock, and is told the stages already
 done. If it cannot start, the run finishes with the previous updater and warns.
+An installed updater that cannot take over (one from before this hand-off) is
+left for the next run, and this run finishes with the code it started with.
 
 For only repository configuration, run `groundwork-update`. It preserves saved
 keyd, screen-sharing, Blip, and Obsidian vault choices and does not request routine

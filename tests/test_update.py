@@ -1039,6 +1039,29 @@ def run_report(label, argv, deadline):
         self.assertEqual(self.git('for-each-ref', 'refs/groundwork'), '')
         self.assertNotIn('continuing with it', child.stdout)
 
+    def test_an_installed_updater_without_resume_finishes_in_this_process(self):
+        # A downgrade: setup installed an updater from before the hand-off. It
+        # has the marker but not the resume-update entry, so this run finishes.
+        self.candidate()
+        older = f'#!/usr/bin/env python3\n{updater.MARKER}\nimport sys\nsys.exit(64)\n'
+        previous = self.run_command
+
+        def apply_installs_an_older_updater(args, **kwargs):
+            result = previous(args, **kwargs)
+            if args[0] == 'bash' and str(args[1]).endswith('apply-layer.sh'):
+                self.runtime().write_text(older)
+            return result
+        with patch.object(updater, 'run', side_effect=apply_installs_an_older_updater), \
+                patch('sys.stdout', new_callable=io.StringIO) as output:
+            self.assertEqual(updater.update('all'), 'completed')
+        self.assertEqual(self.runtime().read_text(), older)
+        self.assertNotIn('continuing with it', output.getvalue())
+        self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'io.freetubeapp.FreeTube'], self.machine_calls)
+        self.assertEqual(len(self.report_calls), len(updater.REPORTS))
+        # The same file with the entry line would take over.
+        self.runtime().write_text(older + updater.RESUME_ENTRY + '\n')
+        self.assertEqual(updater.newer_updater(), self.runtime())
+
     def test_an_unchanged_updater_finishes_in_this_process(self):
         self.candidate()
         with patch('sys.stdout', new_callable=io.StringIO):
