@@ -17,6 +17,9 @@ spec.loader.exec_module(report)
 
 
 
+REAL_TREE_SIZE = report.tree_size
+
+
 class DiskReport(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
@@ -40,7 +43,7 @@ class DiskReport(unittest.TestCase):
         return None
 
     def sizes(self, path):
-        return {'/var/cache/pacman/pkg': 3 * report.GIB}.get(str(path), report.tree_size(path)
+        return {'/var/cache/pacman/pkg': 3 * report.GIB}.get(str(path), REAL_TREE_SIZE(path)
                 if str(path).startswith(str(self.home)) else None)
 
     def collect(self, free=50 * report.GIB):
