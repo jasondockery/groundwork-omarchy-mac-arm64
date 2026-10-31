@@ -882,7 +882,9 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
                     patch('sys.stdout', new_callable=io.StringIO), \
                     patch('sys.stderr', new_callable=io.StringIO) as errors:
                 self.assertEqual(updater.main(['all']), 0)
-            self.assertIn(f'Reports stopped ({type(failure).__name__}', errors.getvalue())
+            expected = ('Reports stopped: the output was closed.' if isinstance(failure, BrokenPipeError)
+                        else f'Reports stopped ({type(failure).__name__}')
+            self.assertIn(expected, errors.getvalue())
             self.assertIn('The update itself had already finished.', errors.getvalue())
             self.assertNotIn('Update incomplete', errors.getvalue())
         # stdout already closed when the reports start.
@@ -892,6 +894,28 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
                 closed.close()
                 updater.run_reports(self.source)
         self.assertIn('Reports stopped (ValueError', errors.getvalue())
+
+    def test_a_reader_that_quits_early_still_leaves_exit_zero(self):
+        # update-all | head: the pipe closes before the reports print. The
+        # process must not exit 120 from Python's final flush.
+        ready = self.root / 'reader-closed'
+        child = self.root / 'child.py'
+        child.write_text(
+            'import importlib.util, os, sys, time\n'
+            'from pathlib import Path\n'
+            f'spec = importlib.util.spec_from_file_location("u", {str(REPO / "scripts/groundwork-update.py")!r})\n'
+            'u = importlib.util.module_from_spec(spec); spec.loader.exec_module(u)\n'
+            'u.run_report = lambda label, argv, deadline: "Disk: fixture finding\\n" * 1000\n'
+            f'while not os.path.exists({str(ready)!r}): time.sleep(0.05)\n'
+            f'u.run_reports(Path({str(self.source)!r}))\n'
+            'print("after the reports")\n')
+        process = subprocess.Popen([sys.executable, str(child)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process.stdout.close()
+        ready.touch()
+        _, errors = process.communicate(timeout=30)
+        self.assertEqual(process.returncode, 0, errors)
+        self.assertIn(b'Reports stopped: the output was closed.', errors)
+        self.assertNotIn(b'Exception ignored', errors)
 
     def test_a_timed_out_report_leaves_no_process_behind(self):
         marker = self.root / 'child.pid'

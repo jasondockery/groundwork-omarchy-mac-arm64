@@ -6,6 +6,7 @@ from contextlib import contextmanager
 import hashlib
 import http.client
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -2124,8 +2125,25 @@ def run_reports(source):
             print('Reports: no Omarchy offers, PATH shadows, or low disk space.', flush=True)
     except KeyboardInterrupt:
         report_note('Reports cancelled. The update itself had already finished.')
+    except BrokenPipeError:
+        # The reader went away (for example `update-all | head`). Point stdout at
+        # /dev/null so Python's final flush does not exit 120.
+        discard_stdout()
+        report_note('Reports stopped: the output was closed. The update itself had already finished.')
     except Exception as error:  # noqa: BLE001 - reports never fail update-all
         report_note(f'Reports stopped ({type(error).__name__}: {error}). The update itself had already finished.')
+
+
+def discard_stdout():
+    """Send the rest of stdout to /dev/null, as the Python docs advise after EPIPE."""
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull, sys.stdout.fileno())
+        finally:
+            os.close(devnull)
+    except (OSError, ValueError, AttributeError, io.UnsupportedOperation):
+        pass
 
 
 def report_note(message):
