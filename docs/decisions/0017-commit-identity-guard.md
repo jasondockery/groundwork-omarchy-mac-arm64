@@ -1,6 +1,6 @@
 # 0017. Install the commit identity guard from groundwork-core
 
-The contract is groundwork-core `docs/commit-identity.md` (v0.10.0): no `Co-authored-by` trailer, and no author or committer that matches the local denylist. This layer installs the reference guard from the `core` pin.
+The contract is groundwork-core `docs/commit-identity.md` (v0.11.1): no `Co-authored-by` trailer, and no author or committer that matches the local denylist. This layer installs the reference guard from the `core` pin.
 
 ## Decision
 
