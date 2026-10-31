@@ -151,6 +151,11 @@ When none of them finds anything, `update-all` prints one line saying so. Run a
 script without `--brief` for the full report. Set `GROUNDWORK_SKIP_REPORTS=1` to
 skip all three. `groundwork-update` and `update-all --check` do not run them.
 
+When an update changes the updater itself, the stages after apply (T3 Code, the
+Flatpaks, Blip, the receipt, and these reports) run the newly installed updater
+in the same run. It takes over once, holding the update lock, and is told the stages already
+done. If it cannot start, the run finishes with the previous updater and warns.
+
 For only repository configuration, run `groundwork-update`. It preserves saved
 keyd, screen-sharing, Blip, and Obsidian vault choices and does not request routine
 system or app upgrades. It installs and retires listed shell plugins and leaves
