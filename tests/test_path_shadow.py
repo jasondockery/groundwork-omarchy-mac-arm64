@@ -33,6 +33,8 @@ class PathShadowTest(unittest.TestCase):
         self.owned = set()
         self.mise = {}
         self.calls = []
+        self.envs = []
+        self.timeout = set()
 
     def environ(self, *dirs, **extra):
         env = {'HOME': str(self.home), 'PATH': ':'.join(str(d) for d in dirs)}
@@ -41,6 +43,9 @@ class PathShadowTest(unittest.TestCase):
 
     def runner(self, argv, environ, cwd):
         self.calls.append(argv)
+        self.envs.append((argv[0], dict(environ)))
+        if argv[0] in self.timeout:
+            return None, ''
         if argv[:2] == ['pacman', '-Qoq']:
             path = argv[-1]
             return (0, 'pkg-' + os.path.basename(path) + '\n') if path in self.owned else (1, '')
@@ -167,7 +172,8 @@ class PathShadowTest(unittest.TestCase):
         self.owned.add(exe)
         (self.home / '.bashrc').write_text('export PATH="%s:$PATH"\n' % (self.root / 'v'))
         before = sorted((str(p), p.stat().st_mtime_ns, p.read_bytes()) for p in self.root.rglob('*') if p.is_file())
-        ps.scan(self.environ(self.root / 'v', self.pkg_bin), self.runner, commands=['tailscale'])
+        ps.scan(self.environ(self.root / 'v', self.pkg_bin, OMARCHY_PATH=str(self.root / 'o')), self.runner,
+                commands=['tailscale'], system_root=str(self.root / 'sys'))
         after = sorted((str(p), p.stat().st_mtime_ns, p.read_bytes()) for p in self.root.rglob('*') if p.is_file())
         self.assertEqual(before, after)
         self.assertTrue(os.path.exists(vendor))
@@ -186,14 +192,58 @@ class PathShadowTest(unittest.TestCase):
         env = self.environ(self.root / 'v', self.pkg_bin, fakes)
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            self.assertEqual(ps.main(['herdr', '--json'], env), 0)
+            self.assertEqual(ps.main(['herdr', '--json'], env, str(self.root / 'sys')), 0)
             item = json.loads(out.getvalue())[0]
         self.assertEqual(item['status'], 'shadowed')
         self.assertEqual(item['attribution'][0]['effect'], 'prepends')
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            self.assertEqual(ps.main(['herdr', '--strict'], env), 1)
+            self.assertEqual(ps.main(['herdr', '--strict'], env, str(self.root / 'sys')), 1)
         self.assertIn('Report only', out.getvalue())
+
+    def test_mise_which_is_offline_and_never_installs(self):
+        make_exe(self.home / '.opencode/bin/opencode')
+        self.check('opencode', 'mise', self.environ(self.home / '.opencode/bin', MISE_OFFLINE='0'))
+        env = next(e for name, e in self.envs if name == 'mise')
+        for key in ('MISE_OFFLINE', 'MISE_AUTO_INSTALL', 'MISE_EXEC_AUTO_INSTALL',
+                    'MISE_NOT_FOUND_AUTO_INSTALL', 'MISE_TASK_RUN_AUTO_INSTALL'):
+            self.assertEqual(env[key], '1' if key == 'MISE_OFFLINE' else '0', key)
+
+    def test_mise_timeout_is_unknown_not_unmanaged(self):
+        make_exe(self.home / '.opencode/bin/opencode')
+        self.timeout.add('mise')
+        result = self.check('opencode', 'mise', self.environ(self.home / '.opencode/bin'))
+        self.assertEqual(result['status'], 'unknown')
+
+    def test_mise_timeout_still_ok_inside_mise_data_dir(self):
+        data = self.home / '.local/share/mise'
+        make_exe(data / 'shims/claude')
+        self.timeout.add('mise')
+        self.assertEqual(self.check('claude', 'mise', self.environ(data / 'shims'))['status'], 'ok')
+
+    def test_pacman_timeout_is_unknown(self):
+        make_exe(self.pkg_bin / 'herdr')
+        self.timeout.add('pacman')
+        self.assertEqual(self.check('herdr', 'pacman', self.environ(self.pkg_bin))['status'], 'unknown')
+
+    def test_trailing_comment_is_not_attribution(self):
+        self.assertEqual(ps.strip_comment('export A=1 # PATH=/x'), 'export A=1')
+        self.assertEqual(ps.strip_comment('export PATH="/a#b:$PATH" # note'), 'export PATH="/a#b:$PATH"')
+        (self.home / '.bashrc').write_text('export FOO=1 # PATH="$HOME/.bun/bin:$PATH"\n'
+                                           'export PATH="$HOME/.bun/bin:$PATH" # bun\n')
+        files = ps.shell_files(str(self.home), str(self.root / 'o'), str(self.root / 'sys'))
+        found = ps.attribute(str(self.home / '.bun/bin'), files, str(self.home))
+        self.assertEqual([f['line'] for f in found], [2])
+
+    def test_scan_reads_only_the_injected_system_root(self):
+        make_exe(self.pkg_bin / 'keyd')
+        sys_root = self.root / 'sys'
+        (sys_root / 'etc/profile.d').mkdir(parents=True)
+        (sys_root / 'etc/profile.d/x.sh').write_text('export PATH="%s:$PATH"\n' % self.pkg_bin)
+        env = self.environ(self.pkg_bin, OMARCHY_PATH=str(self.root / 'o'))
+        item = ps.scan(env, self.runner, commands=['keyd'], system_root=str(sys_root))[0]
+        self.assertEqual(item['status'], 'unmanaged')
+        self.assertEqual(Path(item['attribution'][0]['file']), sys_root / 'etc/profile.d/x.sh')
 
     def test_unknown_command_is_rejected(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):

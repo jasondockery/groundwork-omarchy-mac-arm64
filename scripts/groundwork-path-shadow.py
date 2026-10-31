@@ -50,18 +50,18 @@ MANAGED = [
 ]
 # Installers that source an env script instead of writing the directory.
 ENV_SCRIPTS = {'.cargo/bin': '.cargo/env'}
-STATUS_ORDER = ['shadowed', 'missing', 'unmanaged', 'ok', 'absent']
+STATUS_ORDER = ['shadowed', 'missing', 'unknown', 'unmanaged', 'ok', 'absent']
 RUN_TIMEOUT = 10
 
 
 def run(argv, environ, cwd):
-    """Return (returncode, stdout). A missing or slow command is a failure."""
+    """Return (returncode, stdout). A missing or slow command returns (None, '')."""
     try:
         done = subprocess.run(argv, env=environ, cwd=cwd, stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                               text=True, timeout=RUN_TIMEOUT)
     except (OSError, subprocess.SubprocessError):
-        return 1, ''
+        return None, ''
     return done.returncode, done.stdout
 
 
@@ -103,9 +103,36 @@ def under(path, directory):
 
 
 def pacman_owner(path, environ, runner):
+    """Owning package, '' when none owns it, None when pacman could not answer."""
     code, out = runner(['pacman', '-Qoq', '--', path], environ, None)
+    if code is None:
+        return None
     owner = out.strip().splitlines()
     return owner[0] if code == 0 and owner else ''
+
+
+# `mise which` must not reach the network or install anything.
+MISE_OFFLINE_ENV = {
+    'MISE_OFFLINE': '1',
+    'MISE_AUTO_INSTALL': '0',
+    'MISE_EXEC_AUTO_INSTALL': '0',
+    'MISE_NOT_FOUND_AUTO_INSTALL': '0',
+    'MISE_TASK_RUN_AUTO_INSTALL': '0',
+}
+
+
+def strip_comment(line):
+    """Drop a trailing shell comment: a # outside quotes at a word start."""
+    quote = ''
+    for index, char in enumerate(line):
+        if quote:
+            if char == quote:
+                quote = ''
+        elif char in '\'"':
+            quote = char
+        elif char == '#' and (index == 0 or line[index - 1].isspace()):
+            return line[:index].rstrip()
+    return line
 
 
 def check_command(name, owner, environ, runner):
@@ -116,9 +143,12 @@ def check_command(name, owner, environ, runner):
               'package': '', 'status': 'absent', 'detail': ''}
     home = environ.get('HOME', '')
     if owner == 'pacman':
+        unanswered = False
         for hit in hits:
             package = pacman_owner(hit, environ, runner)
-            if package:
+            if package is None:
+                unanswered = True
+            elif package:
                 result['managed'] = hit
                 result['package'] = package
                 break
@@ -127,12 +157,17 @@ def check_command(name, owner, environ, runner):
         elif winner and result['managed']:
             result['status'] = 'shadowed'
             result['detail'] = 'package %s owns %s' % (result['package'], result['managed'])
+        elif winner and unanswered:
+            result['status'] = 'unknown'
+            result['detail'] = 'pacman did not answer'
         elif winner:
             result['status'] = 'unmanaged'
             result['detail'] = 'no package owns it'
         return result
     if owner == 'mise':
-        code, out = runner(['mise', 'which', name], environ, home or None)
+        mise_env = dict(environ)
+        mise_env.update(MISE_OFFLINE_ENV)
+        code, out = runner(['mise', 'which', name], mise_env, home or None)
         managed = out.strip().splitlines()[0] if code == 0 and out.strip() else ''
         data = mise_data_dir(environ)
         result['managed'] = managed
@@ -141,6 +176,9 @@ def check_command(name, owner, environ, runner):
         elif winner and managed:
             result['status'] = 'shadowed'
             result['detail'] = 'mise provides %s' % managed
+        elif winner and code is None:
+            result['status'] = 'unknown'
+            result['detail'] = 'mise did not answer'
         elif winner:
             result['status'] = 'unmanaged'
             result['detail'] = 'mise does not provide it'
@@ -208,8 +246,8 @@ def attribute(directory, files, home):
         except OSError:
             continue
         for number, line in enumerate(lines, 1):
-            code = line.strip()
-            if code.startswith('#') or 'path' not in code.lower() and '/env' not in code:
+            code = strip_comment(line.strip())
+            if not code or 'path' not in code.lower() and '/env' not in code:
                 continue
             position = min((code.find(n) for n in needles if n in code), default=-1)
             if position < 0:
@@ -222,17 +260,17 @@ def attribute(directory, files, home):
     return found
 
 
-def scan(environ, runner=run, commands=None, files=None):
+def scan(environ, runner=run, commands=None, files=None, system_root='/'):
     home = environ.get('HOME', '')
     omarchy_path = environ.get('OMARCHY_PATH') or '/usr/share/omarchy'
     if files is None:
-        files = shell_files(home, omarchy_path)
+        files = shell_files(home, omarchy_path, system_root)
     wanted = [(n, o) for n, o in MANAGED if not commands or n in commands]
     results = []
     for name, owner in wanted:
         item = check_command(name, owner, environ, runner)
         item['attribution'] = []
-        if item['status'] in ('shadowed', 'unmanaged') and item['winner']:
+        if item['status'] in ('shadowed', 'unmanaged', 'unknown') and item['winner']:
             directory = os.path.dirname(item['winner'])
             item['attribution'] = attribute(directory, files, home)
         results.append(item)
@@ -260,16 +298,16 @@ def render(results, home):
         lines.append(text)
         for hit in item['attribution']:
             lines.append('          %s PATH at %s:%d' % (hit['effect'], display(hit['file'], home), hit['line']))
-        if item['status'] in ('shadowed', 'unmanaged') and item['winner'] and not item['attribution']:
+        if item['status'] in ('shadowed', 'unmanaged', 'unknown') and item['winner'] and not item['attribution']:
             lines.append('          no scanned shell file names %s (inherited, or set by a file this does not read)'
                          % display(os.path.dirname(item['winner']), home))
     counts = {s: sum(1 for i in results if i['status'] == s) for s in STATUS_ORDER}
-    lines.append('%d ok, %d shadowed, %d missing, %d unmanaged, %d not installed. Report only: nothing was changed.'
-                 % (counts['ok'], counts['shadowed'], counts['missing'], counts['unmanaged'], counts['absent']))
+    lines.append('%d ok, %d shadowed, %d missing, %d unknown, %d unmanaged, %d not installed. Report only: nothing was changed.'
+                 % (counts['ok'], counts['shadowed'], counts['missing'], counts['unknown'], counts['unmanaged'], counts['absent']))
     return '\n'.join(lines)
 
 
-def main(argv=None, environ=None):
+def main(argv=None, environ=None, system_root='/'):
     parser = argparse.ArgumentParser(description='Report PATH entries that shadow a Groundwork-managed command (read only).')
     parser.add_argument('commands', nargs='*', help='limit the check to these managed commands')
     parser.add_argument('--json', action='store_true', help='print machine-readable results')
@@ -280,7 +318,7 @@ def main(argv=None, environ=None):
     unknown = [c for c in args.commands if c not in known]
     if unknown:
         parser.error('not a managed command: %s (managed: %s)' % (', '.join(unknown), ', '.join(known)))
-    results = scan(environ, commands=args.commands)
+    results = scan(environ, commands=args.commands, system_root=system_root)
     if args.json:
         print(json.dumps(results, indent=2))
     else:
