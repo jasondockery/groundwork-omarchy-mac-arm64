@@ -7,7 +7,7 @@
 # T3 Code is not listed here. Decision 0020 installs it with Omarchy's
 # omarchy-install-ai-t3-code (the self-updating AppImage), not the feed's
 # t3code-bin or t3code-nightly-bin, which Omarchy replaces (checked 2026-10-31).
-# Until issue #110 lands, setup still uses the official ARM64 CLI installer.
+# Setup runs that installer when the app is missing (issue #110).
 # See docs/decisions/0020-t3-code-through-omarchy-installer.md.
 # Add optional packages one line at a time:
 #   omarchy pkg add <name>

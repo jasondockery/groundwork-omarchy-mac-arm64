@@ -187,7 +187,6 @@ fi
 # Ask once, before the first install or privileged write. The timestamp is
 # refreshed until this script exits so Tailscale, the browser extension, and
 # keyd do not each stop for a password. Nothing is installed if this fails.
-t3_installer=""
 bun_preview_dir=""
 sudo_keepalive_pid=""
 brave_render_temps=()
@@ -200,9 +199,6 @@ stop_sudo_keepalive() {
 }
 cleanup() {
   stop_sudo_keepalive
-  if [[ -n "${t3_installer}" ]]; then
-    rm -f "$t3_installer"
-  fi
   if [[ -n ${bun_preview_dir} ]]; then
     rm -rf -- "$bun_preview_dir"
     bun_preview_dir=""
@@ -554,6 +550,26 @@ publish_brave_policy() {
   fi
   write_brave_policy
 }
+# T3 Code (decision 0020). Omarchy's omarchy-install-ai-t3-code owns the app,
+# its desktop entry, and the ~/.local/bin/t3 link to the app's bundled CLI.
+# The standalone bun CLI from t3.codes/install.sh is retired: an existing one
+# is offered a move (t3-cli), never forced.
+t3_home=${T3CODE_HOME:-$HOME/.t3}
+t3_appimage=$HOME/.local/share/t3code/T3-Code.AppImage
+t3_link=$HOME/.local/bin/t3
+t3_app_cli=$t3_home/bin/t3
+t3_problem=""
+# 0 when ~/.local/bin/t3 is the bun CLI's link into ~/.t3/runtime/versions.
+t3_cli_installed() {
+  local target
+  [[ -L $t3_link ]] || return 1
+  target=$(readlink "$t3_link") || return 1
+  [[ $target == "$t3_home/runtime/versions/"* ]]
+}
+# A new install: no app, and no bun CLI that the offer below would move.
+t3_install_needed() {
+  [[ ! -e $t3_appimage ]] && ! t3_cli_installed
+}
 privileged_changes_needed() {
   local executable
   # Missing tools are installed through omarchy pkg add or Omarchy's installers.
@@ -566,6 +582,8 @@ privileged_changes_needed() {
   if ! command -v flatpak >/dev/null; then
     return 0
   fi
+  # Omarchy's T3 Code installer adds fuse3, so a new install needs sudo.
+  t3_install_needed && return 0
   # A missing Bitwarden desktop becomes Omarchy's package when the feed has it.
   if ! command -v bitwarden >/dev/null && ! bitwarden_flatpak_installed && bitwarden_native_available; then
     return 0
@@ -814,7 +832,7 @@ for provider in claude codex opencode grok; do
 done
 install_cursor
 
-# update-all checks T3 Code builds with readelf before installing them.
+# update-all checks T3 Code builds with readelf before they are applied.
 install_package binutils readelf
 install_package herdr
 install_package tailscale
@@ -949,53 +967,72 @@ else
   echo "Chromium is unavailable; skipped its Bitwarden extension. Rerun setup after installing Chromium."
 fi
 
-# Nightly is upstream's fast-moving train. Reconcile an existing stable CLI too;
-# executable presence is not evidence that the selected channel is installed.
-# Newer linux-arm64 nightlies have 4 KiB-aligned LOAD segments and cannot
-# start on kernels with larger pages (pingdotgg/t3code#23433). There, keep a
-# Nightly that already starts; update-all checks every newer build before
-# installing it. Pin the last known-good build only when t3 is missing, does
-# not start, or is not a Nightly.
-t3_known_good_large_page=0.1.2-nightly.20261021.3499
-page_size=$(getconf PAGESIZE)
-t3_pin=()
-reinstall_t3=0
-if ((page_size > 4096)); then
-  if t3_reported=$(timeout --kill-after=5s 15 t3 --version 2>/dev/null) && [[ $t3_reported == *-nightly.* ]]; then
-    [[ $updating -eq 1 ]] || echo "Keeping the installed T3 Code Nightly on this $((page_size / 1024)) KiB-page kernel; update-all checks newer builds first."
-  else
-    reinstall_t3=1
-    t3_pin=(T3CODE_VERSION="$t3_known_good_large_page")
-    echo "This kernel uses $((page_size / 1024)) KiB pages; installing T3 Code $t3_known_good_large_page (pingdotgg/t3code#23433)."
+# T3 Code comes from Omarchy's installer (decision 0020), the self-updating
+# AppImage. On kernels with pages larger than 4 KiB, its build is checked right
+# after (pingdotgg/t3code#23433), and update-all checks each staged update. An
+# existing bun CLI install is kept until the t3-cli offer below moves it.
+t3_check_installed() {
+  local page
+  page=$(getconf PAGESIZE 2>/dev/null || true)
+  [[ $page =~ ^[0-9]+$ ]] || page=0
+  # The updater checks only above 4 KiB. 0 (unknown) makes it read the size itself.
+  python3 "$root/scripts/groundwork-update.py" t3-check-installed "$page"
+}
+# Returns 1 when Omarchy's installer did not install the app, and 2 when the
+# app is installed but no build that passes on this kernel is in place.
+run_t3_installer() {
+  if ! command -v omarchy-install-ai-t3-code >/dev/null; then
+    echo "omarchy-install-ai-t3-code is missing, so T3 Code was not installed. Update Omarchy, then rerun ./install.sh." >&2
+    return 1
   fi
-elif [[ $updating -eq 0 ]] || ! command -v t3 >/dev/null; then
-  reinstall_t3=1
-fi
-if [[ $reinstall_t3 -eq 1 ]]; then
-  t3_installer="$(mktemp)"
-  curl --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 10 --max-time 60 \
-    -fsSL https://t3.codes/install.sh -o "$t3_installer"
-  env -u T3CODE_VERSION T3CODE_CHANNEL=nightly "${t3_pin[@]}" timeout --kill-after=5s 300 sh "$t3_installer"
-  rm -f "$t3_installer"
-  t3_installer=""
+  # --no-launch: setup does not start apps. nightly: this layer's channel.
+  if ! timeout --kill-after=5s 600 omarchy-install-ai-t3-code nightly --no-launch; then
+    echo "omarchy-install-ai-t3-code failed, so T3 Code was not installed. Fix the error above, then rerun ./install.sh." >&2
+    return 1
+  fi
+  if [[ ! -f $t3_appimage ]]; then
+    echo "omarchy-install-ai-t3-code finished, but $t3_appimage is missing. Rerun ./install.sh." >&2
+    return 1
+  fi
+  if ! t3_check_installed; then
+    echo "T3 Code was installed, but no build that passes on this kernel is in place. See the warning above, then rerun update-all." >&2
+    return 2
+  fi
+}
+if t3_install_needed; then
+  echo "Installing T3 Code with omarchy-install-ai-t3-code nightly…"
+  t3_status=0
+  run_t3_installer || t3_status=$?
+  # Like a missing package, a failed install stops before home changes. A
+  # build that fails the check leaves the rest of setup to finish first.
+  [[ $t3_status -ne 1 ]] || exit 1
+  [[ $t3_status -eq 0 ]] || t3_problem="T3 Code did not pass its check on this kernel; see the warning above."
 fi
 
-# The upstream installer owns its symlink, but does not change shell startup
-# files. Detect an earlier npm/system t3 rather than claiming it was replaced.
-t3_bin_dir="${T3CODE_INSTALL_BIN_DIR:-$HOME/.local/bin}"
-installed_t3="$t3_bin_dir/t3"
+# The t3 command is the app's bundled CLI, ~/.t3/bin/t3, which the app writes
+# on its first launch. Omarchy's installer links ~/.local/bin/t3 to it unless a
+# t3 of the user's own is there. A bun CLI link is the t3-cli offer's job.
 hash -r
-effective_t3="$(command -v t3 || true)"
-if [[ ! -x $installed_t3 || -z $effective_t3 || ! $effective_t3 -ef $installed_t3 ]]; then
-  printf 'T3 command shadowing or missing PATH entry: effective=%s, installed=%s\n' "${effective_t3:-none}" "$installed_t3" >&2
-  printf 'Prepend %q to PATH in your user shell configuration, start a fresh shell, and rerun ./install.sh.\n' "$t3_bin_dir" >&2
-  echo "The existing npm/system installation was preserved; remove it only through its original package manager if desired." >&2
-  exit 1
-fi
-t3_version="$(timeout --kill-after=5s 15 "$installed_t3" --version)"
-if [[ $t3_version != *-nightly.* ]]; then
-  printf 'Expected T3 Code Nightly, received: %s\n' "$t3_version" >&2
-  exit 1
+if t3_cli_installed; then
+  :
+elif [[ ! -e $t3_link && ! -L $t3_link ]] || [[ $(readlink "$t3_link" 2>/dev/null) != "$t3_app_cli" ]]; then
+  if [[ $updating -eq 0 && ( -e $t3_link || -L $t3_link ) ]]; then
+    echo "$t3_link is not T3 Code's t3 ($t3_app_cli), so it was left alone."
+  fi
+elif [[ ! -x $t3_app_cli ]]; then
+  [[ ! -f $t3_appimage ]] || echo "Open T3 Code once from the app launcher. It then installs its t3 command at $t3_app_cli."
+else
+  effective_t3="$(command -v t3 || true)"
+  if [[ -z $effective_t3 || ! $effective_t3 -ef $t3_link ]]; then
+    printf 'T3 command shadowing or missing PATH entry: effective=%s, installed=%s\n' "${effective_t3:-none}" "$t3_link" >&2
+    printf 'Prepend %q to PATH in your user shell configuration, start a fresh shell, and rerun ./install.sh.\n' "$(dirname "$t3_link")" >&2
+    echo "The existing npm/system installation was preserved; remove it only through its original package manager if desired." >&2
+    exit 1
+  fi
+  if ! t3_reported=$(timeout --kill-after=5s 30 "$t3_link" --version 2>/dev/null) || [[ -z $t3_reported ]]; then
+    echo "T3 Code's t3 command ($t3_app_cli) did not report a version. Open T3 Code once, then rerun ./install.sh." >&2
+    exit 1
+  fi
 fi
 
 # The running app registers a second, hidden launcher entry. Keep one; this
@@ -1669,6 +1706,51 @@ fi
 if [[ $brave_first_acceptance -eq 1 && $brave_usable -eq 1 ]]; then
   python3 "$root/scripts/groundwork-update.py" accept-brave >/dev/null
 fi
+# T3 Code (decision 0020, id t3-cli). The bun CLI from t3.codes/install.sh
+# moves to Omarchy's installer only with consent, and never while T3 Code or
+# that CLI runs. ~/.t3, ~/.config/t3code*, and ~/.cache/t3code-updater stay.
+migrate_t3_cli_to_omarchy() {
+  local old reason temporary
+  old=$(readlink "$t3_link") || {
+    echo "$t3_link could not be read. Nothing was changed." >&2
+    return 1
+  }
+  if reason=$(python3 "$root/scripts/groundwork-t3-launcher.py" running); then
+    echo "${reason:-T3 Code may be running}. Quit T3 Code and stop its t3 CLI, then rerun ./install.sh --migrate-to-omarchy-installers. Nothing was changed." >&2
+    return 1
+  fi
+  if [[ ! -e $t3_appimage ]]; then
+    # The app is missing, so Omarchy's installer runs and its build is checked.
+    # The CLI link changes only after that passes.
+    run_t3_installer || {
+      echo "The bun CLI link $t3_link -> $old was kept." >&2
+      return 1
+    }
+  fi
+  # An app that is already installed is not reinstalled: that would download
+  # an unchecked newest build over a working one. Only the link changes, to
+  # the one Omarchy's installer makes (it leaves a link to elsewhere alone).
+  temporary="$t3_link.groundwork-$$"
+  if ! ln -s "$t3_app_cli" "$temporary" || ! mv -Tf "$temporary" "$t3_link"; then
+    rm -f -- "$temporary"
+    echo "$t3_link could not be pointed at $t3_app_cli. It still points at $old." >&2
+    return 1
+  fi
+  if [[ $(readlink "$t3_link") != "$t3_app_cli" ]]; then
+    echo "$t3_link does not point at $t3_app_cli after the change. Check it, then rerun." >&2
+    return 1
+  fi
+  echo "t3 now runs T3 Code's bundled CLI ($t3_link -> $t3_app_cli)."
+  [[ -x $t3_app_cli ]] || echo "Open T3 Code once from the app launcher; it then writes $t3_app_cli."
+  echo "Kept $t3_home (threads, settings, theme), ~/.config/t3code, ~/.config/t3code-v2, ~/.config/t3code-flags.conf, and ~/.cache/t3code-updater."
+  echo "The old CLI builds in $t3_home/runtime/versions are safe to delete. To undo, run: ln -sfn $(printf '%q' "$old") $(printf '%q' "$t3_link")"
+}
+if t3_cli_installed && command -v omarchy-install-ai-t3-code >/dev/null; then
+  offer_omarchy_migration t3-cli "T3 Code" "the standalone t3 CLI from t3.codes/install.sh ($t3_link -> $(readlink "$t3_link"))" \
+    "omarchy-install-ai-t3-code nightly, the T3 Code app with its bundled t3" \
+    "Migrating points $t3_link at the app's own CLI, $t3_app_cli, as Omarchy's installer does. When the T3 Code app is missing, it first runs omarchy-install-ai-t3-code nightly --no-launch and checks that build on this kernel. An installed app is not reinstalled. $t3_home (threads, settings, theme, and the old CLI builds), ~/.config/t3code*, and ~/.cache/t3code-updater are kept. To undo, point $t3_link back at a build in $t3_home/runtime/versions. Quit T3 Code and its t3 CLI first." \
+    migrate_t3_cli_to_omarchy
+fi
 # Save a decline before publishing policy. A symlink refusal exits, and the no
 # from this run has to already be in omarchy.json.
 if [[ $declined_migrations != "$saved_declines" ]]; then
@@ -1693,6 +1775,10 @@ if [[ $migration_failed -eq 1 ]]; then
 fi
 if [[ -n $syncthing_problem ]]; then
   echo "$syncthing_problem" >&2
+  exit 1
+fi
+if [[ -n $t3_problem ]]; then
+  echo "$t3_problem" >&2
   exit 1
 fi
 if [[ $updating -eq 0 && -n $syncthing_pending_note ]]; then

@@ -69,9 +69,11 @@ class BraveInstallTests(unittest.TestCase):
             FIXTURE_FEED='brave-bin',
         )
         if self.page > 4096:
-            # On a large-page host, setup pins T3 Code; the fixture installer
-            # accepts only that pin.
-            self.env['FIXTURE_PINNED_T3'] = updater.T3_KNOWN_GOOD_LARGE_PAGE
+            # On a large-page host, a new T3 Code install is checked in a
+            # sandbox (test_t3_install covers that). Start with the app in place.
+            subprocess.run([str(self.bin / 'omarchy-install-ai-t3-code'), 'nightly', '--no-launch'],
+                           env=self.env, check=True, timeout=10)
+            (self.root / 'calls.jsonl').unlink(missing_ok=True)
         for name in ('pacman', 'omarchy-install-browser', 'omarchy-remove-browser', 'omarchy-default-browser'):
             (self.bin / name).symlink_to(self.bin / 'stub')
         # The launch check opens a window, so it needs this user's Wayland

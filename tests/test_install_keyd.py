@@ -232,17 +232,38 @@ elif name == 'curl':
             output.write_text(digest + '  bun-linux-aarch64.zip\\n')
             sys.exit(0)
         sys.exit(1)
-    output.write_text("""#!/bin/sh
-printf '%s' "$T3CODE_CHANNEL" > "$INSTALL_FIXTURE/t3-channel"
-test -z "${T3CODE_VERSION:-}" || test "$T3CODE_VERSION" = "${FIXTURE_PINNED_T3:-}" || exit 1
-printf '%s' "${T3CODE_VERSION:-}" > "$INSTALL_FIXTURE/t3-version"
-if [ "${FIXTURE_INSTALL_STATUS:-0}" != 0 ]; then exit "$FIXTURE_INSTALL_STATUS"; fi
-bin_dir="${T3CODE_INSTALL_BIN_DIR:-$HOME/.local/bin}"
-mkdir -p "$bin_dir"
-cp "$INSTALL_FIXTURE/nightly-t3" "$bin_dir/t3"
-chmod +x "$bin_dir/t3"
-exit "${FIXTURE_INSTALL_STATUS:-0}"
-""")
+    raise SystemExit('Unexpected download: ' + url)
+elif name == 'omarchy-install-ai-t3-code':
+    # The layout of Omarchy's omarchy-install-ai-t3-code and
+    # omarchy-install-t3code-app (decision 0020): the AppImage, t3code.desktop,
+    # and ~/.local/bin/t3 -> ~/.t3/bin/t3 unless a t3 of the user's own is there.
+    import struct
+    status = int(os.environ.get('FIXTURE_T3_INSTALL_STATUS', '0'))
+    if status:
+        sys.exit(status)
+    if args != ['nightly', '--no-launch']:
+        raise SystemExit('Unexpected T3 installer arguments: ' + repr(args))
+    home = pathlib.Path(os.environ['HOME'])
+    t3_home = pathlib.Path(os.environ.get('T3CODE_HOME') or home / '.t3')
+    if os.environ.get('FIXTURE_T3_INSTALL_SKIP_APP') != '1':
+        app = home / '.local/share/t3code/T3-Code.AppImage'
+        app.parent.mkdir(parents=True, exist_ok=True)
+        # An aarch64 ELF header with one LOAD, as the AppImage runtime has.
+        header = struct.pack('<4sBBBBB7sHHIQQQIHHHHHH', b'\\x7fELF', 2, 1, 1, 0, 0, b'\\0' * 7,
+                             2, 183, 1, 0x400000, 64, 0, 0, 64, 56, 1, 64, 0, 0)
+        app.write_bytes(header + struct.pack('<IIQQQQQQ', 1, 5, 0, 0x400000, 0x400000, 0, 0, 0x10000))
+        app.chmod(0o755)
+        desktop = home / '.local/share/applications/t3code.desktop'
+        desktop.parent.mkdir(parents=True, exist_ok=True)
+        desktop.write_text('[Desktop Entry]\\nName=T3 Code (Nightly)\\nExec="%s" %%U\\nTryExec=%s\\n'
+                           'MimeType=x-scheme-handler/t3code;x-scheme-handler/t3code-dev;\\n' % (app, app))
+    link = home / '.local/bin/t3'
+    target = os.readlink(link) if link.is_symlink() else ''
+    if (not link.exists() and not link.is_symlink()) or target in ('/usr/bin/t3', '/usr/bin/t3-nightly'):
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if link.is_symlink():
+            link.unlink()
+        link.symlink_to(t3_home / 'bin/t3')
 elif name == 'flatpak':
     app = next((arg for arg in reversed(args) if '.' in arg and not arg.startswith('-')), '')
     marker = {
@@ -524,17 +545,21 @@ class InstallKeydTests(unittest.TestCase):
         for name in ('bash', 'sh', 'python3', 'env'):
             (self.bin / name).symlink_to(shutil.which(name))
         for name in ('timeout', 'mktemp', 'dirname', 'rm', 'mkdir', 'cp', 'chmod',
-                     'mv', 'find', 'readlink', 'sleep', 'cmp', 'id', 'head'):
+                     'mv', 'find', 'readlink', 'sleep', 'cmp', 'id', 'head', 'ln'):
             (self.bin / name).symlink_to(host_tool(name))
         stub = self.bin / 'stub'
         stub.write_text(STUB)
         stub.chmod(0o755)
-        for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'omarchy-install-dev-env', 'omarchy-remove-dev-env', 'stow', 't3', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw', 'getconf', 'readelf', 'syncthing', 'loginctl', 'stat'):
+        for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'omarchy-install-dev-env', 'omarchy-remove-dev-env', 'stow', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw', 'getconf', 'readelf', 'syncthing', 'loginctl', 'stat',
+                     'omarchy-install-ai-t3-code'):
             (self.bin / name).symlink_to(stub)
         (self.bin / 'git').symlink_to(host_tool('git'))
         (self.root / 'home').mkdir()
         (self.root / 'runtime').mkdir()
-        (self.root / 'nightly-t3').write_text('#!/bin/sh\nprintf "t3 0.0.0-nightly.20261018.1\\n"\n')
+        # The T3 process check reads this fixture tree, not the host's /proc.
+        (self.root / 'proc/1').mkdir(parents=True)
+        (self.root / 'proc/1/exe').symlink_to('/usr/bin/bash')
+        (self.root / 'proc/1/cmdline').write_bytes(b'bash\0')
         plugin_list = self.root / 'plugins.json'
         plugin_list.write_text('{"schemaVersion": 1, "plugins": [], "retired": []}\n')
         self.config = self.root / 'etc/keyd/default.conf'
@@ -548,8 +573,10 @@ class InstallKeydTests(unittest.TestCase):
                         # must exist so a host runtime directory is not used.
                         XDG_RUNTIME_DIR=str(self.root / 'runtime'),
                         GROUNDWORK_PLUGIN_LIST=str(plugin_list),
+                        GROUNDWORK_TEST_PROC=str(self.root / 'proc'),
                         PATH=f'{self.root}/home/.local/bin:{self.bin}')
         self.env.pop('T3CODE_INSTALL_BIN_DIR', None)
+        self.env.pop('T3CODE_HOME', None)
         self.env.pop('GROUNDWORK_OBSIDIAN_VAULT', None)
         self.env.pop('WAYLAND_DISPLAY', None)
         # A host XDG or mise directory would point the shim checks at the real home.
@@ -961,7 +988,7 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertIn(['flatpak', '--user', 'install', '--noninteractive', 'flathub', 'io.freetubeapp.FreeTube'], calls)
         self.assertIn('FreeTube could not be installed', result.stderr)
         self.assertIn('FreeTube was not installed.', result.stdout)
-        self.assertTrue(any(call[0] == 'curl' for call in calls))
+        self.assertIn(['omarchy-install-ai-t3-code', 'nightly', '--no-launch'], calls)
         self.assertTrue(any(call[0] == 'stow' for call in calls))
         self.assertIn(['sudo', 'keyd', 'reload'], calls)
         self.assertIn(['systemctl', '--user', 'enable', 'groundwork-screen-share.service'], calls)
@@ -1250,53 +1277,11 @@ raise SystemExit(os.WEXITSTATUS(status))
             calls.index(['sudo', 'systemctl', 'enable', '--now', 'tailscaled']))
         self.assertIn(['omarchy', 'pkg', 'add', 'herdr'], calls)
 
-    def test_installer_download_failure_stops_before_home_changes(self):
-        self.env['FIXTURE_CURL_STATUS'] = '1'
-        self.run_install(success=False)
-        self.assertTrue(any(call[0] == 'curl' for call in self.calls()))
-        self.assertFalse(any(call[0] in ('stow', 'hyprctl') for call in self.calls()))
-        self.assertFalse(self.config.exists())
-
-    def test_nightly_is_selected_even_with_existing_t3_and_ambient_version(self):
-        self.env['T3CODE_VERSION'] = 'old-stable-fixture'
-        self.run_install()
-        self.assertEqual((self.root / 't3-channel').read_text(), 'nightly')
-        self.run_install()
-        self.assertEqual(sum(call[0] == 'curl' for call in self.calls()), 2)
-
-    def test_small_pages_install_the_newest_nightly(self):
-        self.run_install()
-        self.assertEqual((self.root / 't3-version').read_text(), '')
-
-    def test_large_pages_pin_the_last_known_good_nightly(self):
-        self.env.update(FIXTURE_PAGESIZE='16384', FIXTURE_PINNED_T3='0.1.2-nightly.20261021.3499',
-                        T3CODE_VERSION='ambient-fixture')
-        result = self.run_install()
-        self.assertEqual((self.root / 't3-version').read_text(), '0.1.2-nightly.20261021.3499')
-        self.assertEqual((self.root / 't3-channel').read_text(), 'nightly')
-        self.assertIn('pingdotgg/t3code#23433', result.stdout)
-
-    def test_large_pages_keep_a_working_nightly_on_rerun(self):
-        self.env.update(FIXTURE_PAGESIZE='16384', FIXTURE_PINNED_T3='0.1.2-nightly.20261021.3499')
-        self.run_install()
-        (self.root / 'calls.jsonl').unlink()
-        (self.root / 't3-version').unlink()
-        (self.bin / 't3').unlink()
-        result = self.run_install()
-        self.assertFalse(any(call[0] == 'curl' for call in self.calls()))
-        self.assertFalse((self.root / 't3-version').exists())
-        self.assertIn('Keeping the installed T3 Code Nightly on this 16 KiB-page kernel', result.stdout)
-
     def test_readelf_comes_from_binutils(self):
         (self.bin / 'readelf').unlink()
         result = self.run_install(success=False)
         self.assertIn(['omarchy', 'pkg', 'add', 'binutils'], self.calls())
         self.assertIn('binutils is still unavailable', result.stderr)
-
-    def test_nightly_installer_failure_stops_before_home_changes(self):
-        self.env['FIXTURE_INSTALL_STATUS'] = '1'
-        self.run_install(success=False)
-        self.assertFalse(any(call[0] in ('stow', 'hyprctl') for call in self.calls()))
 
     def test_package_helper_successful_skip_fails_before_configuration(self):
         for package, executable in (('herdr', 'herdr'), ('tailscale', 'tailscale'),
@@ -1309,33 +1294,6 @@ raise SystemExit(os.WEXITSTATUS(status))
                 self.assertNotIn('are installed.', result.stdout)
                 self.assertFalse(any(call[0] in ('curl', 'stow', 'hyprctl') for call in self.calls()))
                 (self.bin / executable).symlink_to(self.bin / 'stub')
-
-    def test_stable_t3_shadowing_is_reported_without_removing_it(self):
-        self.env['PATH'] = f'{self.bin}:{self.root}/home/.local/bin'
-        result = self.run_install(success=False)
-        self.assertIn('T3 command shadowing', result.stderr)
-        self.assertTrue((self.bin / 't3').is_symlink())
-        self.assertTrue((self.root / 'home/.local/bin/t3').is_file())
-        self.assertFalse(any(call[0] in ('stow', 'hyprctl') for call in self.calls()))
-
-    def test_missing_local_bin_on_path_is_reported(self):
-        (self.bin / 't3').unlink()
-        self.env['PATH'] = str(self.bin)
-        result = self.run_install(success=False)
-        self.assertIn('missing PATH entry', result.stderr)
-
-    def test_custom_install_bin_is_respected(self):
-        custom = self.root / 'custom-bin'
-        self.env['T3CODE_INSTALL_BIN_DIR'] = str(custom)
-        self.env['PATH'] = f'{custom}:' + self.env['PATH']
-        self.run_install()
-        self.assertTrue((custom / 't3').is_file())
-
-    def test_wrong_channel_fails_before_configuration(self):
-        (self.root / 'nightly-t3').write_text('#!/bin/sh\nprintf "t3 0.0.0-stable\\n"\n')
-        result = self.run_install(success=False)
-        self.assertIn('Expected T3 Code Nightly', result.stderr)
-        self.assertFalse(any(call[0] in ('stow', 'hyprctl') for call in self.calls()))
 
     def seed_blip_commands(self, *, socat=True, bun=False):
         for name in ('jq', 'ssh', 'notify-send', 'wl-copy', 'xdg-open'):

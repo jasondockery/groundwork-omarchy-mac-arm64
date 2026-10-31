@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 # Groundwork Omarchy T3 launcher
-"""Keep one T3 Code launcher entry.
+"""Keep one T3 Code launcher entry, and tell whether T3 Code is running.
 
-The T3 installer writes t3code.desktop. The running app later registers
+Omarchy's installer (omarchy-install-ai-t3-code, decision 0020) writes
+t3code.desktop. The running app later registers
 com.t3tools.T3Code.desktop for t3code:// and points the scheme handler at it.
 This helper points x-scheme-handler/t3code back at t3code.desktop with
 xdg-mime, then removes the app's regenerable duplicate. The app re-creates the
 duplicate with NoDisplay=true, which the launcher hides, and a later run
 removes it again. Nothing changes while T3 Code is running, or when that cannot
 be established.
+
+`running` exits 0 when a T3 Code process runs or that cannot be ruled out, and
+1 when none does. It also counts the standalone bun CLI from t3.codes
+(~/.t3/runtime/versions/*). The updater and the t3-cli migration use it.
 """
 import os
 from pathlib import Path
@@ -37,6 +42,11 @@ def launch_lines(file):
     return [value for key, _, value in (line.partition('=') for line in lines) if key in ('Exec', 'TryExec')]
 
 
+def t3_home():
+    """T3CODE_HOME, as Omarchy's installer and the app read it."""
+    return Path(os.environ.get('T3CODE_HOME') or Path.home() / '.t3')
+
+
 def exec_paths(*files):
     """AppImage paths named by the T3 desktop entries, plus the installer default."""
     paths = {str(Path.home() / '.local/share/t3code' / APPIMAGE)}
@@ -46,12 +56,18 @@ def exec_paths(*files):
                 words = shlex.split(value)
             except ValueError:
                 continue
-            paths.update(word for word in words[:1] if word.endswith(APPIMAGE))
+            # Omarchy's installer writes a literal % in the Exec path as %%.
+            paths.update(word.replace('%%', '%') for word in words[:1] if word.endswith(APPIMAGE))
     return paths
 
 
-def t3_running(paths, proc=Path('/proc')):
-    """Return (running, reason). running is True when unsure, so callers skip."""
+def t3_running(paths, proc=Path('/proc'), prefixes=()):
+    """Return (running, reason). running is True when unsure, so callers skip.
+
+    A process counts when its executable or one of its first two arguments is
+    in `paths`, when it runs from an AppImage mount of T3 Code, or when its
+    executable starts with one of `prefixes`.
+    """
     try:
         pids = [entry for entry in proc.iterdir() if entry.name.isdigit()]
     except OSError as error:
@@ -67,9 +83,25 @@ def t3_running(paths, proc=Path('/proc')):
         except OSError as error:
             return True, f'could not inspect process {entry.name} ({error})'
         if exe in paths or Path(exe).parent.name.startswith(MOUNT_PREFIX) \
+                or any(exe.startswith(prefix) for prefix in prefixes) \
                 or any(part.decode(errors='replace') in paths for part in argv[:2]):
             return True, f'T3 Code is running (process {entry.name})'
     return False, ''
+
+
+def proc_root():
+    """/proc, or the fixture tree GROUNDWORK_TEST_PROC under GROUNDWORK_TESTING=1."""
+    if os.environ.get('GROUNDWORK_TESTING') == '1' and os.environ.get('GROUNDWORK_TEST_PROC'):
+        return Path(os.environ['GROUNDWORK_TEST_PROC'])
+    return Path('/proc')
+
+
+def app_running(proc=None, cli=False):
+    """(running, reason) for the T3 Code app, and with `cli` the bun CLI too."""
+    proc = proc_root() if proc is None else proc
+    apps = data_home() / 'applications'
+    prefixes = (str(t3_home() / 'runtime/versions') + '/',) if cli else ()
+    return t3_running(exec_paths(apps / PRIMARY, apps / DUPLICATE), proc, prefixes)
 
 
 def default_handler():
@@ -151,10 +183,15 @@ def reconcile(proc=Path('/proc')):
 
 
 def main(argv):
+    if argv[1:] == ['running']:
+        running, reason = app_running(cli=True)
+        if running:
+            print(reason, flush=True)
+        return 0 if running else 1
     if argv[1:] != ['reconcile']:
-        print(f'usage: {Path(argv[0]).name} reconcile', file=sys.stderr)
+        print(f'usage: {Path(argv[0]).name} reconcile|running', file=sys.stderr)
         return 2
-    for message in reconcile():
+    for message in reconcile(proc_root()):
         print(message, flush=True)
     return 0
 

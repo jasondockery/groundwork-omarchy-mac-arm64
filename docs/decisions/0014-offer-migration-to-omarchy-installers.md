@@ -37,6 +37,10 @@ When either check fails, a package that this run added is removed again with `om
 
 Brave's two offers, the page-size and launch checks, and the policy file are [decision 0015](0015-brave-via-omarchy-installer.md). The Flatpak `com.brave.Browser` and a `brave` command that `brave-bin` does not own use id `brave-flatpak`. A Brave that passed the checks and is not already the default uses id `default-browser-brave`. Migration installs `brave-bin` through `omarchy-install-browser brave`. It does not uninstall the Flatpak and does not pass `--delete-data`. `~/.var/app/com.brave.Browser` stays. Chromium stays.
 
+## T3 Code
+
+The bun CLI from `t3.codes/install.sh` (a `~/.local/bin/t3` link into `~/.t3/runtime/versions/`) uses id `t3-cli`. Omarchy's method is `omarchy-install-ai-t3-code nightly --no-launch` and the app's bundled `t3` ([decision 0020](0020-t3-code-through-omarchy-installer.md)). The move is refused while T3 Code or that CLI runs. It installs the app only when the app is missing, then points the link at `~/.t3/bin/t3`. `~/.t3` and `~/.config/t3code*` stay. The steps are in [the apps guide](../apps.md#t3-code).
+
 ## Cursor: report only
 
 Current Omarchy has no `omarchy-install-cursor`. Its Install menu adds the `cursor-bin` package, which is what this layer installs ([decision 0009](0009-install-cursor-through-omarchy.md)). A pacman-owned `cursor-bin` is Omarchy's own method there, so it is never offered a migration and never removed.
@@ -47,4 +51,4 @@ No automated removal ships, and `--migrate-to-omarchy-installers` does not touch
 
 ## Not covered
 
-T3 Code, Tailscale, the mise-managed AI providers, Obsidian, and Herdr stay as described in their own decisions and in `README.md`. None of them has a migration offer.
+Tailscale, the mise-managed AI providers, Obsidian, and Herdr stay as described in their own decisions and in `README.md`. None of them has a migration offer.
