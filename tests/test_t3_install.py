@@ -5,6 +5,8 @@ fake omarchy-install-ai-t3-code writes Omarchy's layout. A fake bwrap stands in
 for the sandbox: it unpacks the fake AppImage and answers t3code --version.
 No test reaches the network: HTTPS_PROXY points at a closed port.
 """
+import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -303,7 +305,8 @@ class T3InstallTests(unittest.TestCase):
         self.assertEqual(os.readlink(self.link), str(self.app_cli))
         self.assertIn(f't3 now runs T3 Code\'s bundled CLI ({self.link} -> {self.app_cli}).', result.stdout)
         self.assertIn(f'{self.home}/.t3/runtime/versions are safe to delete', result.stdout)
-        self.assertIn(f'ln -sfn {build} {self.link}', result.stdout)
+        self.assertIn(f'To undo, run: cd {REPO} && ./install.sh --keep-standalone-t3', result.stdout)
+        self.assertEqual((self.state / 't3-cli-switched').read_text(), f'{build}\n')
         self.assert_kept(kept)
         self.reset_calls()
         result = self.run_install()
@@ -367,6 +370,215 @@ class T3InstallTests(unittest.TestCase):
         self.run_install('--migrate-to-omarchy-installers')
         self.assertEqual(os.readlink(self.link), str(self.app_cli))
         self.assertNotIn('declined_migrations', self.saved())
+        self.assert_kept(kept)
+
+
+    # The automatic t3-cli switch (decision 0020's exception to 0014).
+
+    def seed_switchable(self):
+        """Every condition for the automatic switch: the bun CLI link, a checked app, and its CLI."""
+        build, kept = self.seed_cli()
+        self.seed_app()
+        self.seed_app_cli()
+        self.seed_last_good()
+        return build, kept
+
+    def seed_last_good(self, sha512=None):
+        data = self.appimage.read_bytes()
+        directory = self.state / 't3'
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / 'T3-Code.AppImage').write_bytes(data)
+        (directory / 'last-good.json').write_text(json.dumps(
+            {'version': VERSION, 'sha512': sha512 or base64.b64encode(hashlib.sha512(data).digest()).decode()}))
+
+    def assert_not_switched(self, build, result):
+        self.assertEqual(os.readlink(self.link), str(build))
+        self.assertNotIn('Switching', result.stdout)
+        self.assertFalse((self.state / 't3-cli-switched').exists())
+
+    def test_a_checked_app_switches_the_bun_cli_without_asking(self):
+        build, kept = self.seed_switchable()
+        result = self.run_install()
+        self.assertEqual(os.readlink(self.link), str(self.app_cli))
+        self.assertIn(f'Switching {self.link} from the bun CLI ({build})', result.stdout)
+        self.assertIn(f't3 now runs T3 Code\'s bundled CLI ({self.link} -> {self.app_cli}).', result.stdout)
+        self.assertIn(f'{self.home}/.t3/runtime/versions are safe to delete', result.stdout)
+        self.assertIn(f'To undo, run: cd {REPO} && ./install.sh --keep-standalone-t3', result.stdout)
+        self.assertNotIn('(migration t3-cli)', result.stdout)
+        self.assertNotIn('No app has a migration', result.stdout)
+        self.assertEqual(self.installer_calls(), [])
+        self.assertEqual((self.state / 't3-cli-switched').read_text(), f'{build}\n')
+        self.assert_kept(kept)
+        # Idempotent: a rerun and an update leave the new link alone and say nothing about it.
+        for run in (self.run_install, self.run_update):
+            result = run()
+            self.assertEqual(os.readlink(self.link), str(self.app_cli))
+            self.assertNotIn('Switching', result.stdout)
+            self.assertNotIn('t3-cli', result.stdout)
+            self.assertEqual(self.installer_calls(), [])
+            self.assert_kept(kept)
+
+    def test_update_all_switches_too(self):
+        build, kept = self.seed_cli()
+        self.run_install()
+        self.seed_app()
+        self.seed_app_cli()
+        self.seed_last_good()
+        result = self.run_update()
+        self.assertEqual(os.readlink(self.link), str(self.app_cli))
+        self.assertIn('./install.sh --keep-standalone-t3', result.stdout)
+        self.assert_kept(kept)
+
+    def test_the_printed_undo_restores_the_cli_and_saves_a_decline(self):
+        build, kept = self.seed_switchable()
+        result = self.run_install()
+        undo = next(line for line in result.stdout.splitlines() if 'To undo, run: ' in line).split('To undo, run: ', 1)[1]
+        self.assertNotIn('ln -sfn', undo)
+        result = subprocess.run(['bash', '-c', undo], env=self.env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(os.readlink(self.link), str(build))
+        self.assertIn(f't3 runs the standalone CLI again ({self.link} -> {build}).', result.stdout)
+        self.assertIn('Saved t3-cli as declined', result.stdout)
+        self.assertIn('t3-cli', self.saved()['declined_migrations'])
+        for run in (self.run_update, self.run_install, self.run_update):
+            result = run()
+            self.assertEqual(os.readlink(self.link), str(build))
+            self.assertNotIn('Switching', result.stdout)
+            self.assertIn('t3-cli', self.saved()['declined_migrations'])
+        # Running it again only keeps the decline.
+        self.run_install('--keep-standalone-t3')
+        self.assertEqual(os.readlink(self.link), str(build))
+        # The existing migration flow clears the decline and moves the link back.
+        self.run_install('--migrate-to-omarchy-installers')
+        self.assertEqual(os.readlink(self.link), str(self.app_cli))
+        self.assertNotIn('declined_migrations', self.saved())
+        self.assert_kept(kept)
+
+    def test_keep_standalone_t3_without_a_switch_changes_nothing(self):
+        self.seed_app()
+        self.seed_app_cli()
+        # Omarchy's installer already linked the app's CLI.
+        self.assertEqual(os.readlink(self.link), str(self.app_cli))
+        result = self.run_install('--keep-standalone-t3', success=False)
+        self.assertIn('there is nothing to undo', result.stderr)
+        self.assertEqual(os.readlink(self.link), str(self.app_cli))
+        self.assertNotIn('declined_migrations', self.saved())
+
+    def test_keep_standalone_t3_is_a_setup_option_on_its_own(self):
+        for extra in ('--migrate-to-omarchy-installers', '--update'):
+            result = subprocess.run(['python3', str(REPO / 'scripts/groundwork-update.py'), 'setup', str(REPO),
+                                     '--keep-standalone-t3', extra],
+                                    env=self.env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 64, result.stdout + result.stderr)
+            self.assertIn('setup option on its own', result.stderr)
+
+    def test_a_hand_made_undo_is_not_switched_again(self):
+        build, kept = self.seed_switchable()
+        self.run_install()
+        undo = self.link.with_name('t3.undo')
+        undo.symlink_to(build)
+        undo.replace(self.link)
+        result = self.run_install()
+        self.assertEqual(os.readlink(self.link), str(build))
+        self.assertNotIn('Switching', result.stdout)
+        self.assertIn('(migration t3-cli)', result.stdout)
+        self.assert_kept(kept)
+
+    def test_another_link_or_file_is_never_switched(self):
+        _, kept = self.seed_switchable()
+        elsewhere = self.home / 'bin/t3'
+        elsewhere.parent.mkdir()
+        elsewhere.write_text('#!/bin/sh\necho mine\n')
+        elsewhere.chmod(0o755)
+        self.link.unlink()
+        self.link.symlink_to(elsewhere)
+        result = self.run_install()
+        self.assertEqual(os.readlink(self.link), str(elsewhere))
+        self.assertNotIn('Switching', result.stdout)
+        self.assertNotIn('t3-cli', result.stdout)
+        self.link.unlink()
+        self.link.write_text('#!/bin/sh\necho mine\n')
+        self.link.chmod(0o755)
+        result = self.run_install()
+        self.assertFalse(self.link.is_symlink())
+        self.assertNotIn('Switching', result.stdout)
+        self.assert_kept(kept)
+
+    def test_a_link_that_resolves_outside_the_runtime_builds_keeps_the_offer(self):
+        build, _ = self.seed_switchable()
+        elsewhere = self.home / 'bin/t3'
+        elsewhere.parent.mkdir()
+        elsewhere.write_text('#!/bin/sh\necho mine\n')
+        elsewhere.chmod(0o755)
+        build.unlink()
+        build.symlink_to(elsewhere)
+        result = self.run_install()
+        self.assert_not_switched(build, result)
+        self.assertIn('(migration t3-cli)', result.stdout)
+
+    def test_another_install_bin_dir_keeps_the_offer(self):
+        build, _ = self.seed_switchable()
+        (self.home / 'tbin').mkdir()
+        self.env['T3CODE_INSTALL_BIN_DIR'] = str(self.home / 'tbin')
+        result = self.run_install()
+        self.assert_not_switched(build, result)
+        self.assertIn('(migration t3-cli)', result.stdout)
+
+    def test_an_unchecked_app_keeps_the_offer(self):
+        build, _ = self.seed_switchable()
+        (self.state / 't3/last-good.json').unlink()
+        result = self.run_install()
+        self.assert_not_switched(build, result)
+        self.assertIn('(migration t3-cli)', result.stdout)
+
+    def test_an_app_that_does_not_match_its_check_keeps_the_offer(self):
+        build, _ = self.seed_switchable()
+        self.seed_last_good(sha512=base64.b64encode(hashlib.sha512(b'another build').digest()).decode())
+        result = self.run_install()
+        self.assert_not_switched(build, result)
+        self.assertIn('(migration t3-cli)', result.stdout)
+
+    def test_a_missing_or_not_executable_app_cli_keeps_the_offer(self):
+        build, _ = self.seed_switchable()
+        self.app_cli.chmod(0o644)
+        result = self.run_install()
+        self.assert_not_switched(build, result)
+        self.assertIn('(migration t3-cli)', result.stdout)
+        self.app_cli.unlink()
+        result = self.run_install()
+        self.assert_not_switched(build, result)
+        self.assertIn('(migration t3-cli)', result.stdout)
+
+    def test_a_running_app_or_cli_waits_for_a_later_run(self):
+        build, kept = self.seed_switchable()
+        for pid, exe in ((40, str(build)), (41, '/tmp/.mount_T3-CodAbCdEf/t3code')):
+            with self.subTest(exe=exe):
+                self.process(pid, exe)
+                for run in (self.run_install, self.run_update):
+                    result = run()
+                    self.assert_not_switched(build, result)
+                    self.assertIn('T3 Code\'s t3 will move to the app\'s bundled CLI on a later run: T3 Code is running',
+                                  result.stdout)
+                    self.assertNotIn('(migration t3-cli)', result.stdout)
+                for name in ('exe', 'cmdline'):
+                    (self.root / 'proc' / str(pid) / name).unlink()
+                (self.root / 'proc' / str(pid)).rmdir()
+        result = self.run_install()
+        self.assertEqual(os.readlink(self.link), str(self.app_cli))
+        self.assert_kept(kept)
+
+    def test_a_saved_decline_is_never_switched(self):
+        build, kept = self.seed_cli()
+        self.run_in_terminal(['n'])
+        self.assertIn('t3-cli', self.saved()['declined_migrations'])
+        self.seed_app()
+        self.seed_app_cli()
+        self.seed_last_good()
+        result = self.run_install()
+        self.assert_not_switched(build, result)
+        self.assertIn('T3 Code stays on', result.stdout)
+        result = self.run_update()
+        self.assert_not_switched(build, result)
         self.assert_kept(kept)
 
 

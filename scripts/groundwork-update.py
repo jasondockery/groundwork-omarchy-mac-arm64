@@ -284,7 +284,7 @@ def register(source, keyd, screen_sharing, vault, blip='0', local_inference='0',
         atomic_write(Path.home() / '.local/bin' / command, launcher, 0o755, owned=True)
 
 
-MARKERS = {'ufw-screen-share-rule', 'syncthing-pending'}
+MARKERS = {'ufw-screen-share-rule', 'syncthing-pending', 't3-cli-switched'}
 STOP_SIGNALS = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
 
 
@@ -2237,12 +2237,16 @@ def main(args):
         valid = {'--with-keyd', '--without-keyd', '--with-screen-sharing', '--without-screen-sharing',
                  '--with-blip', '--without-blip', '--with-local-inference', '--without-local-inference',
                  '--with-git-filter-repo', '--without-git-filter-repo',
-                 '--migrate-to-omarchy-installers', '--update', '--help', '-h'}
+                 '--migrate-to-omarchy-installers', '--keep-standalone-t3', '--update', '--help', '-h'}
         if any(option not in valid for option in options):
             print('Unknown setup argument; nothing changed.', file=sys.stderr)
             return 64
         if {'--migrate-to-omarchy-installers', '--update'} <= set(options):
             print('--migrate-to-omarchy-installers is a setup option. Run ./install.sh --migrate-to-omarchy-installers; nothing changed.',
+                  file=sys.stderr)
+            return 64
+        if '--keep-standalone-t3' in options and {'--migrate-to-omarchy-installers', '--update'} & set(options):
+            print('--keep-standalone-t3 is a setup option on its own. Run ./install.sh --keep-standalone-t3; nothing changed.',
                   file=sys.stderr)
             return 64
         if ({'--with-keyd', '--without-keyd'} <= set(options)
@@ -2253,9 +2257,10 @@ def main(args):
             print('Choose only one option for each setup preference; nothing changed.', file=sys.stderr)
             return 64
         if '--help' in options or '-h' in options:
-            print('Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip] [--with-local-inference|--without-local-inference] [--with-git-filter-repo|--without-git-filter-repo] [--migrate-to-omarchy-installers]')
+            print('Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip] [--with-local-inference|--without-local-inference] [--with-git-filter-repo|--without-git-filter-repo] [--migrate-to-omarchy-installers] [--keep-standalone-t3]')
             print('Saved setup choices are reused. Explicit options change those choices.')
             print('--migrate-to-omarchy-installers moves apps installed another way to Omarchy\'s own installer, even after an earlier no. See docs/decisions/0014-offer-migration-to-omarchy-installers.md.')
+            print('--keep-standalone-t3 undoes the automatic t3-cli switch: it points ~/.local/bin/t3 back at the standalone t3 CLI it replaced and saves t3-cli as declined. See docs/decisions/0020-t3-code-through-omarchy-installer.md.')
             print('Blip is off unless --with-blip is set. --without-blip leaves an existing Blip install unchanged.')
             print('Local inference is off unless --with-local-inference is set. --without-local-inference records that preference as off. See docs/local-inference.md for package and model removal.')
             print('git-filter-repo is off unless --with-git-filter-repo is set. It installs per user with mise, never with sudo. --without-git-filter-repo records that preference as off and leaves an installed copy alone. See docs/git-filter-repo.md.')
