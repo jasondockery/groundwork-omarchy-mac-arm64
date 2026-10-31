@@ -2026,8 +2026,10 @@ def run_report(label, argv, deadline):
     the report's own failure.
     """
     try:
+        # A report's stray bytes must not fail the update: decode with replacement.
         process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, text=True, start_new_session=True)
+                                   stderr=subprocess.PIPE, text=True, errors='replace',
+                                   start_new_session=True)
     except OSError as error:
         print(f'{label} could not start ({error}); skipped.', file=sys.stderr)
         return None
@@ -2056,20 +2058,31 @@ def run_reports(source):
     """update-all's closing reports. Prints only what they find; never fails the update."""
     if os.environ.get(SKIP_REPORTS_ENV, '') not in ('', '0'):
         return
-    print(flush=True)
-    spoke = False
+    # The update has finished and its receipt is written. Nothing from here on,
+    # including a closed stdout, may turn that into a failure.
     try:
+        print(flush=True)
+        spoke = False
         for label, script, args, deadline in REPORTS:
             text = run_report(label, [sys.executable, str(source / 'scripts' / script), *args], deadline)
             # A report that failed has already said so.
             spoke = spoke or text != ''
             if text:
                 print(text, flush=True)
+        if not spoke:
+            print('Reports: no Omarchy offers, PATH shadows, or low disk space.', flush=True)
     except KeyboardInterrupt:
-        print('Reports cancelled. The update itself had already finished.', file=sys.stderr)
-        return
-    if not spoke:
-        print('Reports: no Omarchy offers, PATH shadows, or low disk space.')
+        report_note('Reports cancelled. The update itself had already finished.')
+    except Exception as error:  # noqa: BLE001 - reports never fail update-all
+        report_note(f'Reports stopped ({type(error).__name__}: {error}). The update itself had already finished.')
+
+
+def report_note(message):
+    """One line on stderr, unless stderr is gone too."""
+    try:
+        print(message, file=sys.stderr, flush=True)
+    except (OSError, ValueError):
+        pass
 
 
 def update(scope, check=False):

@@ -858,6 +858,40 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
         self.assertIn('Reports cancelled. The update itself had already finished.', errors.getvalue())
         self.assertNotIn('Update incomplete', errors.getvalue())
 
+    def test_a_report_printing_invalid_bytes_is_shown_and_does_not_fail(self):
+        script = self.root / 'bytes.py'
+        script.write_text('import sys\nsys.stdout.buffer.write(b"Disk: \\xff odd\\n")\n')
+        self.report_patch.stop()
+        reports = (('Disk report', str(script), (), 10),)
+        with patch.object(updater, 'REPORTS', reports), \
+                patch.object(updater, 'run_report', side_effect=lambda label, argv, deadline:
+                             self.real_run_report(label, [sys.executable, str(script)], deadline)), \
+                patch('sys.stdout', new_callable=io.StringIO) as output, \
+                patch('sys.stderr', new_callable=io.StringIO) as errors:
+            self.assertEqual(updater.main(['all']), 0)
+        self.assertIn('Disk: \ufffd odd', output.getvalue())
+        self.assertNotIn('Update incomplete', errors.getvalue())
+        self.assertEqual(json.loads((self.state / 'update-all-last-success.json').read_text())['result'], 'completed')
+
+    def test_a_report_runner_that_raises_or_a_closed_stdout_is_only_noted(self):
+        self.report_patch.stop()
+        for failure in (RuntimeError('fixture bug'), BrokenPipeError(32, 'Broken pipe')):
+            with self.subTest(failure=type(failure).__name__), \
+                    patch.object(updater, 'run_report', side_effect=failure), \
+                    patch('sys.stdout', new_callable=io.StringIO), \
+                    patch('sys.stderr', new_callable=io.StringIO) as errors:
+                self.assertEqual(updater.main(['all']), 0)
+            self.assertIn(f'Reports stopped ({type(failure).__name__}', errors.getvalue())
+            self.assertIn('The update itself had already finished.', errors.getvalue())
+            self.assertNotIn('Update incomplete', errors.getvalue())
+        # stdout already closed when the reports start.
+        closed = io.StringIO()
+        with patch('sys.stderr', new_callable=io.StringIO) as errors:
+            with patch('sys.stdout', closed):
+                closed.close()
+                updater.run_reports(self.source)
+        self.assertIn('Reports stopped (ValueError', errors.getvalue())
+
     def test_a_timed_out_report_leaves_no_process_behind(self):
         marker = self.root / 'child.pid'
         script = self.root / 'hang.py'
