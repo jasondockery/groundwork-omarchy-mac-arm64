@@ -1489,7 +1489,49 @@ def t3_sandboxed(binary, directory, args, deadline, unshare=()):
                env=t3_smoke_environment(directory), limit_core=True)
 
 
-def t3_work_dir(now=None):
+def remove_tree(path):
+    """shutil.rmtree that gets past read-only directories inside `path`.
+
+    Like TemporaryDirectory's cleanup: on permission denied it makes the
+    directory involved (and the one holding it, inside `path`) owner-writable
+    and retries once. It never follows a symbolic link and never changes
+    anything outside `path`. Any other error, or a second denial for the same
+    entry, is raised.
+    """
+    root = os.fspath(path)
+    retried = set()
+
+    def writable(directory):
+        try:
+            mode = os.lstat(directory).st_mode
+            if stat.S_ISDIR(mode):
+                os.chmod(directory, stat.S_IMODE(mode) | stat.S_IRWXU)
+        except OSError:
+            pass
+
+    def retry(_function, failed, error):
+        failed = os.fspath(failed)
+        if not isinstance(error, PermissionError) or failed in retried:
+            raise error
+        retried.add(failed)
+        if failed != root:
+            writable(os.path.dirname(failed))
+        writable(failed)
+        if os.path.isdir(failed) and not os.path.islink(failed):
+            rmtree(failed)
+        else:
+            os.unlink(failed)
+
+    def rmtree(target):
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(target, onexc=retry)
+        else:
+            shutil.rmtree(target, onerror=lambda function, failed, info: retry(function, failed, info[1]))
+
+    rmtree(root)
+
+
+def t3_work_dir(now=None, keep=None):
     """Where AppImages are copied and unpacked: disk, not a RAM-backed /tmp.
 
     An unpacked T3 Code is several hundred MB. ~/.cache/groundwork holds only
@@ -1501,6 +1543,11 @@ def t3_work_dir(now=None):
     (update() holds it; the setup adapter verifies the inherited lock), so no
     other check can be using one. A symbolic link here is refused, and the
     caller reports the check as not run.
+
+    `keep` is a path the caller is still using. The work directory holding it
+    is never swept, however old its timestamp looks: wall-clock time keeps
+    running through suspend, so an in-progress download can pass the age test.
+    A read-only folder inside a stale directory does not stop its removal.
     """
     directory = xdg_base('XDG_CACHE_HOME', Path.home() / '.cache') / 'groundwork'
     if directory.is_symlink():
@@ -1508,12 +1555,15 @@ def t3_work_dir(now=None):
                           'Replace it with a directory, then rerun update-all')
     directory.mkdir(parents=True, exist_ok=True)
     now = time.time() if now is None else now
+    kept = Path(os.path.realpath(keep)) if keep is not None else None
     for entry in sorted(directory.iterdir()):
         try:
             if (not entry.name.startswith('groundwork-t3-') or entry.is_symlink() or not entry.is_dir()
                     or now - entry.lstat().st_mtime < T3_STALE_WORK_SECONDS):
                 continue
-            shutil.rmtree(entry)
+            if kept is not None and kept.is_relative_to(os.path.realpath(entry)):
+                continue
+            remove_tree(entry)
         except OSError as error:
             print(f'Could not remove the stale T3 Code work directory {entry} ({error}).', file=sys.stderr, flush=True)
             continue
@@ -1540,7 +1590,8 @@ def t3_check_appimage(path, page, version=None, sha512=None, keep=None):
     With `keep`, a copy that passed is written there atomically. A SIGKILL is
     a skip, not a rejection: that is usually memory pressure.
     """
-    with tempfile.TemporaryDirectory(prefix='groundwork-t3-', dir=t3_work_dir()) as directory:
+    # `path` may sit in a groundwork-t3-download-* directory the caller still uses.
+    with tempfile.TemporaryDirectory(prefix='groundwork-t3-', dir=t3_work_dir(keep=path)) as directory:
         directory = os.path.realpath(directory)
         copy = Path(directory) / 'T3-Code.AppImage'
         shutil.copyfile(path, copy)
