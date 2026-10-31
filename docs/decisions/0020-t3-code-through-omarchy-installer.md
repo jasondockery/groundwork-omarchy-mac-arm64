@@ -36,7 +36,7 @@ The pkgs.omarchy.org `edge/aarch64` feed also builds `t3code-bin 0.1.5-1` and `t
   - The app's CLI, `~/.t3/bin/t3`, is an executable file.
   - `groundwork-t3-launcher.py running` finds neither T3 Code nor the bun CLI running. When either runs, or that is unsure, the run prints one line and changes nothing, and the next run tries again. An explicit `--migrate-to-omarchy-installers` gets the offer's refusal instead.
 
-  When any other guard fails, the offer or the notice runs as before. The switch writes the marker, swaps the link atomically as the migration does, keeps `~/.t3`, the configs and the caches, deletes nothing (the old builds are named as safe to delete), and prints the undo: `./install.sh --keep-standalone-t3`. That points the link back at the old target from the marker and saves `t3-cli` in `declined_migrations` through the usual setup save, so no later run switches it again. `./install.sh --migrate-to-omarchy-installers` clears that decline and moves the link back.
+  When any other guard fails, the offer or the notice runs as before. The switch swaps the link atomically as the migration does, then writes the marker (a failed swap writes none, so a later run can still switch), keeps `~/.t3`, the configs and the caches, deletes nothing (the old builds are named as safe to delete), and prints the undo: `./install.sh --keep-standalone-t3`. That points the link back at the old target from the marker, only when it resolves to an executable file inside `runtime/versions`, and saves `t3-cli` in `declined_migrations` through the usual setup save, so no later run switches it again. `./install.sh --migrate-to-omarchy-installers` clears that decline and moves the link back.
 
 ## Why not `t3code-nightly-bin`
 

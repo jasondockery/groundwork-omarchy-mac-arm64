@@ -454,6 +454,55 @@ class T3InstallTests(unittest.TestCase):
         self.assertNotIn('declined_migrations', self.saved())
         self.assert_kept(kept)
 
+    def test_a_failed_swap_records_nothing_and_a_later_run_switches(self):
+        build, kept = self.seed_switchable()
+        # mv fails only for the swap onto ~/.local/bin/t3.
+        real_mv = os.readlink(self.bin / 'mv') if (self.bin / 'mv').is_symlink() else None
+        self.assertIsNotNone(real_mv)
+        (self.bin / 'mv').unlink()
+        (self.bin / 'mv').write_text(f'#!/bin/sh\nfor last; do :; done\n'
+                                     f'[ "$last" = {str(self.link)!r} ] && exit 1\nexec {real_mv} "$@"\n')
+        (self.bin / 'mv').chmod(0o755)
+        result = self.run_install()
+        self.assertIn(f'{self.link} could not be pointed at {self.app_cli}. It still points at {build}.', result.stderr)
+        self.assertEqual(os.readlink(self.link), str(build))
+        self.assertFalse((self.state / 't3-cli-switched').exists())
+        self.assertEqual(sorted(path.name for path in self.link.parent.iterdir() if path.name.startswith('t3.groundwork-')), [])
+        # The fallback still offers the move.
+        self.assertIn('(migration t3-cli)', result.stdout)
+        (self.bin / 'mv').unlink()
+        (self.bin / 'mv').symlink_to(real_mv)
+        self.run_install()
+        self.assertEqual(os.readlink(self.link), str(self.app_cli))
+        self.assertEqual((self.state / 't3-cli-switched').read_text(), f'{build}\n')
+        self.assert_kept(kept)
+
+    def test_keep_standalone_t3_refuses_a_tampered_record(self):
+        build, kept = self.seed_switchable()
+        self.run_install()
+        self.assertEqual(os.readlink(self.link), str(self.app_cli))
+        versions = self.home / '.t3/runtime/versions'
+        outside = self.home / '.t3/evil'
+        outside.write_text('#!/bin/sh\necho evil\n')
+        outside.chmod(0o755)
+        escape = versions / 'escape'
+        escape.mkdir()
+        (escape / 't3').symlink_to(outside)
+        directory = versions / 'a-directory'
+        directory.mkdir()
+        not_executable = versions / 'plain' / 't3'
+        not_executable.parent.mkdir()
+        not_executable.write_text('#!/bin/sh\n')
+        for target in ('/bin/sh', f'{versions}/../../evil', str(escape / 't3'), str(directory), str(not_executable)):
+            with self.subTest(target=target):
+                (self.state / 't3-cli-switched').write_text(target + '\n')
+                result = self.run_install('--keep-standalone-t3', success=False)
+                self.assertIn('is not an executable build in', result.stderr)
+                self.assertEqual(os.readlink(self.link), str(self.app_cli))
+                self.assertNotIn('declined_migrations', self.saved())
+        self.assert_kept(kept)
+        self.assertTrue(build.is_file())
+
     def test_keep_standalone_t3_without_a_switch_changes_nothing(self):
         self.seed_app()
         self.seed_app_cli()

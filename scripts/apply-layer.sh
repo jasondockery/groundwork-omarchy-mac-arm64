@@ -1751,16 +1751,13 @@ fi
 # moves to Omarchy's installer with consent, or on its own in the one case
 # below, and never while T3 Code or that CLI runs. ~/.t3, ~/.config/t3code*,
 # and ~/.cache/t3code-updater stay.
-# Points ~/.local/bin/t3 at the app's CLI, in place of the link to $1. The old
-# target is recorded first: --keep-standalone-t3 restores it, and a link that
-# points back into the runtime builds after a switch is never switched again
-# without asking.
+# Points ~/.local/bin/t3 at the app's CLI, in place of the link to $1. After
+# the swap, the old target is recorded: --keep-standalone-t3 restores it, and a
+# link that points back into the runtime builds after a switch is never
+# switched again without asking. A failed swap records nothing, so a later run
+# can still switch; a failed record puts the old link back.
 switch_t3_link() {
   local old=$1 temporary
-  if ! python3 "$root/scripts/groundwork-update.py" marker write t3-cli-switched "$old"; then
-    echo "Could not record the old t3 link in $t3_switch_marker, so $t3_link was not changed." >&2
-    return 1
-  fi
   temporary="$t3_link.groundwork-$$"
   if ! ln -s "$t3_app_cli" "$temporary" || ! mv -Tf "$temporary" "$t3_link"; then
     rm -f -- "$temporary"
@@ -1769,6 +1766,15 @@ switch_t3_link() {
   fi
   if [[ $(readlink "$t3_link") != "$t3_app_cli" ]]; then
     echo "$t3_link does not point at $t3_app_cli after the change. Check it, then rerun." >&2
+    return 1
+  fi
+  if ! python3 "$root/scripts/groundwork-update.py" marker write t3-cli-switched "$old"; then
+    if ln -s "$old" "$temporary" && mv -Tf "$temporary" "$t3_link"; then
+      echo "Could not record the old t3 link in $t3_switch_marker, so $t3_link was put back on $old." >&2
+    else
+      rm -f -- "$temporary"
+      echo "Could not record the old t3 link in $t3_switch_marker. $t3_link now points at $t3_app_cli; to go back, point it at $old." >&2
+    fi
     return 1
   fi
   echo "t3 now runs T3 Code's bundled CLI ($t3_link -> $t3_app_cli)."
@@ -1870,8 +1876,10 @@ keep_standalone_t3_cli() {
     fi
     real=$(readlink -e -- "$old" 2>/dev/null) || real=""
     versions=$(readlink -e -- "$t3_home/runtime/versions" 2>/dev/null) || versions=""
-    if [[ $old != "$t3_home/runtime/versions/"* || -z $real || -z $versions || $real != "$versions/"* || ! -f $real ]]; then
-      t3_problem+="${t3_problem:+ }--keep-standalone-t3: the standalone t3 CLI $old is gone, so $t3_link was left on $t3_app_cli. Nothing was changed."
+    # The record is only trusted for an executable file inside the runtime
+    # builds, after every symlink and .. is resolved.
+    if [[ $old != "$t3_home/runtime/versions/"* || -z $real || -z $versions || $real != "$versions/"* || ! -f $real || ! -x $real ]]; then
+      t3_problem+="${t3_problem:+ }--keep-standalone-t3: the recorded t3 CLI $old is not an executable build in $t3_home/runtime/versions, so $t3_link was left on $t3_app_cli. Nothing was changed."
       return 1
     fi
     temporary="$t3_link.groundwork-$$"
