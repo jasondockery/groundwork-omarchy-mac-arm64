@@ -223,6 +223,11 @@ class UpdateTests(unittest.TestCase):
         self.report_patch.start()
         self.addCleanup(self.report_patch.stop)
         os.environ.pop(updater.SKIP_REPORTS_ENV, None)
+        # Nothing may replace the test process (issue #119); tests that hand off patch this.
+        reexec_patch = patch.object(updater, 'reexec', side_effect=AssertionError('unexpected re-exec'))
+        reexec_patch.start()
+        self.addCleanup(reexec_patch.stop)
+        os.environ.pop(updater.REEXEC_ENV, None)
 
     def command(self, *args):
         return subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL).strip()
@@ -937,6 +942,176 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
             time.sleep(0.1)
         else:
             self.fail(f'report child {pid} still running')
+    # Issue #119: a source update that changes the updater hands the rest of
+    # the run to the installed copy.
+
+    NEW_UPDATER_FIXTURE = """
+# Fixture: the updater a source update installs (issue #119). Machine commands
+# are logged, not run; git is real.
+_fixture_real_run = run
+def run(args, **kwargs):
+    if args[0] == 'git':
+        return _fixture_real_run(args, **kwargs)
+    with open(os.environ['FIXTURE_UPDATER_LOG'], 'a') as log:
+        log.write(json.dumps(args) + '\\n')
+    if args[:3] == ['flatpak', '--user', 'list']:
+        return 'com.bitwarden.desktop\\nio.freetubeapp.FreeTube'
+    return ''
+shutil.which = lambda name: '/fixture/' + name
+def update_t3(completed, warnings, source):
+    completed.append('New updater ran the app stages')
+def run_report(label, argv, deadline):
+    with open(os.environ['FIXTURE_UPDATER_LOG'], 'a') as log:
+        log.write(json.dumps(['report', label]) + '\\n')
+    return ''
+
+"""
+
+    def runtime(self):
+        return self.home / '.local/lib/groundwork/omarchy-update.py'
+
+    def release_new_updater(self):
+        """Push an updater with the fixture above; apply installs it, as setup's register does."""
+        text = (REPO / 'scripts/groundwork-update.py').read_text()
+        head, tail = text.rsplit("if __name__ == '__main__':", 1)
+        (self.seed / 'scripts/groundwork-update.py').write_text(
+            head + self.NEW_UPDATER_FIXTURE + "if __name__ == '__main__':" + tail)
+        self.commit(self.seed)
+        self.command('git', '-C', str(self.seed), 'push', 'origin', 'main')
+        previous = self.run_command
+
+        def apply_installs_the_updater(args, **kwargs):
+            result = previous(args, **kwargs)
+            if args[0] == 'bash' and str(args[1]).endswith('apply-layer.sh'):
+                self.runtime().write_text((self.source / 'scripts/groundwork-update.py').read_text())
+            return result
+        self.run_patch.stop()
+        self.run_patch = patch.object(updater, 'run', side_effect=apply_installs_the_updater)
+        self.run_patch.start()
+        self.addCleanup(self.run_patch.stop)
+
+    def test_a_new_updater_runs_the_remaining_stages_in_the_same_run(self):
+        self.release_new_updater()
+        log = self.root / 'new-updater.jsonl'
+        handed = []
+
+        class Replaced(BaseException):
+            pass
+
+        def fake_exec(argv, env):
+            # What execve would run: the installed updater, in this process's
+            # place, with the lock's descriptor still open.
+            handed.append((argv, env))
+            fd = int(env['GROUNDWORK_OMARCHY_LOCK_FD'])
+            child = subprocess.run(argv, env=dict(env, FIXTURE_UPDATER_LOG=str(log)), pass_fds=(fd,),
+                                   capture_output=True, text=True, timeout=60)
+            handed.append(child)
+            raise Replaced
+        with patch.object(updater, 'reexec', side_effect=fake_exec), \
+                patch('sys.stdout', new_callable=io.StringIO) as output, \
+                patch('sys.stderr', new_callable=io.StringIO), self.assertRaises(Replaced):
+            updater.update('all')
+        self.assertEqual(len(handed), 2)
+        (argv, env), child = handed
+        self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
+        self.assertEqual(argv[:3], [sys.executable, str(self.runtime()), updater.RESUME_COMMAND])
+        self.assertEqual(env[updater.REEXEC_ENV], '1')
+        handoff = json.loads(argv[3])
+        self.assertEqual((handoff['scope'], handoff['source'], handoff['before']),
+                         ('all', str(self.source), self.initial))
+        self.assertIn('This run installed a new updater; continuing with it.', output.getvalue())
+        # The old code stopped after apply; the app stages ran in the new code.
+        self.assertFalse(any(call[0] == 'flatpak' for call in self.machine_calls))
+        self.assertFalse(any('groundwork-t3-launcher.py' in ' '.join(call) for call in self.machine_calls))
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'io.freetubeapp.FreeTube'], calls)
+        self.assertTrue(any(call[-1] == 'reconcile' for call in calls))
+        # The closing reports ran in the new code, once each, and not in the old.
+        self.assertEqual([call[1] for call in calls if call[0] == 'report'],
+                         [label for label, *_ in updater.REPORTS])
+        self.assertEqual(self.report_calls, [])
+        receipt = json.loads((self.state / 'update-all-last-success.json').read_text())
+        self.assertEqual(receipt['result'], 'completed')
+        self.assertEqual(receipt['completed'][:3], ['Omarchy update command completed',
+                                                    'Groundwork configuration applied',
+                                                    'New updater ran the app stages'])
+        self.assertEqual(receipt['source_after'], self.git('rev-parse', 'HEAD'))
+        self.assertEqual(self.git('for-each-ref', 'refs/groundwork'), '')
+        self.assertNotIn('continuing with it', child.stdout)
+
+    def test_an_installed_updater_without_resume_finishes_in_this_process(self):
+        # A downgrade: setup installed an updater from before the hand-off. It
+        # has the marker but not the resume-update entry, so this run finishes.
+        self.candidate()
+        older = f'#!/usr/bin/env python3\n{updater.MARKER}\nimport sys\nsys.exit(64)\n'
+        previous = self.run_command
+
+        def apply_installs_an_older_updater(args, **kwargs):
+            result = previous(args, **kwargs)
+            if args[0] == 'bash' and str(args[1]).endswith('apply-layer.sh'):
+                self.runtime().write_text(older)
+            return result
+        with patch.object(updater, 'run', side_effect=apply_installs_an_older_updater), \
+                patch('sys.stdout', new_callable=io.StringIO) as output:
+            self.assertEqual(updater.update('all'), 'completed')
+        self.assertEqual(self.runtime().read_text(), older)
+        self.assertNotIn('continuing with it', output.getvalue())
+        self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'io.freetubeapp.FreeTube'], self.machine_calls)
+        self.assertEqual(len(self.report_calls), len(updater.REPORTS))
+        # The same file with the entry line would take over.
+        self.runtime().write_text(older + updater.RESUME_ENTRY + '\n')
+        self.assertEqual(updater.newer_updater(), self.runtime())
+
+    def test_an_unchanged_updater_finishes_in_this_process(self):
+        self.candidate()
+        with patch('sys.stdout', new_callable=io.StringIO):
+            self.assertEqual(updater.update('all'), 'completed')
+        self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'io.freetubeapp.FreeTube'], self.machine_calls)
+
+    def test_a_handed_off_run_never_hands_off_again(self):
+        self.runtime().write_text(self.runtime().read_text() + '\n# a different updater\n')
+        self.assertIsNotNone(updater.newer_updater())
+        with patch.dict(os.environ, {updater.REEXEC_ENV: '1'}):
+            self.assertIsNone(updater.newer_updater())
+        # The resumed run itself: lock held and inherited, a changed installed
+        # updater, and still no second exec.
+        candidate = self.git('rev-parse', 'HEAD')
+        self.git('update-ref', 'refs/groundwork/update/fixture', candidate)
+        handoff = dict(schema=updater.HANDOFF_SCHEMA, scope='all', source=str(self.source), before=self.initial,
+                       candidate=candidate, candidate_ref='refs/groundwork/update/fixture',
+                       completed=['Omarchy update command completed', 'Groundwork configuration applied'],
+                       warnings=[])
+        with updater.transaction() as lock, \
+                patch.dict(os.environ, {'GROUNDWORK_OMARCHY_LOCK_FD': str(lock.fileno()), updater.REEXEC_ENV: '1'}), \
+                patch('sys.stdout', new_callable=io.StringIO):
+            self.assertEqual(updater.main([updater.RESUME_COMMAND, json.dumps(handoff)]), 0)
+        receipt = json.loads((self.state / 'update-all-last-success.json').read_text())
+        self.assertEqual(receipt['completed'][:2], handoff['completed'])
+        self.assertIn('FreeTube user Flatpak update command completed', receipt['completed'])
+        self.assertEqual(self.git('for-each-ref', 'refs/groundwork'), '')
+
+    def test_resume_needs_the_lock_and_a_valid_handoff(self):
+        with self.assertRaisesRegex(updater.UpdateError, 'transaction lock'):
+            updater.main([updater.RESUME_COMMAND, '{}'])
+        bad = [{}, dict(schema=2), dict(schema=1, scope='all', source=str(self.source), before='a', candidate='b',
+                                         candidate_ref='refs/heads/main', completed=[], warnings=[])]
+        with updater.transaction() as lock, patch.dict(os.environ, {'GROUNDWORK_OMARCHY_LOCK_FD': str(lock.fileno())}):
+            for value in bad:
+                with self.assertRaisesRegex(updater.UpdateError, 'hand-off'):
+                    updater.main([updater.RESUME_COMMAND, json.dumps(value)])
+            with self.assertRaisesRegex(updater.UpdateError, 'hand-off'):
+                updater.main([updater.RESUME_COMMAND, 'not json'])
+        self.assertEqual(self.machine_calls, [])
+
+    def test_a_failed_exec_finishes_with_the_previous_updater_and_warns(self):
+        self.release_new_updater()
+        with patch.object(updater, 'reexec', side_effect=OSError('exec format error')), \
+                patch('sys.stdout', new_callable=io.StringIO), patch('sys.stderr', new_callable=io.StringIO):
+            self.assertEqual(updater.update('all'), 'completed_with_warnings')
+        receipt = json.loads((self.state / 'update-all-last-success.json').read_text())
+        self.assertIn('The new updater could not take over (exec format error)', receipt['warnings'][0])
+        self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'io.freetubeapp.FreeTube'], self.machine_calls)
+        self.assertEqual(self.git('for-each-ref', 'refs/groundwork'), '')
 
     def enable_saved_blip(self):
         saved = json.loads(self.config.read_text())

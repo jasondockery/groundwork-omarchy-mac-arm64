@@ -110,6 +110,22 @@ REPORTS = (
 )
 # Set to anything but empty or 0 to skip all of them.
 SKIP_REPORTS_ENV = 'GROUNDWORK_SKIP_REPORTS'
+# Issue #119. When setup installs an updater that differs from the running one,
+# the stages after apply continue in the installed copy: the same process
+# re-executes it once with RESUME_COMMAND, the update lock's descriptor, and the
+# run so far (HANDOFF_SCHEMA). Keep that entry point and schema stable; an
+# older updater hands off to whatever this file becomes.
+RESUME_COMMAND = 'resume-update'
+# How an updater that reads the hand-off declares it. newer_updater() looks for
+# this exact line, so keep it verbatim.
+RESUME_ENTRY = "RESUME_COMMAND = 'resume-update'"
+HANDOFF_SCHEMA = 1
+REEXEC_ENV = 'GROUNDWORK_UPDATE_REEXEC'
+# The code this process started with. Setup may replace the file underneath it.
+try:
+    RUNNING_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+except OSError:
+    RUNNING_SHA256 = None
 
 
 class UpdateError(Exception):
@@ -2152,6 +2168,157 @@ def report_note(message):
         print(message, file=sys.stderr, flush=True)
     except (OSError, ValueError):
         pass
+def installed_updater():
+    return Path.home() / '.local/lib/groundwork/omarchy-update.py'
+
+
+def newer_updater():
+    """The installed updater when it is not the code this process started with, else None.
+
+    Never after a hand-off (REEXEC_ENV), so a run re-executes at most once. An
+    installed updater without RESUME_COMMAND (for example after a checkout is
+    moved back to an older release) cannot take over, so this run finishes.
+    """
+    if os.environ.get(REEXEC_ENV) or RUNNING_SHA256 is None:
+        return None
+    path = installed_updater()
+    try:
+        check_path(path)
+        if path.is_symlink() or not path.is_file():
+            return None
+        data = path.read_bytes()
+    except (UpdateError, OSError):
+        return None
+    if MARKER.encode() not in data or hashlib.sha256(data).hexdigest() == RUNNING_SHA256:
+        return None
+    if RESUME_ENTRY.encode() not in data:
+        return None
+    return path
+
+
+def reexec(argv, env):
+    """Replace this process. Tests patch this."""
+    os.execve(argv[0], argv, env)
+
+
+def hand_off(successor, lock, handoff):
+    """Continue this run in `successor`, keeping the update lock. Returns only if exec fails."""
+    fd = lock.fileno()
+    os.set_inheritable(fd, True)
+    environment = dict(os.environ, GROUNDWORK_OMARCHY_LOCK_FD=str(fd), **{REEXEC_ENV: '1'})
+    print('This run installed a new updater; continuing with it.', flush=True)
+    sys.stderr.flush()
+    reexec([sys.executable, str(successor), RESUME_COMMAND, json.dumps(handoff)], environment)
+
+
+def report_incomplete(source, before, completed):
+    try:
+        observed = git(source, 'rev-parse', 'HEAD')
+    except (UpdateError, OSError):
+        observed = 'unknown; inspect git status'
+    print(f'Update incomplete. Source started at {before}; current HEAD is {observed}.', file=sys.stderr)
+    for stage in completed:
+        print(f'Completed: {stage}', file=sys.stderr)
+    print('Prior successful receipts were preserved. Repair the reported stage, then rerun the same command.', file=sys.stderr)
+
+
+def finish_update(scope, source, before, candidate, candidate_ref, completed, warnings, cleaned):
+    """The stages after apply, then the receipt. `cleaned()` is called once the candidate ref is gone."""
+    if scope == 'all':
+        update_t3(completed, warnings, source)
+        try:
+            run([sys.executable, str(source / 'scripts/groundwork-t3-launcher.py'), 'reconcile'],
+                capture=False)
+        except (UpdateError, OSError) as error:
+            warnings.append(f'T3 Code launcher check failed: {error}')
+        if shutil.which('flatpak'):
+            # Groundwork's user Flatpaks only. Other installed apps stay untouched.
+            installed = set(run(['flatpak', '--user', 'list', '--app', '--columns=application']).splitlines())
+            for app, label in (
+                ('com.bitwarden.desktop', 'Bitwarden'),
+                ('io.freetubeapp.FreeTube', 'FreeTube'),
+            ):
+                if app not in installed:
+                    # A native Bitwarden desktop is the expected state, not a skip.
+                    if app != 'com.bitwarden.desktop' or not bitwarden_package_command():
+                        completed.append(f'{label} user Flatpak not installed; skipped')
+                    continue
+                print(f'Updating the installed {label} user Flatpak…', flush=True)
+                try:
+                    run(['flatpak', '--user', 'update', '--noninteractive', app],
+                        deadline=600, capture=False)
+                except (UpdateError, OSError) as error:
+                    if app != 'io.freetubeapp.FreeTube':
+                        raise
+                    message = f'FreeTube user Flatpak update failed: {error}'
+                    print(message, file=sys.stderr, flush=True)
+                    warnings.append(message)
+                    completed.append('FreeTube user Flatpak update failed')
+                    continue
+                completed.append(f'{label} user Flatpak update command completed')
+        else:
+            completed.append('User Flatpak tooling not installed; skipped')
+        update_blip(completed)
+    git(source, 'update-ref', '-d', candidate_ref, candidate)
+    cleaned()
+    result = 'completed_with_warnings' if warnings else 'completed'
+    receipt = dict(schema=1, scope=scope, source_before=before, source_after=candidate,
+                   completed=completed, result=result, ended_at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+    if warnings:
+        receipt['warnings'] = warnings
+    atomic_write(STATE / f'{"update-all" if scope == "all" else "groundwork-update"}-last-success.json', json.dumps(receipt, indent=2) + '\n')
+    print('\n' + '\n'.join(completed))
+    if scope == 'layer':
+        print('Routine app and system upgrades were not requested. Use update-all for those.')
+    for warning in warnings:
+        print(f'Warning: {warning}', file=sys.stderr)
+    if scope == 'all':
+        # After the receipt, in whichever updater finished the run. Never raises.
+        run_reports(source)
+    return result
+
+
+def valid_handoff(value):
+    strings = lambda items: isinstance(items, list) and all(isinstance(item, str) for item in items)
+    return (isinstance(value, dict) and value.get('schema') == HANDOFF_SCHEMA
+            and value.get('scope') in ('all', 'layer')
+            and all(isinstance(value.get(key), str) and value[key]
+                    for key in ('source', 'before', 'candidate', 'candidate_ref'))
+            and value['candidate_ref'].startswith('refs/groundwork/update/')
+            and strings(value.get('completed')) and strings(value.get('warnings')))
+
+
+def resume_update(text):
+    """The rest of a run an older updater handed off (RESUME_COMMAND). Needs the inherited lock."""
+    verify_lock()
+    try:
+        handoff = json.loads(text)
+    except ValueError:
+        handoff = None
+    if not valid_handoff(handoff):
+        raise UpdateError('The hand-off from the previous updater is not one this updater reads. Rerun the same command.')
+    source = Path(handoff['source'])
+    if Path(settings()['source']) != source:
+        raise UpdateError('The hand-off names a different checkout than the saved setup. Rerun the same command.')
+    scope, before, candidate, candidate_ref = (handoff[key] for key in ('scope', 'before', 'candidate', 'candidate_ref'))
+    completed, warnings = handoff['completed'], handoff['warnings']
+    candidate_cleaned = False
+
+    def cleaned():
+        nonlocal candidate_cleaned
+        candidate_cleaned = True
+    try:
+        result = finish_update(scope, source, before, candidate, candidate_ref, completed, warnings, cleaned)
+    except BaseException:
+        report_incomplete(source, before, completed)
+        raise
+    finally:
+        if not candidate_cleaned:
+            try:
+                git(source, 'update-ref', '-d', candidate_ref, candidate)
+            except (UpdateError, OSError) as error:
+                print(f'Candidate reference cleanup also failed: {error}', file=sys.stderr)
+    return 1 if result == 'completed_with_warnings' else 0
 
 
 def update(scope, check=False):
@@ -2211,66 +2378,23 @@ def update(scope, check=False):
                 value['keyd_sha256'] = hashlib.sha256((source / 'keyd/default.conf').read_bytes()).hexdigest()
                 atomic_write(CONFIG, json.dumps(value, indent=2) + '\n')
             completed.append('Groundwork configuration applied')
-            if scope == 'all':
-                update_t3(completed, warnings, source)
+            successor = newer_updater()
+            if successor:
+                handoff = dict(schema=HANDOFF_SCHEMA, scope=scope, source=str(source), before=before,
+                               candidate=candidate, candidate_ref=candidate_ref,
+                               completed=completed, warnings=warnings)
                 try:
-                    run([sys.executable, str(source / 'scripts/groundwork-t3-launcher.py'), 'reconcile'],
-                        capture=False)
-                except (UpdateError, OSError) as error:
-                    warnings.append(f'T3 Code launcher check failed: {error}')
-                if shutil.which('flatpak'):
-                    # Groundwork's user Flatpaks only. Other installed apps stay untouched.
-                    installed = set(run(['flatpak', '--user', 'list', '--app', '--columns=application']).splitlines())
-                    for app, label in (
-                        ('com.bitwarden.desktop', 'Bitwarden'),
-                        ('io.freetubeapp.FreeTube', 'FreeTube'),
-                    ):
-                        if app not in installed:
-                            # A native Bitwarden desktop is the expected state, not a skip.
-                            if app != 'com.bitwarden.desktop' or not bitwarden_package_command():
-                                completed.append(f'{label} user Flatpak not installed; skipped')
-                            continue
-                        print(f'Updating the installed {label} user Flatpak…', flush=True)
-                        try:
-                            run(['flatpak', '--user', 'update', '--noninteractive', app],
-                                deadline=600, capture=False)
-                        except (UpdateError, OSError) as error:
-                            if app != 'io.freetubeapp.FreeTube':
-                                raise
-                            message = f'FreeTube user Flatpak update failed: {error}'
-                            print(message, file=sys.stderr, flush=True)
-                            warnings.append(message)
-                            completed.append('FreeTube user Flatpak update failed')
-                            continue
-                        completed.append(f'{label} user Flatpak update command completed')
-                else:
-                    completed.append('User Flatpak tooling not installed; skipped')
-                update_blip(completed)
-            git(source, 'update-ref', '-d', candidate_ref, candidate)
-            candidate_cleaned = True
-            result = 'completed_with_warnings' if warnings else 'completed'
-            receipt = dict(schema=1, scope=scope, source_before=before, source_after=candidate,
-                           completed=completed, result=result, ended_at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
-            if warnings:
-                receipt['warnings'] = warnings
-            atomic_write(STATE / f'{"update-all" if scope == "all" else "groundwork-update"}-last-success.json', json.dumps(receipt, indent=2) + '\n')
-            print('\n' + '\n'.join(completed))
-            if scope == 'layer':
-                print('Routine app and system upgrades were not requested. Use update-all for those.')
-            for warning in warnings:
-                print(f'Warning: {warning}', file=sys.stderr)
-            if scope == 'all':
-                run_reports(source)
-            return result
+                    hand_off(successor, lock, handoff)
+                except OSError as error:
+                    warnings.append(f'The new updater could not take over ({error}); this run finished with the '
+                                    'previous one. Rerun the same command to use the new one.')
+
+            def cleaned():
+                nonlocal candidate_cleaned
+                candidate_cleaned = True
+            return finish_update(scope, source, before, candidate, candidate_ref, completed, warnings, cleaned)
         except BaseException:
-            try:
-                observed = git(source, 'rev-parse', 'HEAD')
-            except (UpdateError, OSError):
-                observed = 'unknown; inspect git status'
-            print(f'Update incomplete. Source started at {before}; current HEAD is {observed}.', file=sys.stderr)
-            for stage in completed:
-                print(f'Completed: {stage}', file=sys.stderr)
-            print('Prior successful receipts were preserved. Repair the reported stage, then rerun the same command.', file=sys.stderr)
+            report_incomplete(source, before, completed)
             raise
         finally:
             if candidate and not candidate_cleaned:
@@ -2285,6 +2409,8 @@ def main(args):
     if args and args[0] == 'verify-lock' and len(args) == 1:
         verify_lock()
         return 0
+    if args and args[0] == RESUME_COMMAND and len(args) == 2:
+        return resume_update(args[1])
     if args and args[0] == 't3-check-installed' and len(args) == 2 and args[1].isdigit():
         # Setup and the t3-cli migration, after omarchy-install-ai-t3-code
         # (decision 0020). Runs inside apply-layer.sh's transaction. The page
