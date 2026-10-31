@@ -1056,6 +1056,10 @@ else
   effective_t3="$(command -v t3 || true)"
   if [[ -z $effective_t3 || ! $effective_t3 -ef $t3_link ]]; then
     printf 'T3 command shadowing or missing PATH entry: effective=%s, installed=%s\n' "${effective_t3:-none}" "$t3_link" >&2
+    # The PATH-shadow report (issue #107) names the shell file that puts the
+    # winning directory first. It only reads, and it cannot change this outcome.
+    T3CODE_INSTALL_BIN_DIR=$(dirname "$t3_link") timeout --kill-after=5s 30 \
+      python3 "$root/scripts/groundwork-path-shadow.py" t3 >&2 || true
     printf 'Prepend %q to PATH in your user shell configuration, start a fresh shell, and rerun ./install.sh.\n' "$(dirname "$t3_link")" >&2
     echo "The existing npm/system installation was preserved; remove it only through its original package manager if desired." >&2
     exit 1

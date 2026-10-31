@@ -113,6 +113,32 @@ class DiskReport(unittest.TestCase):
         self.assertEqual(bad.returncode, 2)
         self.assertTrue((self.home / '.cache/yay/pkg/a').exists())
 
+    def test_brief_speaks_only_under_or_near_the_floor(self):
+        self.assertEqual(report.brief(free_bytes=50 * report.GIB), '')
+        self.assertEqual(report.brief(free_bytes=report.BRIEF_NEAR_FREE), '')
+        near = report.brief(free_bytes=12 * report.GIB)
+        self.assertIn('12.0 GiB free on /, close to the 10.0 GiB Omarchy needs to update.', near)
+        under = report.brief(free_bytes=8 * report.GIB)
+        self.assertIn('8.0 GiB free on /, under the 10.0 GiB Omarchy needs to update.', under)
+        self.assertIn('groundwork-disk-report.py', under)
+        self.assertEqual(len(under.splitlines()), 1)
+
+    def test_brief_cli_walks_nothing_and_runs_nothing(self):
+        for free, expected in ((50 * report.GIB, ''), (5 * report.GIB, 'under the 10.0 GiB')):
+            out = io.StringIO()
+            with patch.object(report, 'run', side_effect=AssertionError('ran a command')), \
+                    patch.object(report, 'tree_size', side_effect=AssertionError('walked a tree')), \
+                    patch.object(report.shutil, 'disk_usage', return_value=type('U', (), {'free': free})()), \
+                    patch.object(sys, 'stdout', out):
+                self.assertEqual(report.main(['--brief']), 0)
+            if expected:
+                self.assertIn(expected, out.getvalue())
+            else:
+                self.assertEqual(out.getvalue(), '')
+        bad = subprocess.run([sys.executable, '-I', str(SCRIPT), '--brief', 'extra'],
+                             env={'PATH': '/nonexistent', 'HOME': str(self.home)}, capture_output=True, text=True)
+        self.assertEqual(bad.returncode, 2)
+
     def test_no_dust_in_packages(self):
         names = [l.strip() for l in (REPO / 'packages.txt').read_text().splitlines()]
         self.assertNotIn('dust', names)

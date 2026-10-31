@@ -14,10 +14,10 @@ Checked 2026-10-31 on the M1 mini (`omarchy-dev` 4.0.0.r7442). Part of #103.
 
 - `dust` is removed from `packages.txt`. It conflicts with Omarchy's migration. `packages.txt` is a reference list that no script installs from, so Groundwork never installed `dust` and has nothing to uninstall. If you installed it yourself, `omarchy pkg drop dust` removes it. Nothing offers or forces that (decision 0014).
 - `scripts/groundwork-disk-report.py` measures the yay cache, the journal, and the Flatpak installations, and prints the command to run for each. It also shows the pacman cache and free space for context. It runs only read-only commands (`journalctl --disk-usage`) and never deletes.
+- `update-all` runs `groundwork-disk-report.py --brief` after the update. That checks only free space on `/` and prints one line when it is under, or within 5 GiB of, Omarchy's 10 GiB floor, and nothing otherwise. It cannot fail the update; `GROUNDWORK_SKIP_REPORTS=1` skips it.
 
 ## Not done
 
-- Hooking the report into `update-all`: `scripts/groundwork-update.py` belongs to another lane. Follow-up.
 - Any automatic deletion.
 
 Recheck on 2026-11-30, or when Omarchy adds its own journal or Flatpak cleanup.

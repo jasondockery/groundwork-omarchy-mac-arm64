@@ -99,6 +99,16 @@ HEARTBEAT_SECONDS = 30
 # On a deadline or an interrupt, the stage gets SIGINT and this long to clean
 # up before SIGTERM and then SIGKILL.
 INTERRUPT_GRACE_SECONDS = 10
+# Report-only tools update-all runs once it has finished (issues #18, #107 and
+# #103): (label, script under scripts/, arguments, seconds). Each prints nothing
+# when there is nothing to report. None of them can fail the update.
+REPORTS = (
+    ('Omarchy feed watch', 'omarchy-feed-watch.py', ('report', '--brief'), 60),
+    ('PATH shadow check', 'groundwork-path-shadow.py', ('--brief',), 30),
+    ('Disk report', 'groundwork-disk-report.py', ('--brief',), 15),
+)
+# Set to anything but empty or 0 to skip all of them.
+SKIP_REPORTS_ENV = 'GROUNDWORK_SKIP_REPORTS'
 
 
 class UpdateError(Exception):
@@ -2009,6 +2019,59 @@ def syncthing_pending():
         return f'Syncthing may be unfinished: {path} cannot be read. Inspect it, then rerun.'
 
 
+def run_report(label, argv, deadline):
+    """Stdout of one report, or None after saying on stderr why it has none.
+
+    Its own session, so a timeout stops anything it started. Never raises for
+    the report's own failure.
+    """
+    try:
+        process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True, start_new_session=True)
+    except OSError as error:
+        print(f'{label} could not start ({error}); skipped.', file=sys.stderr)
+        return None
+    try:
+        stdout, stderr = process.communicate(timeout=deadline)
+    except subprocess.TimeoutExpired:
+        print(f'{label} did not finish within {deadline} seconds; skipped.', file=sys.stderr)
+        return None
+    finally:
+        if process.returncode is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            process.communicate()
+    if process.returncode:
+        detail = (stderr or '').strip().splitlines()
+        sys.stdout.flush()
+        print(f'{label} failed (exit {process.returncode}); skipped.'
+              + (f' {detail[-1]}' if detail else ''), file=sys.stderr)
+        return None
+    return stdout.strip()
+
+
+def run_reports(source):
+    """update-all's closing reports. Prints only what they find; never fails the update."""
+    if os.environ.get(SKIP_REPORTS_ENV, '') not in ('', '0'):
+        return
+    print(flush=True)
+    spoke = False
+    try:
+        for label, script, args, deadline in REPORTS:
+            text = run_report(label, [sys.executable, str(source / 'scripts' / script), *args], deadline)
+            # A report that failed has already said so.
+            spoke = spoke or text != ''
+            if text:
+                print(text, flush=True)
+    except KeyboardInterrupt:
+        print('Reports cancelled. The update itself had already finished.', file=sys.stderr)
+        return
+    if not spoke:
+        print('Reports: no Omarchy offers, PATH shadows, or low disk space.')
+
+
 def update(scope, check=False):
     if platform.system() != 'Linux' or platform.machine() != 'aarch64' or not shutil.which('omarchy'):
         raise UpdateError('This updater requires Apple Silicon Omarchy. Use your platform entry point on other systems.')
@@ -2114,6 +2177,8 @@ def update(scope, check=False):
                 print('Routine app and system upgrades were not requested. Use update-all for those.')
             for warning in warnings:
                 print(f'Warning: {warning}', file=sys.stderr)
+            if scope == 'all':
+                run_reports(source)
             return result
         except BaseException:
             try:
@@ -2322,6 +2387,8 @@ def main(args):
         if scope == 'all':
             print('Also run omarchy update, update listed Omarchy shell plugins, check T3 Code\'s staged and installed builds on kernels with pages larger than 4 KiB, and update the installed Bitwarden and FreeTube user Flatpaks.')
             print(f'When Blip is opted in, update {BLIP_ID} only in an interactive terminal, without --yes, so its diff can be reviewed.')
+            print('Finally, report Omarchy offers for apps Groundwork installs, managed commands shadowed on PATH, and free space '
+                  f'under or near Omarchy\'s 10 GiB update floor. These never fail the update; set {SKIP_REPORTS_ENV}=1 to skip them.')
         else:
             print('Listed shell plugins are installed or retired. Existing plugin checkouts stay at their current revisions.')
         print('--check fetches and displays repository changes without advancing the checkout or applying settings.')
