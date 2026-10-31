@@ -582,13 +582,9 @@ privileged_changes_needed() {
   if ! command -v flatpak >/dev/null; then
     return 0
   fi
-  # Omarchy's T3 Code installer adds fuse3, so a new install needs sudo. So
-  # does a t3-cli migration that installs the app (setup only; updates never
-  # migrate), so the one prompt up front covers it.
+  # Omarchy's T3 Code installer adds fuse3, so a new install needs sudo.
+  # (Setup always asks once up front, which covers a t3-cli migration.)
   t3_install_needed && return 0
-  if [[ $updating -eq 0 && ! -e $t3_appimage ]] && t3_cli_installed; then
-    return 0
-  fi
   # A missing Bitwarden desktop becomes Omarchy's package when the feed has it.
   if ! command -v bitwarden >/dev/null && ! bitwarden_flatpak_installed && bitwarden_native_available; then
     return 0

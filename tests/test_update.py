@@ -1555,6 +1555,65 @@ class T3GateTests(unittest.TestCase):
             self.assertTrue(kwargs['cwd'].startswith(str(work) + '/groundwork-t3-'), kwargs['cwd'])
         self.assertEqual(list(work.iterdir()), [])
 
+    def test_stale_work_directories_from_a_killed_check_are_swept(self):
+        work = self.home / '.cache/groundwork'
+        work.mkdir(parents=True)
+        old = time.time() - updater.T3_STALE_WORK_SECONDS - 60
+        def make(name, age=old):
+            path = work / name
+            (path / 'squashfs-root').mkdir(parents=True)
+            (path / 'squashfs-root/t3code').write_bytes(b'unpacked')
+            os.utime(path, (age, age))
+            return path
+        stale = make('groundwork-t3-abc123')
+        stale_download = make('groundwork-t3-download-def456')
+        fresh = make('groundwork-t3-fresh', age=time.time())
+        other = make('other-old')
+        outside = self.root / 'outside-groundwork-t3-target'
+        (outside / 'keep').mkdir(parents=True)
+        os.utime(outside, (old, old))
+        link = work / 'groundwork-t3-link'
+        link.symlink_to(outside)
+        os.utime(link, (old, old), follow_symlinks=False)
+        plain = work / 'groundwork-t3-file'
+        plain.write_text('not a directory')
+        os.utime(plain, (old, old))
+        self.install(fake_appimage())
+        completed, warnings, output = self.gate()
+        self.assertEqual((completed, warnings), ([f'T3 Code {INSTALLED} checked'], []))
+        self.assertFalse(stale.exists())
+        self.assertFalse(stale_download.exists())
+        self.assertIn(f'Removed the stale T3 Code work directory {stale}.', output)
+        self.assertTrue((fresh / 'squashfs-root/t3code').exists())
+        self.assertTrue((other / 'squashfs-root/t3code').exists())
+        self.assertTrue(link.is_symlink())
+        self.assertTrue((outside / 'keep').is_dir())
+        self.assertEqual(plain.read_text(), 'not a directory')
+        self.assertEqual(sorted(path.name for path in work.iterdir()),
+                         ['groundwork-t3-file', 'groundwork-t3-fresh', 'groundwork-t3-link', 'other-old'])
+
+    def test_a_symlinked_work_directory_is_refused(self):
+        target = self.root / 'elsewhere'
+        target.mkdir()
+        (target / 'groundwork-t3-old').mkdir()
+        old = time.time() - updater.T3_STALE_WORK_SECONDS - 60
+        os.utime(target / 'groundwork-t3-old', (old, old))
+        (self.home / '.cache').mkdir(parents=True)
+        (self.home / '.cache/groundwork').symlink_to(target)
+        self.install(fake_appimage())
+        self.stage(fake_appimage(CANDIDATE, smoke='crash'))
+        completed, warnings, _ = self.gate()
+        self.assertEqual(completed, [])
+        self.assertEqual(len(warnings), 2)
+        for warning in warnings:
+            self.assertIn('is a symbolic link', warning)
+        self.assertFalse(self.calls)
+        self.assertTrue((target / 'groundwork-t3-old').is_dir())
+        self.assertEqual([path.name for path in target.iterdir()], ['groundwork-t3-old'])
+        # Nothing was checked, so nothing was rejected or removed from pending.
+        self.assertFalse((self.state / 't3-rejected.json').exists())
+        self.assertTrue((self.pending / 'update-info.json').exists())
+
     def test_only_the_extraction_drops_ipc_and_uts(self):
         self.install(fake_appimage())
         self.gate()
