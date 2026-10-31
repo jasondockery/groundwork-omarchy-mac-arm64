@@ -1,4 +1,4 @@
-# 0018. T3 Code through Omarchy's installer, not the feed packages
+# 0020. T3 Code through Omarchy's installer, not the feed packages
 
 Checked 2026-10-31 on the M1 mini (16 KiB pages, linux 7.2.11, `omarchy-dev 4.0.0.r7442.gbda3aaf-1`). This decision supersedes the T3 parts of issues #13 and #29: the official bun-compiled `t3` CLI from `https://t3.codes/install.sh`, its pinned known-good build, the `update-all` candidate check and smoke run for that CLI, and its repair path. Those stay in force, as described in the [README](../../README.md) and [docs/apps/t3-code.md](../apps/t3-code.md), until the implementation in issue #110 merges. That implementation follows #102.
 
@@ -18,7 +18,7 @@ The pkgs.omarchy.org `edge/aarch64` feed also builds `t3code-bin 0.1.5-1` and `t
 - **Owner.** T3 Code is installed with `omarchy-install-ai-t3-code nightly --no-launch`. This layer does not run `omarchy pkg add t3code-nightly-bin`, and it stops running `t3.codes/install.sh` and `t3 update`. The bun CLI, `T3_KNOWN_GOOD_LARGE_PAGE`, and the CLI candidate check are removed. Kernels with 4 KiB pages take the same path and skip the gate.
 - **The `t3` command** is the app's bundled CLI: `~/.t3/bin/t3`, which runs the AppImage's Electron as Node on `resources/app.asar/apps/server/dist/bin.mjs`, linked from `~/.local/bin/t3` as Omarchy's installer links it. The app writes that launcher on its first launch. Until then, setup reports "open T3 Code once" instead of failing its `t3 --version` check.
 - **Desktop entry and `t3code://`.** Omarchy's installer owns `t3code.desktop`. The app still self-registers `com.t3tools.T3Code.desktop` and points `x-scheme-handler/t3code` at it (#82). `scripts/groundwork-t3-launcher.py reconcile` stays: it points the handler back at `t3code.desktop`, removes the duplicate, and changes nothing while T3 Code runs.
-- **The 16 KiB gate** moves from the CLI download to the desktop app. It uses whatever rule #102 merges (today's strict `p_align >= page`, or the relaxed page-multiple offset and vaddr with a passing smoke run). Two changes apply to both rules:
+- **The 16 KiB gate** moves from the CLI download to the desktop app. It builds on the LOAD segment rule in [decision 0018](0018-t3-load-segment-rule.md) (#102, PR #111): a LOAD passes with `p_align >= page`, or with `p_offset` and `p_vaddr` both page multiples and a passing smoke run. Two changes apply to both rules:
   - Only ELF files built for this machine (`e_machine` EM_AARCH64) are checked. Every build checked here carries `node-pty/prebuilds/linux-x64/pty.node`, an x86-64 file with `p_align 0x1000` that is never loaded on aarch64. Without this filter, every build fails both rules.
   - The smoke run is the updater's `t3_sandbox_command` (bubblewrap, read-only `/usr` and `/etc`, no home, no network, scrubbed environment, core limit 1, 30 seconds) on the extracted `t3code` with `--version`. It must print the version under test. The AppImage is extracted for this without running the app.
 - **Before an update.** `update-all` checks a staged update in `~/.cache/t3code-updater/pending/`. It verifies the file's sha512 against `update-info.json`, then runs the scan and the smoke. A build that passes stays staged, and the app applies it when it quits. A build that fails is removed from the pending directory together with `update-info.json`, and its version is written to `t3-rejected.json` as today. A timeout or a transport error is a warning and is not remembered.
@@ -55,9 +55,9 @@ All four packages were downloaded from `https://pkgs.omarchy.org/edge/aarch64/` 
 - Provides and conflicts: `t3code-bin` provides and conflicts `t3code`. `t3code-nightly-bin` provides and conflicts `t3code-nightly`. Neither has a `.INSTALL` script. pacman's own hooks (desktop database, icon cache) are the only post-install steps.
 - The `--version` smoke does not open a window. Evidence that the GUI starts on 16 KiB pages comes from the running 0.1.6-nightly.20261030.3917 AppImage, which uses Electron 44.10.0 and the same LOAD layout.
 
-## Relation to #102
+## Relation to decision 0018 and #102
 
-#102 relaxes the alignment check for the bun CLI. That fix holds until #110's implementation lands. After that, T3 no longer uses the CLI check. `load_alignments` stays, because Blip's bun preflight uses it.
+#102 and [decision 0018](0018-t3-load-segment-rule.md) relax the alignment check for the bun CLI. That fix holds until #110's implementation lands, and this decision applies the same rule to the desktop app. After that, T3 no longer uses the CLI check. `load_alignments` stays, because Blip's bun preflight uses it.
 
 ## Recheck
 

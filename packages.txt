@@ -4,11 +4,11 @@
 # Brave is not listed here. setup runs `omarchy-install-browser brave` (AUR
 # brave-bin) when that installer exists. Chromium stays an Omarchy base package.
 # See docs/decisions/0015-brave-via-omarchy-installer.md.
-# T3 Code is not listed here. Decision 0018 installs it with Omarchy's
+# T3 Code is not listed here. Decision 0020 installs it with Omarchy's
 # omarchy-install-ai-t3-code (the self-updating AppImage), not the feed's
 # t3code-bin or t3code-nightly-bin, which Omarchy replaces (checked 2026-10-31).
 # Until issue #110 lands, setup still uses the official ARM64 CLI installer.
-# See docs/decisions/0018-t3-code-through-omarchy-installer.md.
+# See docs/decisions/0020-t3-code-through-omarchy-installer.md.
 # Add optional packages one line at a time:
 #   omarchy pkg add <name>
 #
