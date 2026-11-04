@@ -774,6 +774,25 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
             updater.register(str(self.source), '0', '0', str(self.home / 'Notes'))
         self.assertEqual(command.read_text(), 'user-owned command')
 
+    def test_registration_installs_the_doctor_command_for_this_checkout(self):
+        command = self.home / '.local/bin/groundwork-doctor'
+        self.assertIn(updater.MARKER, command.read_text())
+        self.assertTrue(os.access(command, os.X_OK))
+        (self.source / 'scripts/groundwork-doctor.py').write_text((REPO / 'scripts/groundwork-doctor.py').read_text())
+        result = subprocess.run(['bash', str(command), '--help'], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('groundwork-doctor', result.stdout)
+        self.assertEqual(subprocess.run(['bash', str(command), '--unknown'], capture_output=True, timeout=10).returncode, 2)
+
+    def test_registration_keeps_a_foreign_doctor_command(self):
+        command = self.home / '.local/bin/groundwork-doctor'
+        command.write_text('user-owned command')
+        with patch('sys.stderr', new_callable=io.StringIO) as errors:
+            updater.register(str(self.source), '0', '0', str(self.home / 'Notes'))
+        self.assertEqual(command.read_text(), 'user-owned command')
+        self.assertIn('left alone', errors.getvalue())
+        self.assertIn(updater.MARKER, (self.home / '.local/bin/update-all').read_text())
+
     def test_actual_installed_launchers_expose_help_and_reject_invalid_input(self):
         for name in ['update-all', 'groundwork-update']:
             script = self.home / '.local/bin' / name
@@ -792,9 +811,10 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
             ('Omarchy feed watch', [python, str(self.source / 'scripts/omarchy-feed-watch.py'), 'report', '--brief']),
             ('PATH shadow check', [python, str(self.source / 'scripts/groundwork-path-shadow.py'), '--brief']),
             ('Disk report', [python, str(self.source / 'scripts/groundwork-disk-report.py'), '--brief']),
+            ('Host tools check', [python, str(self.source / 'scripts/groundwork-doctor.py'), '--brief']),
         ])
         self.assertTrue(all(0 < deadline <= 60 for _, _, deadline in self.report_calls))
-        self.assertIn('Reports: no Omarchy offers, PATH shadows, or low disk space.', output.getvalue())
+        self.assertIn('Reports: no Omarchy offers, PATH shadows, low disk space, or missing host tools.', output.getvalue())
         self.report_calls.clear()
         updater.update('layer')
         updater.update('all', check=True)
@@ -805,7 +825,7 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
             updater.update('all')
         tail = output.getvalue().split('FreeTube user Flatpak update command completed', 1)[1]
         self.assertEqual([line for line in tail.splitlines() if line.strip()],
-                         ['Reports: no Omarchy offers, PATH shadows, or low disk space.'])
+                         ['Reports: no Omarchy offers, PATH shadows, low disk space, or missing host tools.'])
         self.report_answers['Disk report'] = 'Disk: 9.0 GiB free on /, under the 10.0 GiB Omarchy needs to update.'
         with patch('sys.stdout', new_callable=io.StringIO) as output:
             updater.update('all')
@@ -822,7 +842,7 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
             self.assertNotIn('Reports', output.getvalue())
         with patch.dict(os.environ, {updater.SKIP_REPORTS_ENV: '0'}), patch('sys.stdout', new_callable=io.StringIO):
             updater.update('all')
-        self.assertEqual(len(self.report_calls), 3)
+        self.assertEqual(len(self.report_calls), len(updater.REPORTS))
 
     def test_failing_and_hanging_reports_never_fail_update_all(self):
         # Real report processes from the fetched checkout, with short deadlines.

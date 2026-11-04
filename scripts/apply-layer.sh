@@ -584,7 +584,8 @@ privileged_changes_needed() {
   local executable
   # Missing tools are installed through omarchy pkg add or Omarchy's installers.
   # readelf (binutils) is what update-all uses to check T3 Code builds.
-  for executable in cursor herdr tailscale syncthing obsidian bw readelf; do
+  # lsof and shellcheck are the default host tools (decision 0021).
+  for executable in cursor herdr tailscale syncthing obsidian bw readelf lsof shellcheck; do
     command -v "$executable" >/dev/null || return 0
   done
   # FreeTube is a user Flatpak, so a missing flatpak package still needs
@@ -845,6 +846,23 @@ install_cursor
 
 # update-all checks T3 Code builds with readelf before they are applied.
 install_package binutils readelf
+
+# Default host tools that scripts and test harnesses assume and Omarchy does not
+# ship (decision 0021, issue #130). groundwork-doctor checks the full list.
+install_package lsof
+# No aarch64 shellcheck build exists in Arch Linux ARM or the Omarchy feed (checked
+# 2026-11-03), so it comes from the AUR's shellcheck-bin, upstream's static
+# release. An existing shellcheck from any source is kept. A failure is reported
+# and setup continues; groundwork-doctor names the fix until it is installed.
+install_shellcheck() {
+  command -v shellcheck >/dev/null && return 0
+  if omarchy pkg aur add shellcheck-bin && command -v shellcheck >/dev/null && shellcheck --version >/dev/null; then
+    return 0
+  fi
+  echo "shellcheck could not be installed from the AUR (shellcheck-bin). Setup continues without it." >&2
+  echo "Install it later with: omarchy pkg aur add shellcheck-bin" >&2
+}
+install_shellcheck
 install_package herdr
 install_package tailscale
 if [[ $updating -eq 0 ]] || ! service_ready tailscaled; then

@@ -205,6 +205,7 @@
     "blip": "omarchy plugin add from git (decision 0011); bun through omarchy-install-dev-env.",
     "local-inference": "omarchy pkg add ollama ollama-vulkan (decision 0012).",
     "ai-providers": "Omarchy's declared mise tools.",
+    "host-tools": "omarchy pkg add lsof and omarchy pkg aur add shellcheck-bin (decision 0021).",
     "packages.txt": "An optional list; each entry is added by hand with omarchy pkg add."
   }
 }
