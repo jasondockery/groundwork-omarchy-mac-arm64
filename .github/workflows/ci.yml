@@ -9,11 +9,37 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels its older run. Pushes to main each run.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Budget: the blocking PR tier finishes in about 5 minutes of wall-clock time
+# (AGENTS.md). Over budget, rebalance or add shards first, using measured
+# durations; timeout-minutes guards against hangs and is never raised to
+# absorb growth.
 jobs:
-  installer:
+  shell-syntax:
     runs-on: ubuntu-26.04
-    # The suite has taken about twelve minutes, plus apt. Twenty leaves room.
-    timeout-minutes: 20
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check shell syntax
+        run: bash -n install.sh scripts/apply-layer.sh scripts/migrate-from-groundwork.sh
+
+  tests:
+    name: tests (shard ${{ matrix.shard }})
+    runs-on: ubuntu-26.04
+    # A shard takes about three minutes; ten only catches a hang.
+    timeout-minutes: 10
+    strategy:
+      # Let every shard finish so one run reports every failing test.
+      fail-fast: false
+      matrix:
+        # Must be 0..SHARDS-1 from scripts/ci-test-shard.py; a test checks it.
+        shard: [0, 1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -35,7 +61,23 @@ jobs:
             fi
             echo "bubblewrap cannot configure loopback here, so the T3 smoke tests stay skipped"
           fi
-      - name: Check shell syntax
-        run: bash -n install.sh scripts/apply-layer.sh scripts/migrate-from-groundwork.sh
+      # Each shard discovers the whole suite, checks that every test ID is in
+      # exactly one shard, and runs only its own IDs.
       - name: Exercise isolated installer fixtures
-        run: python3 -B -m unittest discover -s tests -v
+        run: python3 -B scripts/ci-test-shard.py run --shard ${{ matrix.shard }}
+
+  # The stable check name. It passes only when the syntax job and every shard
+  # passed; a skipped or cancelled child fails it.
+  installer:
+    if: always()
+    needs: [shell-syntax, tests]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every child job to pass
+        env:
+          SYNTAX: ${{ needs.shell-syntax.result }}
+          TESTS: ${{ needs.tests.result }}
+        run: |
+          echo "shell-syntax: $SYNTAX, tests: $TESTS"
+          test "$SYNTAX" = success && test "$TESTS" = success

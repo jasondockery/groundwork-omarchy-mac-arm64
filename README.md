@@ -248,7 +248,7 @@ and omit onboarding. They preserve application data and provider authentication.
 
 Installation checks that the selected tools are actually available. Once T3 Code has written its `t3` command, if another `t3` shadows `~/.local/bin/t3`, setup stops before applying input settings and prints the directory to prepend to your user PATH. Start a fresh shell and rerun after fixing PATH; existing npm/system installations are preserved. `~/.local/bin/t3 --version` must then print a version. A `t3` of your own at `~/.local/bin/t3` is left alone, as Omarchy's installer leaves it. Package-feed skips also fail explicitly instead of claiming a missing tool was installed.
 
-Run `bash -n install.sh scripts/apply-layer.sh scripts/migrate-from-groundwork.sh` and `python3 -B -m unittest discover -s tests -v`. CI runs the same shell and isolated installer checks. They do not install packages, start host services, or change the developer's home directory. The shared Renovate preset is declared in `renovate.json`; the central runner must also grant this repo access before updates can arrive.
+Run `bash -n install.sh scripts/apply-layer.sh scripts/migrate-from-groundwork.sh` and `python3 -B -m unittest discover -s tests -v`. CI runs the same shell and isolated installer checks, with the suite split across parallel shards by `scripts/ci-test-shard.py`; every test runs in exactly one shard. They do not install packages, start host services, or change the developer's home directory. The shared Renovate preset is declared in `renovate.json`; the central runner must also grant this repo access before updates can arrive.
 
 ## Where each step runs
 
