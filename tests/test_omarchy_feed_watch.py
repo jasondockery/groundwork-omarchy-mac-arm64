@@ -516,6 +516,16 @@ class TableTests(unittest.TestCase):
         self.assertNotIn('migration_id', cursor)
         self.assertIn('manual', cursor['offer'])
 
+    def test_shellcheck_is_watched_for_a_repository_package_and_lsof_is_not(self):
+        table = json.loads(TABLE.read_text())
+        shellcheck = {app['id']: app for app in watch.load_table(TABLE)}['shellcheck']
+        self.assertEqual({c['package'] for c in shellcheck['candidates']}, {'shellcheck'})
+        self.assertEqual(shellcheck['probe'], {'command': 'shellcheck', 'owner': 'shellcheck'})
+        self.assertEqual(shellcheck['self_install']['recheck'], '2026-12-03')
+        self.assertIn('0021-default-host-tools.md', shellcheck['self_install']['evidence'] + shellcheck['doc'])
+        self.assertIn('lsof', table['not_watched'])
+        self.assertNotIn('shellcheck', table['not_watched'])
+
     def test_migration_ids_in_the_table_exist_in_apply_layer(self):
         layer = (REPO / 'scripts/apply-layer.sh').read_text()
         for app in watch.load_table(TABLE):

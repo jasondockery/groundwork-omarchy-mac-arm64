@@ -1,4 +1,5 @@
-# Optional aarch64 packages. Not part of the Omarchy Mac install. The normal
+# Optional aarch64 packages. Not part of the Omarchy Mac install, and no script
+# installs from this list. The normal
 # ./install.sh setup installs Herdr, Tailscale, keyd, Obsidian, Bitwarden, and FreeTube;
 # its desktop uses Flathub on ARM when a native app is absent. See docs/apps.md.
 # Brave is not listed here. setup runs `omarchy-install-browser brave` (AUR
@@ -14,6 +15,9 @@
 #
 # git, neovim, lazygit, ripgrep, fd, bat, eza, fzf, zoxide, starship,
 # mise, and docker already ship with Omarchy. Do not install Linuxbrew.
+# lsof and shellcheck are not listed: setup and update-all install them as
+# default host tools (shellcheck from the AUR's shellcheck-bin, because no
+# aarch64 repo builds it). See docs/decisions/0021-default-host-tools.md.
 
 # Apply this repo, and Caps Lock tap/hold.
 stow
@@ -28,7 +32,6 @@ tokei
 yazi
 uv
 direnv
-shellcheck
 go
 bitwarden-cli
 

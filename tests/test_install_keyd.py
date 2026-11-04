@@ -515,6 +515,13 @@ elif name == 'omarchy':
             target = root / 'bin' / 'vulkaninfo'
             if not target.exists():
                 target.symlink_to(root / 'bin' / 'stub')
+    if args[:4] == ['pkg', 'aur', 'add', 'shellcheck-bin']:
+        status = int(os.environ.get('FIXTURE_AUR_STATUS', '0'))
+        if status:
+            sys.exit(status)
+        target = root / 'bin' / 'shellcheck'
+        if not target.exists():
+            target.symlink_to(root / 'bin' / 'stub')
     if args[:3] == ['pkg', 'add', 'syncthing']:
         target = root / 'bin' / 'syncthing'
         if not target.exists():
@@ -553,7 +560,7 @@ class InstallKeydTests(unittest.TestCase):
         stub = self.bin / 'stub'
         stub.write_text(STUB)
         stub.chmod(0o755)
-        for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'omarchy-install-dev-env', 'omarchy-remove-dev-env', 'stow', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw', 'getconf', 'readelf', 'syncthing', 'loginctl', 'stat',
+        for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'omarchy-install-dev-env', 'omarchy-remove-dev-env', 'stow', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw', 'getconf', 'readelf', 'syncthing', 'loginctl', 'stat', 'lsof', 'shellcheck',
                      'omarchy-install-ai-t3-code'):
             (self.bin / name).symlink_to(stub)
         (self.bin / 'git').symlink_to(host_tool('git'))
@@ -1299,6 +1306,69 @@ raise SystemExit(os.WEXITSTATUS(status))
         result = self.run_install(success=False)
         self.assertIn(['omarchy', 'pkg', 'add', 'binutils'], self.calls())
         self.assertIn('binutils is still unavailable', result.stderr)
+
+    # Default host tools (decision 0021, issue #130).
+
+    def test_lsof_is_installed_by_default(self):
+        (self.bin / 'lsof').unlink()
+        result = self.run_install(success=False)
+        self.assertIn(['omarchy', 'pkg', 'add', 'lsof'], self.calls())
+        self.assertIn('lsof is still unavailable', result.stderr)
+
+    def test_missing_shellcheck_comes_from_the_aur_package(self):
+        (self.bin / 'shellcheck').unlink()
+        self.run_install()
+        calls = self.calls()
+        self.assertIn(['omarchy', 'pkg', 'aur', 'add', 'shellcheck-bin'], calls)
+        self.assertNotIn(['omarchy', 'pkg', 'add', 'shellcheck'], calls)
+        self.assertIn(['shellcheck', '--version'], calls)
+        self.assertTrue((self.bin / 'shellcheck').exists())
+
+    def test_present_shellcheck_is_kept(self):
+        self.run_install()
+        self.assertFalse(any(call[:3] == ['omarchy', 'pkg', 'aur'] for call in self.calls()))
+
+    def test_shellcheck_failure_is_reported_and_setup_continues(self):
+        (self.bin / 'shellcheck').unlink()
+        self.env['FIXTURE_AUR_STATUS'] = '1'
+        result = self.run_install()
+        self.assertIn('Install it later with: omarchy pkg aur add shellcheck-bin', result.stderr)
+        self.assertFalse((self.bin / 'shellcheck').exists())
+
+    def test_update_installs_missing_host_tools(self):
+        self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
+        (self.bin / 'lsof').unlink()
+        (self.bin / 'shellcheck').unlink()
+        self.env['FIXTURE_SUDO_CACHED'] = '1'
+        self.env['FIXTURE_MATERIALIZE_ADDED'] = '1'
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('sudo was not used', result.stdout)
+        calls = self.calls()
+        self.assertIn(['omarchy', 'pkg', 'add', 'lsof'], calls)
+        self.assertIn(['omarchy', 'pkg', 'aur', 'add', 'shellcheck-bin'], calls)
+
+    def test_missing_shellcheck_alone_never_prompts_or_fails_an_update_without_a_terminal(self):
+        self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
+        (self.bin / 'shellcheck').unlink()
+        # No terminal and no cached sudo: only the shellcheck gap is left.
+        result = subprocess.run(['python3', str(REPO / 'scripts/groundwork-update.py'), 'setup', str(REPO), '--update'],
+                                env=self.env, capture_output=True, text=True, timeout=30, start_new_session=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('sudo was not used', result.stdout)
+        self.assertNotIn('no terminal is available', result.stderr)
+        self.assertIn('Install it with: omarchy pkg aur add shellcheck-bin', result.stderr)
+        calls = self.calls()
+        self.assertEqual([call for call in calls if call[0] == 'sudo'], [['sudo', '-n', 'true']])
+        self.assertFalse(any(call[:3] == ['omarchy', 'pkg', 'aur'] for call in calls))
+
+    def test_update_with_host_tools_present_adds_nothing(self):
+        self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertNotIn(['omarchy', 'pkg', 'add', 'lsof'], calls)
+        self.assertFalse(any(call[:3] == ['omarchy', 'pkg', 'aur'] for call in calls))
 
     def test_package_helper_successful_skip_fails_before_configuration(self):
         for package, executable in (('herdr', 'herdr'), ('tailscale', 'tailscale'),

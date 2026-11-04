@@ -1,0 +1,157 @@
+"""groundwork-doctor's host-tools check (decision 0021, issue #130).
+
+Every run uses a private PATH of stub binaries, so the host's own tools never
+decide a result.
+"""
+import contextlib
+import importlib.util
+import io
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+
+REPO = Path(__file__).resolve().parents[1]
+SCRIPT = REPO / 'scripts/groundwork-doctor.py'
+spec = importlib.util.spec_from_file_location('groundwork_doctor', SCRIPT)
+doctor = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(doctor)
+
+TOOLS = ('lsof', 'ps', 'rg', 'jq', 'shellcheck', 'ssh', 'git')
+# procps-ng prints a start time for `ps -o lstart= -p PID`.
+PROCPS_PS = '#!/bin/sh\n[ "$1" = -o ] && [ "$2" = lstart= ] && { echo "Tue Nov  3 21:38:13 2026"; exit 0; }\nexit 0\n'
+# busybox ps rejects the lstart format.
+BUSYBOX_PS = '#!/bin/sh\necho "ps: bad -o argument \'lstart\'" >&2\nexit 1\n'
+
+
+class HostToolsTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix='groundwork-doctor-')
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.bin = self.root / 'bin'
+        self.bin.mkdir()
+        for name in TOOLS:
+            self.stub(name, PROCPS_PS if name == 'ps' else '#!/bin/sh\nexit 0\n')
+        home = self.root / 'home'
+        home.mkdir()
+        self.environ = {'PATH': str(self.bin), 'HOME': str(home)}
+        for key, sub in (('XDG_CONFIG_HOME', '.config'), ('XDG_STATE_HOME', '.local/state'),
+                         ('XDG_CACHE_HOME', '.cache'), ('XDG_DATA_HOME', '.local/share'),
+                         ('GNUPGHOME', '.gnupg')):
+            self.environ[key] = str(home / sub)
+
+    def stub(self, name, body):
+        path = self.bin / name
+        path.write_text(body)
+        path.chmod(0o755)
+
+    def doctor(self, *args):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status = doctor.main(list(args), self.environ)
+        return status, output.getvalue()
+
+    def test_all_present_passes(self):
+        status, text = self.doctor()
+        self.assertEqual(status, 0)
+        self.assertEqual(text, 'Host tools: ok (lsof, ps -o lstart=, rg, jq, shellcheck, ssh, git)\n')
+        self.assertEqual(self.doctor('--brief'), (0, ''))
+
+    def test_each_missing_tool_names_its_install_line(self):
+        expected = {
+            'lsof': 'sudo pacman -S --needed lsof',
+            'ps': 'sudo pacman -S --needed procps-ng',
+            'rg': 'sudo pacman -S --needed ripgrep',
+            'jq': 'sudo pacman -S --needed jq',
+            'shellcheck': 'omarchy pkg aur add shellcheck-bin',
+            'ssh': 'sudo pacman -S --needed openssh',
+            'git': 'sudo pacman -S --needed git',
+        }
+        self.assertEqual(set(expected), set(TOOLS))
+        for name, install in expected.items():
+            with self.subTest(name=name):
+                body = (self.bin / name).read_text()
+                (self.bin / name).unlink()
+                try:
+                    status, text = self.doctor()
+                    self.assertEqual(status, 1)
+                    self.assertIn(f'{name} is missing', text)
+                    self.assertIn(f'Install it with: {install}', text)
+                    self.assertIn('Host tools: 1 problem\n', text)
+                finally:
+                    self.stub(name, body)
+
+    def test_lsof_missing_is_reported_and_fails(self):
+        (self.bin / 'lsof').unlink()
+        status, text = self.doctor()
+        self.assertEqual(status, 1)
+        self.assertEqual(text, 'Host tools: 1 problem\n'
+                               '  lsof is missing (lsof). Install it with: sudo pacman -S --needed lsof\n')
+
+    def test_several_missing_tools_are_each_listed(self):
+        (self.bin / 'lsof').unlink()
+        (self.bin / 'shellcheck').unlink()
+        status, text = self.doctor()
+        self.assertEqual(status, 1)
+        self.assertIn('Host tools: 2 problems', text)
+        self.assertIn('shellcheck is missing (shellcheck-bin). Install it with: omarchy pkg aur add shellcheck-bin', text)
+
+    def test_ps_without_lstart_is_reported(self):
+        self.stub('ps', BUSYBOX_PS)
+        status, text = self.doctor()
+        self.assertEqual(status, 1)
+        self.assertIn('does not support `ps -o lstart=`', text)
+        self.assertIn('sudo pacman -S --needed procps-ng', text)
+
+    def test_ps_with_empty_lstart_is_reported(self):
+        self.stub('ps', '#!/bin/sh\nexit 0\n')
+        status, text = self.doctor()
+        self.assertEqual(status, 1)
+        self.assertIn('does not support `ps -o lstart=`', text)
+
+    def test_non_executable_file_counts_as_missing(self):
+        (self.bin / 'jq').chmod(0o644)
+        status, text = self.doctor()
+        self.assertEqual(status, 1)
+        self.assertIn('jq is missing', text)
+
+    def test_brief_prints_one_line_per_problem_and_never_fails(self):
+        (self.bin / 'lsof').unlink()
+        self.stub('ps', BUSYBOX_PS)
+        status, text = self.doctor('--brief')
+        self.assertEqual(status, 0)
+        lines = text.splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(all(line.startswith('Host tools: ') for line in lines))
+        self.assertIn('sudo pacman -S --needed lsof', lines[0])
+
+    def test_command_line_uses_the_given_path(self):
+        (self.bin / 'git').unlink()
+        result = subprocess.run([sys.executable, str(SCRIPT)], env=self.environ,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('git is missing (git). Install it with: sudo pacman -S --needed git', result.stdout)
+        self.stub('git', '#!/bin/sh\nexit 0\n')
+        result = subprocess.run([sys.executable, str(SCRIPT), '--brief'], env=self.environ,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual((result.returncode, result.stdout), (0, ''), result.stderr)
+
+    def test_bad_usage_exits_2(self):
+        result = subprocess.run([sys.executable, str(SCRIPT), '--nope'], env=self.environ,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 2)
+
+    def test_setup_installs_the_tools_omarchy_does_not_ship(self):
+        apply = (REPO / 'scripts/apply-layer.sh').read_text()
+        self.assertIn('\ninstall_package lsof\n', apply)
+        self.assertIn('omarchy pkg aur add shellcheck-bin', apply)
+        self.assertIn('obsidian bw readelf lsof; do', apply)
+        self.assertIn('sudo -n true 2>/dev/null; then', apply.split('install_shellcheck() {', 1)[1])
+        self.assertEqual(dict((c, p) for c, p, _ in doctor.HOST_TOOLS)['shellcheck'], 'shellcheck-bin')
+
+
+if __name__ == '__main__':
+    unittest.main()
