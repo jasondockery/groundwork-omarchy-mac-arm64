@@ -65,7 +65,7 @@ def host_tool_problems(environ):
 def main(argv=None, environ=None):
     parser = argparse.ArgumentParser(prog='groundwork-doctor',
                                      description='Check this machine and print the fix for each problem. Changes nothing.')
-    parser.add_argument('--brief', action='store_true', help='print only problems and always exit 0')
+    parser.add_argument('--brief', action='store_true', help='print only problems, one line each; exit 0 unless usage is wrong')
     args = parser.parse_args(argv)
     environ = dict(os.environ if environ is None else environ)
     problems = host_tool_problems(environ)

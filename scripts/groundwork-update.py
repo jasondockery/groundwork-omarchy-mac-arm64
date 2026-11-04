@@ -318,8 +318,16 @@ def register_doctor(source):
     """Install the groundwork-doctor command (decision 0021). A foreign command is kept, not an error."""
     command = Path.home() / '.local/bin/groundwork-doctor'
     script = source / 'scripts/groundwork-doctor.py'
-    check_path(command)
-    if command.exists() and (not command.is_file() or MARKER not in command.read_text()):
+    check_path(command.parent)
+    # A symlink, directory or other non-regular file, or a regular file without
+    # the marker (text or binary), belongs to someone else.
+    foreign = command.is_symlink() or (command.exists() and not command.is_file())
+    if not foreign and command.is_file():
+        try:
+            foreign = MARKER.encode() not in command.read_bytes()
+        except OSError:
+            foreign = True
+    if foreign:
         print(f'{command} belongs to another setup and was left alone. '
               f'Run python3 {shlex.quote(str(script))} for the same checks.', file=sys.stderr)
         return

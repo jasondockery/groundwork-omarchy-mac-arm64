@@ -1348,6 +1348,20 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertIn(['omarchy', 'pkg', 'add', 'lsof'], calls)
         self.assertIn(['omarchy', 'pkg', 'aur', 'add', 'shellcheck-bin'], calls)
 
+    def test_missing_shellcheck_alone_never_prompts_or_fails_an_update_without_a_terminal(self):
+        self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
+        (self.bin / 'shellcheck').unlink()
+        # No terminal and no cached sudo: only the shellcheck gap is left.
+        result = subprocess.run(['python3', str(REPO / 'scripts/groundwork-update.py'), 'setup', str(REPO), '--update'],
+                                env=self.env, capture_output=True, text=True, timeout=30, start_new_session=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('sudo was not used', result.stdout)
+        self.assertNotIn('no terminal is available', result.stderr)
+        self.assertIn('Install it with: omarchy pkg aur add shellcheck-bin', result.stderr)
+        calls = self.calls()
+        self.assertEqual([call for call in calls if call[0] == 'sudo'], [['sudo', '-n', 'true']])
+        self.assertFalse(any(call[:3] == ['omarchy', 'pkg', 'aur'] for call in calls))
+
     def test_update_with_host_tools_present_adds_nothing(self):
         self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
         result = self.run_update()

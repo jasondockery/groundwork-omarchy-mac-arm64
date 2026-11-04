@@ -793,6 +793,25 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
         self.assertIn('left alone', errors.getvalue())
         self.assertIn(updater.MARKER, (self.home / '.local/bin/update-all').read_text())
 
+    def test_registration_keeps_a_symlinked_or_binary_doctor_command(self):
+        command = self.home / '.local/bin/groundwork-doctor'
+        target = self.root / 'other-doctor'
+        target.write_text(f'#!/bin/sh\n{updater.MARKER}\n')
+        binary = b'\x7fELF\xff\xfe\x00' + bytes(range(256))
+        for label, make, check in (
+                ('symlink', lambda: command.symlink_to(target),
+                 lambda: self.assertEqual(os.readlink(command), str(target))),
+                ('binary', lambda: command.write_bytes(binary),
+                 lambda: self.assertEqual(command.read_bytes(), binary))):
+            with self.subTest(label):
+                command.unlink()
+                make()
+                with patch('sys.stderr', new_callable=io.StringIO) as errors:
+                    updater.register(str(self.source), '0', '0', str(self.home / 'Notes'))
+                check()
+                self.assertIn('left alone', errors.getvalue())
+        self.assertEqual(target.read_text(), f'#!/bin/sh\n{updater.MARKER}\n')
+
     def test_actual_installed_launchers_expose_help_and_reject_invalid_input(self):
         for name in ['update-all', 'groundwork-update']:
             script = self.home / '.local/bin' / name

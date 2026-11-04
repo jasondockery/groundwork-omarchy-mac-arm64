@@ -148,7 +148,8 @@ class HostToolsTests(unittest.TestCase):
         apply = (REPO / 'scripts/apply-layer.sh').read_text()
         self.assertIn('\ninstall_package lsof\n', apply)
         self.assertIn('omarchy pkg aur add shellcheck-bin', apply)
-        self.assertIn('readelf lsof shellcheck; do', apply)
+        self.assertIn('obsidian bw readelf lsof; do', apply)
+        self.assertIn('sudo -n true 2>/dev/null; then', apply.split('install_shellcheck() {', 1)[1])
         self.assertEqual(dict((c, p) for c, p, _ in doctor.HOST_TOOLS)['shellcheck'], 'shellcheck-bin')
 
 

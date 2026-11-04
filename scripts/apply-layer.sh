@@ -584,8 +584,9 @@ privileged_changes_needed() {
   local executable
   # Missing tools are installed through omarchy pkg add or Omarchy's installers.
   # readelf (binutils) is what update-all uses to check T3 Code builds.
-  # lsof and shellcheck are the default host tools (decision 0021).
-  for executable in cursor herdr tailscale syncthing obsidian bw readelf lsof shellcheck; do
+  # lsof is a default host tool (decision 0021). shellcheck is not listed: it is
+  # optional and never the reason for a sudo prompt (install_shellcheck).
+  for executable in cursor herdr tailscale syncthing obsidian bw readelf lsof; do
     command -v "$executable" >/dev/null || return 0
   done
   # FreeTube is a user Flatpak, so a missing flatpak package still needs
@@ -852,10 +853,17 @@ install_package binutils readelf
 install_package lsof
 # No aarch64 shellcheck build exists in Arch Linux ARM or the Omarchy feed (checked
 # 2026-11-03), so it comes from the AUR's shellcheck-bin, upstream's static
-# release. An existing shellcheck from any source is kept. A failure is reported
-# and setup continues; groundwork-doctor names the fix until it is installed.
+# release. An existing shellcheck from any source is kept. It is optional: it is
+# tried only when administrator permission is already available (setup asks
+# up front; an update asks only for other changes), and a skip or failure is
+# reported while setup continues. groundwork-doctor names the fix until then.
 install_shellcheck() {
   command -v shellcheck >/dev/null && return 0
+  if ! sudo -n true 2>/dev/null; then
+    echo "shellcheck is missing. It was not installed because administrator permission was not already granted for this run." >&2
+    echo "Install it with: omarchy pkg aur add shellcheck-bin" >&2
+    return 0
+  fi
   if omarchy pkg aur add shellcheck-bin && command -v shellcheck >/dev/null && shellcheck --version >/dev/null; then
     return 0
   fi
