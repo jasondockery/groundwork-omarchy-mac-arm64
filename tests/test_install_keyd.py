@@ -72,6 +72,13 @@ elif name == 'sudo':
         sys.exit(int(os.environ.get('FIXTURE_SUDO_V_STATUS', '0')))
     if args[0] == 'keyd':
         sys.exit(int(os.environ.get('FIXTURE_RELOAD_STATUS', '0')))
+    if args[:2] == ['systemctl', 'mask'] and args[2:] == ['tmp.mount']:
+        unit = root / 'etc/systemd/system/tmp.mount'
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        if unit.exists() or unit.is_symlink():
+            unit.unlink()
+        unit.symlink_to('/dev/null')
+        sys.exit(0)
     if args[0] in ('systemctl', 'ufw'):
         sys.exit(0)
     if args[:2] == ['loginctl', 'enable-linger']:
@@ -572,6 +579,9 @@ class InstallKeydTests(unittest.TestCase):
         (self.root / 'proc/1/cmdline').write_bytes(b'bash\0')
         plugin_list = self.root / 'plugins.json'
         plugin_list.write_text('{"schemaVersion": 1, "plugins": [], "retired": []}\n')
+        tmpfiles = self.root / 'usr/lib/tmpfiles.d'
+        tmpfiles.mkdir(parents=True)
+        (tmpfiles / 'tmp.conf').write_text('q /tmp 1777 root root 10d\n')
         self.config = self.root / 'etc/keyd/default.conf'
         self.env = dict(os.environ, INSTALL_FIXTURE=str(self.root), GROUNDWORK_TEST_ROOT=str(self.root),
                         GROUNDWORK_TESTING='1',
@@ -909,6 +919,21 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertIn(['omarchy', 'pkg', 'add', 'wayvnc'], calls)
         self.assertIn(['systemctl', '--user', 'enable', 'groundwork-screen-share.service'], calls)
         self.assertIn(['sudo', 'ufw', 'allow', 'in', 'on', 'tailscale0', 'to', 'any', 'port', '5900', 'proto', 'tcp', 'comment', 'Groundwork screen sharing'], calls)
+        self.assertIn(['sudo', 'systemctl', 'mask', 'tmp.mount'], calls)
+        self.assertFalse((self.root / 'etc/fstab').exists())
+        self.assertEqual(os.readlink(self.root / 'etc/systemd/system/tmp.mount'), '/dev/null')
+        recorded = json.loads((self.root / 'home/.config/groundwork/overrides.json').read_text())
+        self.assertEqual(recorded['overrides'][0]['id'], 'tmp.mount')
+        self.assertEqual(recorded['overrides'][0]['value'], 'masked')
+        self.assertTrue(recorded['overrides'][0]['reason'].strip())
+
+    def test_update_does_not_remask_or_write_fstab_when_tmp_mount_is_already_masked(self):
+        self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('sudo was not used', result.stdout)
+        self.assertNotIn(['sudo', 'systemctl', 'mask', 'tmp.mount'], self.calls())
+        self.assertFalse((self.root / 'etc/fstab').exists())
 
     def test_screen_sharing_opt_out_preserves_existing_local_state(self):
         directory = self.root / 'home/.config/groundwork/remote-desktop'

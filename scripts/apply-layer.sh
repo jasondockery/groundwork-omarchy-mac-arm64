@@ -187,8 +187,8 @@ fi
 
 # Fail before installing packages or moving files when the checkout is incomplete.
 # The Bitwarden extension id and Brave policies are read from core, not a copy here.
-[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$root/scripts/groundwork-node-pin.py" && -f "$root/scripts/groundwork-commit-guard.py" && -f "$root/core/browser/brave.json" && ! -L "$root/core/browser/brave.json" ]] || {
-  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, Node pin helper, commit guard helper, or Brave spec is missing." >&2
+[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$root/scripts/groundwork-node-pin.py" && -f "$root/scripts/groundwork-commit-guard.py" && -f "$root/scripts/groundwork-tmp.py" && -f "$root/core/browser/brave.json" && ! -L "$root/core/browser/brave.json" ]] || {
+  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, Node pin helper, commit guard helper, tmp helper, or Brave spec is missing." >&2
   exit 1
 }
 
@@ -235,6 +235,11 @@ screen_share_rule=(allow in on tailscale0 to any port 5900 proto tcp comment 'Gr
 screen_share_rule_marker="${XDG_STATE_HOME:-$HOME/.local/state}/groundwork/ufw-screen-share-rule"
 service_ready() {
   systemctl is-enabled --quiet "$1" 2>/dev/null && systemctl is-active --quiet "$1" 2>/dev/null
+}
+# Mask is a symlink to /dev/null. Checking the file needs no sudo (decision 0022).
+tmp_mount_masked() {
+  local unit=$test_root/etc/systemd/system/tmp.mount
+  [[ -L $unit && $(readlink -n -- "$unit") == /dev/null ]]
 }
 chromium_extension_current() {
   [[ $(stat -c %a "$chromium_dir" 2>/dev/null) == 755 && $(stat -c %a "$extension_dir" 2>/dev/null) == 755 ]] &&
@@ -628,6 +633,7 @@ privileged_changes_needed() {
   if [[ $with_local_inference -eq 1 ]] && ! local_inference_ready; then
     return 0
   fi
+  tmp_mount_masked || return 0
   return 1
 }
 
@@ -658,7 +664,7 @@ fi
 if [[ "$EUID" -ne 0 && $needs_privilege -eq 1 ]]; then
   if [[ $updating -eq 0 ]] && ! sudo -n true 2>/dev/null; then
     if [[ -r /dev/tty && -w /dev/tty ]] && : </dev/tty >/dev/null; then
-      echo "This install needs an administrator password for Tailscale, the browser extension, keyd, and lingering."
+      echo "This install needs an administrator password for Tailscale, the browser extension, keyd, lingering, and masking tmp.mount."
       echo "Enter your password when asked. This approval covers the privileged steps in this run."
       sudo_status=0
       # sudo -v reads the password on its own standard input. Point that prompt
@@ -876,6 +882,15 @@ install_package tailscale
 if [[ $updating -eq 0 ]] || ! service_ready tailscaled; then
   sudo systemctl enable --now tailscaled
 fi
+
+# /tmp on disk (decision 0022, issue #138). Mask tmp.mount so /tmp lives on the
+# root filesystem after reboot. Never write /etc/fstab for /tmp. Keep upstream
+# systemd-tmpfiles aging. Optional scratch is created from the machine override
+# config; its name is not in this repository.
+python3 "$root/scripts/groundwork-tmp.py" apply || {
+  echo "Could not put /tmp on disk. See the error above." >&2
+  exit 1
+}
 
 # Omarchy owns Obsidian's package, theme, and launch shortcut. A new Bitwarden
 # desktop install uses Omarchy's bitwarden package when the feed has it, and

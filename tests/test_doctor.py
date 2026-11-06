@@ -1,7 +1,8 @@
-"""groundwork-doctor's host-tools check (decision 0021, issue #130).
+"""groundwork-doctor's host-tools and tmp checks (decisions 0021 and 0022).
 
 Every run uses a private PATH of stub binaries, so the host's own tools never
-decide a result.
+decide a result. tmp.mount, fstab, and tmpfiles paths are relocated under a
+private root so the live machine is never inspected.
 """
 import contextlib
 import importlib.util
@@ -37,11 +38,25 @@ class HostToolsTests(unittest.TestCase):
             self.stub(name, PROCPS_PS if name == 'ps' else '#!/bin/sh\nexit 0\n')
         home = self.root / 'home'
         home.mkdir()
-        self.environ = {'PATH': str(self.bin), 'HOME': str(home)}
+        self.environ = {
+            'PATH': str(self.bin),
+            'HOME': str(home),
+            'GROUNDWORK_TESTING': '1',
+            'GROUNDWORK_TEST_ROOT': str(self.root),
+        }
         for key, sub in (('XDG_CONFIG_HOME', '.config'), ('XDG_STATE_HOME', '.local/state'),
                          ('XDG_CACHE_HOME', '.cache'), ('XDG_DATA_HOME', '.local/share'),
                          ('GNUPGHOME', '.gnupg')):
             self.environ[key] = str(home / sub)
+        unit = self.root / 'etc/systemd/system/tmp.mount'
+        unit.parent.mkdir(parents=True)
+        unit.symlink_to('/dev/null')
+        tmpfiles = self.root / 'usr/lib/tmpfiles.d'
+        tmpfiles.mkdir(parents=True)
+        (tmpfiles / 'tmp.conf').write_text('q /tmp 1777 root root 10d\n')
+        overrides = home / '.config/groundwork/overrides.json'
+        overrides.parent.mkdir(parents=True)
+        overrides.write_text('{"schema": 1, "overrides": [{"id": "tmp.mount", "value": "masked", "reason": "fixture"}]}\n')
 
     def stub(self, name, body):
         path = self.bin / name
@@ -57,7 +72,11 @@ class HostToolsTests(unittest.TestCase):
     def test_all_present_passes(self):
         status, text = self.doctor()
         self.assertEqual(status, 0)
-        self.assertEqual(text, 'Host tools: ok (lsof, ps -o lstart=, rg, jq, shellcheck, ssh, git)\n')
+        self.assertEqual(
+            text,
+            'Host tools: ok (lsof, ps -o lstart=, rg, jq, shellcheck, ssh, git)\n'
+            'tmp: ok (tmp.mount masked, no /tmp in fstab, systemd-tmpfiles ages /tmp for 10 days)\n',
+        )
         self.assertEqual(self.doctor('--brief'), (0, ''))
 
     def test_each_missing_tool_names_its_install_line(self):
@@ -89,7 +108,8 @@ class HostToolsTests(unittest.TestCase):
         status, text = self.doctor()
         self.assertEqual(status, 1)
         self.assertEqual(text, 'Host tools: 1 problem\n'
-                               '  lsof is missing (lsof). Install it with: sudo pacman -S --needed lsof\n')
+                               '  lsof is missing (lsof). Install it with: sudo pacman -S --needed lsof\n'
+                               'tmp: ok (tmp.mount masked, no /tmp in fstab, systemd-tmpfiles ages /tmp for 10 days)\n')
 
     def test_several_missing_tools_are_each_listed(self):
         (self.bin / 'lsof').unlink()
@@ -143,6 +163,27 @@ class HostToolsTests(unittest.TestCase):
         result = subprocess.run([sys.executable, str(SCRIPT), '--nope'], env=self.environ,
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 2)
+
+    def test_help_does_not_need_the_tmp_helper(self):
+        isolated = self.root / 'scripts'
+        isolated.mkdir()
+        (isolated / 'groundwork-doctor.py').write_text(SCRIPT.read_text())
+        result = subprocess.run([sys.executable, str(isolated / 'groundwork-doctor.py'), '--help'],
+                                env=self.environ, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('groundwork-doctor', result.stdout)
+        self.assertFalse((isolated / 'groundwork-tmp.py').exists())
+
+    def test_unmasked_tmp_mount_is_reported(self):
+        (self.root / 'etc/systemd/system/tmp.mount').unlink()
+        status, text = self.doctor()
+        self.assertEqual(status, 1)
+        self.assertIn('tmp.mount is not masked', text)
+        self.assertIn('Apply this layer, then reboot', text)
+        status, brief = self.doctor('--brief')
+        self.assertEqual(status, 0)
+        self.assertTrue(brief.startswith('tmp: '))
+        self.assertIn('tmp.mount is not masked', brief)
 
     def test_setup_installs_the_tools_omarchy_does_not_ship(self):
         apply = (REPO / 'scripts/apply-layer.sh').read_text()

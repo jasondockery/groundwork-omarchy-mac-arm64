@@ -36,6 +36,8 @@ The commit identity guard from groundwork-core is on by default: user-level `com
 
 Setup and `update-all` also keep two host tools that scripts and test harnesses assume but Omarchy does not ship: `lsof` (`omarchy pkg add lsof`) and `shellcheck`. Arch Linux ARM and the Omarchy feed have no aarch64 `shellcheck`, so it comes from the AUR's `shellcheck-bin` (`omarchy pkg aur add shellcheck-bin`, upstream's static release); a `shellcheck` you already have is kept, and it is tried only when administrator permission is already granted for the run, so on its own it never prompts for a password or fails an update; a skip or AUR failure prints the install command and setup continues. `groundwork-doctor` checks the full list, `lsof`, `ps` with `-o lstart=`, `rg`, `jq`, `shellcheck`, `ssh`, and `git`, and prints the install command for each one that is missing; it exits 0 when all are present and changes nothing ([decision 0021](docs/decisions/0021-default-host-tools.md)).
 
+Setup masks systemd's `tmp.mount` so `/tmp` lives on the disk root after reboot, not as a RAM tmpfs. It never writes an `/etc/fstab` line for `/tmp`, and it checks that upstream `systemd-tmpfiles` still ages `/tmp` for 10 days with mode 1777 instead of copying that unit. An optional scratch directory under `~/.cache` is created only when the machine's `~/.config/groundwork/overrides.json` names it; that name is not in this repository, and the path must not sit under a git clone or `~/code`. Both settings are recorded in that override file with a reason ([decision 0022](docs/decisions/0022-tmp-on-disk.md)). `groundwork-doctor` reports when any of this is missing. Reboot after apply before treating `/tmp` as on disk.
+
 git-filter-repo stays off unless you pass `--with-git-filter-repo`. It installs per user with mise, needs no root, and is proven by `git filter-repo -h` listing `--sensitive-data-removal`. `--without-git-filter-repo` records a no. The procedure is the shared [history purge runbook](https://github.com/jasondockery/groundwork-core/blob/v0.8.1/docs/history-purge.md); this layer's install, proof, and removal are in [git-filter-repo](docs/git-filter-repo.md).
 
 Finish [Tailscale setup](docs/remote-access.md), including the tailnet policy review, interactive sign-in, and device approval. The local commands are:
@@ -64,6 +66,7 @@ Only enable SSH after reviewing that guide and your effective tailnet policy. No
 - From a Mac, connect to `vnc://MACHINE` with the generated local VNC password. Verify the screen and input, including after logout/login or reboot. Command+1 selects a workspace, and Option+1 selects a multiplexer window. Tailscale visibility alone does not prove a desktop server is running or permitted by policy.
 - If you passed `--with-blip`, finish on the desktop with the printed `blip-setup` command and the checks in [iMessage setup](docs/imessage.md). Send the first test message only to your own number.
 - If you passed `--with-local-inference`, the packages are installed and the GPU is still unproven. Run the three commands in [local inference](docs/local-inference.md) on this Mac and keep the report they write.
+- After reboot, `systemctl is-enabled tmp.mount` prints `masked` and `findmnt /tmp` is not tmpfs. `groundwork-doctor` reports tmp as ok. A scratch directory appears under `~/.cache` only if you named one in `~/.config/groundwork/overrides.json`.
 
 If a step fails, keep its error and fix it before treating the setup as accepted. The automated fixtures test installer behavior; they cannot prove your physical input devices, desktop, accounts, or a second machine's connection.
 
@@ -149,7 +152,10 @@ and is skipped; it never changes the exit status. Each prints only what it finds
 - `scripts/groundwork-disk-report.py --brief`: free space on `/` under, or within
   5 GiB of, the 10 GiB Omarchy needs to update.
 - `scripts/groundwork-doctor.py --brief`: each missing host tool with the command
-  that installs it ([decision 0021](docs/decisions/0021-default-host-tools.md)).
+  that installs it, and each tmp problem (unmasked `tmp.mount`, a `/tmp` fstab
+  line, missing tmpfiles aging, or a configured scratch directory that is
+  missing or in a forbidden place) ([decision 0021](docs/decisions/0021-default-host-tools.md),
+  [decision 0022](docs/decisions/0022-tmp-on-disk.md)).
 
 When none of them finds anything, `update-all` prints one line saying so. Run a
 script without `--brief` for the full report. Set `GROUNDWORK_SKIP_REPORTS=1` to
@@ -363,7 +369,8 @@ Omarchy keeps its own desktop, tmux file, shell, and Super keybindings. Practice
 | `scripts/omarchy-feed-watch.py` | Reports apps this layer installs itself that Omarchy now provides, and offers the move (`report`, `--json`, `--brief`, `dismiss <app>`). Read-only and offline unless `--online` is passed. `update-all` runs `report --brief` |
 | `omarchy-feed-watch.json` | The apps that report checks, each with Groundwork's method, Omarchy's candidates, and the dated evidence for keeping the self-install |
 | `scripts/groundwork-syncthing.py` | Syncthing as a user service on the tailnet, the `~/Shared` and FreeTube folders, and `groundwork syncthing-pair` |
-| `scripts/groundwork-doctor.py` | Read-only host-tools check, installed as `groundwork-doctor`: each missing tool with its install command, exit 1 until all are present. `update-all` runs `--brief` ([decision 0021](docs/decisions/0021-default-host-tools.md)) |
+| `scripts/groundwork-doctor.py` | Read-only host-tools and tmp check, installed as `groundwork-doctor`: each missing tool with its install command, and whether `tmp.mount` is masked with tmpfiles aging kept. `update-all` runs `--brief` ([decision 0021](docs/decisions/0021-default-host-tools.md), [decision 0022](docs/decisions/0022-tmp-on-disk.md)) |
+| `scripts/groundwork-tmp.py` | Masks `tmp.mount` so `/tmp` is on disk, never writes `/etc/fstab`, checks upstream systemd-tmpfiles aging, and creates optional `~/.cache` scratch from the machine override config ([decision 0022](docs/decisions/0022-tmp-on-disk.md)) |
 | `scripts/groundwork-path-shadow.py` | Read-only report of PATH entries that shadow a managed command (pacman or Omarchy package, mise, Groundwork-installed `t3`), with the shell file that sets the winning entry. Run it from the checkout; `--json`, `--brief`, and `--strict` are available. `update-all` runs `--brief`, and setup's `t3` check prints its report when another `t3` wins. It never deletes or edits anything. |
 
 ## Syncthing shared folders
