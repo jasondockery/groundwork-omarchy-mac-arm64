@@ -8,6 +8,10 @@ Checks:
   host tools  lsof, ps with `-o lstart=`, rg, jq, shellcheck, ssh, and git, the
               binaries common scripts and test harnesses assume (issue #130).
               Each missing tool is printed with the exact command that installs it.
+  temp storage  /tmp's backing (tmpfs or disk), the tmp.mount mask, a reboot still
+              pending after the mask, an /etc/fstab /tmp line that defeats it,
+              upstream tmpfiles ageing of /tmp, and the scratch roots
+              omarchy.json names (decision 0022, issue #138).
 
 --brief prints only problems, one line each, and nothing when every check
 passes. update-all runs it that way, after the update, next to its other reports.
@@ -16,7 +20,9 @@ Exit status: 0 when every check passes (or with --brief), 1 when a check
 fails, 2 for bad usage.
 """
 import argparse
+import importlib.util
 import os
+from pathlib import Path
 import shutil
 import subprocess
 import sys
@@ -62,25 +68,38 @@ def host_tool_problems(environ):
     return problems
 
 
+def temp_storage(environ):
+    """(problems, summary) from scripts/groundwork-tmp.py, which sits next to this file."""
+    spec = importlib.util.spec_from_file_location('groundwork_tmp', Path(__file__).resolve().parent / 'groundwork-tmp.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        return module.report(environ)
+    except (module.TmpError, OSError) as error:
+        return [f'The check could not run: {error}'], ''
+
+
 def main(argv=None, environ=None):
     parser = argparse.ArgumentParser(prog='groundwork-doctor',
                                      description='Check this machine and print the fix for each problem. Changes nothing.')
     parser.add_argument('--brief', action='store_true', help='print only problems, one line each; exit 0 unless usage is wrong')
     args = parser.parse_args(argv)
     environ = dict(os.environ if environ is None else environ)
-    problems = host_tool_problems(environ)
-    if args.brief:
-        for line in problems:
-            print(f'Host tools: {line}')
-        return 0
-    if problems:
-        print(f'Host tools: {len(problems)} problem{"s" if len(problems) != 1 else ""}')
-        for line in problems:
-            print(f'  {line}')
-        return 1
     names = ', '.join('ps -o lstart=' if command == 'ps' else command for command, _, _ in HOST_TOOLS)
-    print(f'Host tools: ok ({names})')
-    return 0
+    sections = [('Host tools', host_tool_problems(environ), names), ('Temp storage', *temp_storage(environ))]
+    status = 0
+    for label, problems, summary in sections:
+        if args.brief:
+            for line in problems:
+                print(f'{label}: {line}')
+        elif problems:
+            status = 1
+            print(f'{label}: {len(problems)} problem{"s" if len(problems) != 1 else ""}')
+            for line in problems:
+                print(f'  {line}')
+        else:
+            print(f'{label}: ok ({summary})')
+    return status
 
 
 if __name__ == '__main__':
