@@ -72,6 +72,16 @@ elif name == 'sudo':
         sys.exit(int(os.environ.get('FIXTURE_SUDO_V_STATUS', '0')))
     if args[0] == 'keyd':
         sys.exit(int(os.environ.get('FIXTURE_RELOAD_STATUS', '0')))
+    if args == ['systemctl', 'mask', 'tmp.mount']:
+        if os.environ.get('FIXTURE_MASK_STATUS', '0') != '0':
+            print('Failed to mask unit: File /etc/systemd/system/tmp.mount already exists.', file=sys.stderr)
+            sys.exit(int(os.environ['FIXTURE_MASK_STATUS']))
+        # What systemctl mask writes, inside the fixture's /etc.
+        unit = root / 'etc/systemd/system/tmp.mount'
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        if not unit.is_symlink():
+            unit.symlink_to('/dev/null')
+        sys.exit(0)
     if args[0] in ('systemctl', 'ufw'):
         sys.exit(0)
     if args[:2] == ['loginctl', 'enable-linger']:
@@ -331,6 +341,13 @@ elif name == 'systemctl':
     if args[:1] == ['--user'] and args[-1:] == ['syncthing.service'] and 'is-active' in args:
         # Not serving yet unless a test says otherwise.
         sys.exit(0 if os.environ.get('FIXTURE_SYNCTHING_ACTIVE') == '1' else 3)
+    if args == ['is-enabled', 'tmp.mount']:
+        unit = root / 'etc/systemd/system/tmp.mount'
+        if unit.is_symlink() and os.readlink(unit) == '/dev/null':
+            print('masked')
+            sys.exit(1)
+        print('static')
+        sys.exit(0)
     if args[:1] in (['is-enabled'], ['is-active']):
         sys.exit(3 if args[-1] in os.environ.get('FIXTURE_SERVICES_DOWN', '').split() else 0)
     sys.exit(int(os.environ.get('FIXTURE_USER_SYSTEMCTL_STATUS', '0')))
@@ -1085,6 +1102,7 @@ raise SystemExit(os.WEXITSTATUS(status))
                               (('--with-blip', '--without-blip'), False),
                               (('--with-local-inference', '--without-local-inference'), False),
                               (('--with-git-filter-repo', '--without-git-filter-repo'), False),
+                              (('--with-tmp-on-disk', '--without-tmp-on-disk'), False),
                               (('--help',), True)]:
             with self.subTest(args=args):
                 self.run_install(*args, success=success)
@@ -1361,6 +1379,93 @@ raise SystemExit(os.WEXITSTATUS(status))
         calls = self.calls()
         self.assertEqual([call for call in calls if call[0] == 'sudo'], [['sudo', '-n', 'true']])
         self.assertFalse(any(call[:3] == ['omarchy', 'pkg', 'aur'] for call in calls))
+
+    # /tmp on disk and scratch roots (decision 0022, issue #138).
+
+    def mask_calls(self):
+        return [call for call in self.calls() if 'tmp.mount' in call]
+
+    def test_setup_masks_tmp_mount_once_and_never_writes_fstab(self):
+        result = self.run_install()
+        self.assertEqual(self.mask_calls(), [['systemctl', 'is-enabled', 'tmp.mount'],
+                                             ['sudo', 'systemctl', 'mask', 'tmp.mount']])
+        self.assertIn('Masked tmp.mount. /tmp stays in RAM until the next reboot, which moves it to disk.', result.stdout)
+        self.assertFalse((self.root / 'etc/fstab').exists())
+        self.assertNotIn('tmp_on_disk', json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text()))
+        (self.root / 'calls.jsonl').unlink()
+        result = self.run_install()
+        self.assertNotIn(['sudo', 'systemctl', 'mask', 'tmp.mount'], self.calls())
+        self.assertNotIn('Masked tmp.mount', result.stdout)
+
+    def test_fstab_tmp_line_is_reported_and_tmp_mount_left_unmasked(self):
+        fstab = self.root / 'etc/fstab'
+        fstab.parent.mkdir(parents=True, exist_ok=True)
+        fstab.write_text('tmpfs /tmp tmpfs size=12G 0 0\n')
+        result = self.run_install()
+        self.assertNotIn(['sudo', 'systemctl', 'mask', 'tmp.mount'], self.calls())
+        self.assertIn('/etc/fstab mounts /tmp, which would defeat masking tmp.mount', result.stderr)
+        self.assertIn('  tmpfs /tmp tmpfs size=12G 0 0\n', result.stderr)
+        self.assertEqual(fstab.read_text(), 'tmpfs /tmp tmpfs size=12G 0 0\n')
+
+    def test_custom_tmp_mount_unit_is_reported_and_never_asks_for_sudo(self):
+        # What systemctl edit --full tmp.mount leaves; systemctl mask cannot replace it.
+        unit = self.root / 'etc/systemd/system/tmp.mount'
+        unit.parent.mkdir(parents=True)
+        unit.write_text('[Mount]\nWhat=tmpfs\nWhere=/tmp\nType=tmpfs\n')
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertNotIn(['sudo', 'systemctl', 'mask', 'tmp.mount'], self.calls())
+        self.assertIn('sudo systemctl revert tmp.mount', result.stderr)
+        self.assertEqual(unit.read_text(), '[Mount]\nWhat=tmpfs\nWhere=/tmp\nType=tmpfs\n')
+        (self.root / 'calls.jsonl').unlink()
+        self.env['FIXTURE_SUDO_CACHED'] = '0'
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('sudo was not used', result.stdout)
+        self.assertFalse(any(call[0] == 'sudo' for call in self.calls()))
+
+    def test_failed_mask_finishes_setup_then_exits_1(self):
+        self.env['FIXTURE_MASK_STATUS'] = '1'
+        result = self.run_install(success=False)
+        self.assertIn(['sudo', 'systemctl', 'mask', 'tmp.mount'], self.calls())
+        self.assertIn('tmp.mount could not be masked, so /tmp stays in RAM', result.stderr)
+        self.assertNotIn('Masked tmp.mount', result.stdout)
+        # Steps after the mask still ran: the choices were registered.
+        self.assertTrue((self.root / 'home/.config/groundwork/omarchy.json').is_file())
+        self.assertIn(['omarchy-install-ai-t3-code', 'nightly', '--no-launch'], self.calls())
+
+    def test_update_masks_an_unmasked_tmp_mount_and_opt_out_is_saved(self):
+        self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
+        (self.root / 'etc/systemd/system/tmp.mount').unlink()
+        self.env['FIXTURE_SUDO_CACHED'] = '1'
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('sudo was not used', result.stdout)
+        self.assertIn(['sudo', 'systemctl', 'mask', 'tmp.mount'], self.calls())
+        (self.root / 'etc/systemd/system/tmp.mount').unlink()
+        self.run_install('--without-keyd', '--without-screen-sharing', '--without-tmp-on-disk')
+        self.assertIs(json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())['tmp_on_disk'], False)
+        (self.root / 'calls.jsonl').unlink()
+        self.env['FIXTURE_SUDO_CACHED'] = '0'
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('sudo was not used', result.stdout)
+        self.assertNotIn(['sudo', 'systemctl', 'mask', 'tmp.mount'], self.calls())
+
+    def test_scratch_root_from_saved_config_is_created_and_kept_by_setup(self):
+        self.run_install()
+        config = self.root / 'home/.config/groundwork/omarchy.json'
+        saved = json.loads(config.read_text())
+        config.write_text(json.dumps(dict(saved, scratch_dirs=['work-scratch'])))
+        result = self.run_install()
+        scratch = self.root / 'home/.cache/work-scratch'
+        self.assertTrue(scratch.is_dir())
+        self.assertEqual(scratch.stat().st_mode & 0o7777, 0o700)
+        self.assertIn('Created scratch root', result.stdout)
+        self.assertEqual(json.loads(config.read_text())['scratch_dirs'], ['work-scratch'])
+        # A refused root (test_tmp_on_disk owns the reasons) makes setup exit 1.
+        (self.root / 'home/.git').mkdir()
+        config.write_text(json.dumps(dict(saved, scratch_dirs=['other-scratch'])))
+        self.run_install(success=False)
 
     def test_update_with_host_tools_present_adds_nothing(self):
         self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
