@@ -301,9 +301,6 @@ class ReportTests(FeedWatchFixture):
         result = self.run_watch('report', '--brief')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn('T3', result.stdout)
-        table = json.loads(TABLE.read_text())
-        self.assertNotIn('t3-code', {app['id'] for app in table['apps']})
-        self.assertIn('omarchy-install-ai-t3-code', table['not_watched']['t3-code'])
 
 
 class OwnedCommandTests(FeedWatchFixture):

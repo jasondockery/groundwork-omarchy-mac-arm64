@@ -201,7 +201,7 @@
   ],
   "not_watched": {
     "brave": "omarchy-install-browser brave (decision 0015).",
-    "t3-code": "omarchy-install-ai-t3-code nightly (decision 0020, issue #110). Groundwork only checks the app's builds on pages larger than 4 KiB, and the t3-cli switch moves a leftover bun CLI link.",
+    "t3-code": "omarchy-install-ai-t3-code nightly (decision 0020, issue #110). On pages larger than 4 KiB Groundwork checks the app's builds and, when the installed one fails, replaces it with the kept copy or a checked nightly; the t3-cli switch moves a leftover bun CLI link.",
     "obsidian": "Omarchy's own package.",
     "herdr": "Omarchy's own package.",
     "keyd": "omarchy pkg add keyd; Groundwork only writes its config (decision 0003).",
