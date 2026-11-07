@@ -3,33 +3,6 @@
   "about": "Apps Groundwork installs or sets up itself, and the Omarchy paths that could replace each one. Read by scripts/omarchy-feed-watch.py. Order of checks is AGENTS.md 'Omarchy first'. Apps already installed through omarchy pkg add or an Omarchy installer are listed under not_watched.",
   "apps": [
     {
-      "id": "t3-code",
-      "name": "T3 Code",
-      "doc": "docs/apps/t3-code.md",
-      "groundwork_method": "official T3 Code Nightly CLI (https://t3.codes/install.sh), reconciled by setup and update-all",
-      "probe": {
-        "path": "~/.t3/runtime/versions"
-      },
-      "candidates": [
-        {
-          "installer": "omarchy-install-ai-t3-code",
-          "command": "omarchy-install-ai-t3-code nightly --no-launch",
-          "menu": "Install > AI > T3 Code"
-        }
-      ],
-      "installer_keywords": [
-        "t3code",
-        "t3-code"
-      ],
-      "offer": "Decision 0020 (docs/decisions/0020-t3-code-through-omarchy-installer.md) moves T3 Code to Omarchy's installer, not the t3code-bin or t3code-nightly-bin packages. Until issue #110 ships that move as migration t3-cli, Groundwork's setup still reconciles the bun CLI, so wait for it. Quit T3 Code before any move; ~/.t3 and ~/.config/t3code stay.",
-      "self_install": {
-        "needed": true,
-        "evidence": "Decision 0020 (docs/decisions/0020-t3-code-through-omarchy-installer.md) keeps the official t3.codes/install.sh CLI, its pinned build and its update-all check only until issue #110's implementation merges, after #102. The feed's t3code packages are not used.",
-        "checked": "2026-10-31",
-        "recheck": "2026-11-30"
-      }
-    },
-    {
       "id": "bitwarden-desktop",
       "name": "Bitwarden desktop",
       "doc": "docs/apps/bitwarden.md",
@@ -228,6 +201,7 @@
   ],
   "not_watched": {
     "brave": "omarchy-install-browser brave (decision 0015).",
+    "t3-code": "omarchy-install-ai-t3-code nightly (decision 0020, issue #110). Groundwork only checks the app's builds on pages larger than 4 KiB, and the t3-cli switch moves a leftover bun CLI link.",
     "obsidian": "Omarchy's own package.",
     "herdr": "Omarchy's own package.",
     "keyd": "omarchy pkg add keyd; Groundwork only writes its config (decision 0003).",
