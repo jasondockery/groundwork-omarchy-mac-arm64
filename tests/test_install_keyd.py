@@ -73,6 +73,9 @@ elif name == 'sudo':
     if args[0] == 'keyd':
         sys.exit(int(os.environ.get('FIXTURE_RELOAD_STATUS', '0')))
     if args == ['systemctl', 'mask', 'tmp.mount']:
+        if os.environ.get('FIXTURE_MASK_STATUS', '0') != '0':
+            print('Failed to mask unit: File /etc/systemd/system/tmp.mount already exists.', file=sys.stderr)
+            sys.exit(int(os.environ['FIXTURE_MASK_STATUS']))
         # What systemctl mask writes, inside the fixture's /etc.
         unit = root / 'etc/systemd/system/tmp.mount'
         unit.parent.mkdir(parents=True, exist_ok=True)
@@ -1403,6 +1406,32 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertIn('/etc/fstab mounts /tmp, which would defeat masking tmp.mount', result.stderr)
         self.assertIn('  tmpfs /tmp tmpfs size=12G 0 0\n', result.stderr)
         self.assertEqual(fstab.read_text(), 'tmpfs /tmp tmpfs size=12G 0 0\n')
+
+    def test_custom_tmp_mount_unit_is_reported_and_never_asks_for_sudo(self):
+        # What systemctl edit --full tmp.mount leaves; systemctl mask cannot replace it.
+        unit = self.root / 'etc/systemd/system/tmp.mount'
+        unit.parent.mkdir(parents=True)
+        unit.write_text('[Mount]\nWhat=tmpfs\nWhere=/tmp\nType=tmpfs\n')
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertNotIn(['sudo', 'systemctl', 'mask', 'tmp.mount'], self.calls())
+        self.assertIn('sudo systemctl revert tmp.mount', result.stderr)
+        self.assertEqual(unit.read_text(), '[Mount]\nWhat=tmpfs\nWhere=/tmp\nType=tmpfs\n')
+        (self.root / 'calls.jsonl').unlink()
+        self.env['FIXTURE_SUDO_CACHED'] = '0'
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('sudo was not used', result.stdout)
+        self.assertFalse(any(call[0] == 'sudo' for call in self.calls()))
+
+    def test_failed_mask_finishes_setup_then_exits_1(self):
+        self.env['FIXTURE_MASK_STATUS'] = '1'
+        result = self.run_install(success=False)
+        self.assertIn(['sudo', 'systemctl', 'mask', 'tmp.mount'], self.calls())
+        self.assertIn('tmp.mount could not be masked, so /tmp stays in RAM', result.stderr)
+        self.assertNotIn('Masked tmp.mount', result.stdout)
+        # Steps after the mask still ran: the choices were registered.
+        self.assertTrue((self.root / 'home/.config/groundwork/omarchy.json').is_file())
+        self.assertIn(['omarchy-install-ai-t3-code', 'nightly', '--no-launch'], self.calls())
 
     def test_update_masks_an_unmasked_tmp_mount_and_opt_out_is_saved(self):
         self.prepare_routine_update('--without-keyd', '--without-screen-sharing')

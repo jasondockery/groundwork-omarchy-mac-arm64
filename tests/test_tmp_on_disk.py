@@ -31,9 +31,17 @@ UPSTREAM_TMPFILES = 'q /tmp 1777 root root 10d\nq /var/tmp 1777 root root 30d\n'
 # Reads the fixture's mask the way systemctl mask writes it.
 FAKE_SYSTEMCTL = f'''#!{sys.executable}
 import os, sys
+root = os.environ['GROUNDWORK_TEST_ROOT']
+if sys.argv[1:] == ['is-enabled', 'systemd-tmpfiles-clean.timer']:
+    timer = os.path.join(root, 'etc/systemd/system/systemd-tmpfiles-clean.timer')
+    if os.path.islink(timer) and os.readlink(timer) == '/dev/null':
+        print('masked')
+        sys.exit(1)
+    print('static')
+    sys.exit(0)
 if sys.argv[1:] != ['is-enabled', 'tmp.mount']:
     sys.exit(1)
-unit = os.path.join(os.environ['GROUNDWORK_TEST_ROOT'], 'etc/systemd/system/tmp.mount')
+unit = os.path.join(root, 'etc/systemd/system/tmp.mount')
 if os.path.islink(unit) and os.readlink(unit) == '/dev/null':
     print('masked')
     sys.exit(1)
@@ -152,10 +160,18 @@ class TempStorageTests(unittest.TestCase):
                     (self.bin / 'systemctl').write_text(body)
                     (self.bin / 'systemctl').chmod(0o755)
                 problems, summary = self.report()
-                self.assertEqual(len(problems), 1)
+                self.assertEqual(len(problems), 2)
                 self.assertIn('mask state is unknown', problems[0])
-                self.assertNotIn('not masked', problems[0] + summary)
+                self.assertIn('systemd-tmpfiles-clean.timer state is unknown', problems[1])
+                self.assertNotIn('not masked', ' '.join(problems) + summary)
                 self.assertIn('tmp.mount mask state unknown', summary)
+
+    def test_masked_tmpfiles_clean_timer_is_reported(self):
+        timer = self.system / 'etc/systemd/system/systemd-tmpfiles-clean.timer'
+        timer.symlink_to('/dev/null')
+        problems, _ = self.report()
+        self.assertEqual(problems, ['systemd-tmpfiles-clean.timer is masked, so nothing ages /tmp. '
+                                    'Unmask it with: sudo systemctl unmask systemd-tmpfiles-clean.timer'])
 
     def test_custom_tmp_mount_unit_is_reported_and_not_masked(self):
         # What systemctl edit --full tmp.mount leaves behind; systemctl mask refuses to replace it.

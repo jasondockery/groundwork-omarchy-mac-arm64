@@ -41,6 +41,7 @@ SCRATCH_MODE = 0o700
 SYSTEMCTL_SECONDS = 10
 # Overrides of the upstream tmpfiles rule, in the order systemd-tmpfiles reads them.
 TMP_UNIT = '/etc/systemd/system/tmp.mount'
+CLEAN_TIMER = 'systemd-tmpfiles-clean.timer'
 TMPFILES_UPSTREAM = '/usr/lib/tmpfiles.d/tmp.conf'
 TMPFILES_OVERRIDES = ('/etc/tmpfiles.d/tmp.conf', '/run/tmpfiles.d/tmp.conf')
 
@@ -280,10 +281,10 @@ def apply_scratch(environ):
     return status
 
 
-def mask_state(environ):
-    """systemctl is-enabled for tmp.mount ("masked", "static", ...), or None when unreadable."""
+def mask_state(environ, unit='tmp.mount'):
+    """systemctl is-enabled for `unit` ("masked", "static", ...), or None when unreadable. Read-only."""
     try:
-        result = subprocess.run(['systemctl', 'is-enabled', 'tmp.mount'], env=environ, stdin=subprocess.DEVNULL,
+        result = subprocess.run(['systemctl', 'is-enabled', unit], env=environ, stdin=subprocess.DEVNULL,
                                 capture_output=True, text=True, timeout=SYSTEMCTL_SECONDS)
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -328,6 +329,14 @@ def report(environ):
             problems.append('tmp.mount is masked, but /tmp is still tmpfs until the next reboot. '
                             'Reboot to move /tmp to disk, then check it with: findmnt -T /tmp')
     problems.extend(tmpfiles_problems(environ))
+    # The timer that runs the ageing. Only read, never changed.
+    timer = mask_state(environ, CLEAN_TIMER)
+    if timer is None:
+        problems.append(f'The {CLEAN_TIMER} state is unknown: systemctl is-enabled {CLEAN_TIMER} gave no answer, '
+                        f'so /tmp ageing could not be confirmed. Check it with: systemctl is-enabled {CLEAN_TIMER}')
+    elif timer.startswith('masked'):
+        problems.append(f'{CLEAN_TIMER} is masked, so nothing ages /tmp. '
+                        f'Unmask it with: sudo systemctl unmask {CLEAN_TIMER}')
     for name in names:
         target = Path(environ['HOME']) / '.cache' / name
         problem = scratch_problem(name, environ)

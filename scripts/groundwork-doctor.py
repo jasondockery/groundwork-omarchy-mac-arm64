@@ -8,9 +8,11 @@ Checks:
   host tools  lsof, ps with `-o lstart=`, rg, jq, shellcheck, ssh, and git, the
               binaries common scripts and test harnesses assume (issue #130).
               Each missing tool is printed with the exact command that installs it.
-  temp storage  /tmp's backing (tmpfs or disk), the tmp.mount mask, a reboot still
-              pending after the mask, an /etc/fstab /tmp line that defeats it,
-              upstream tmpfiles ageing of /tmp, and the scratch roots
+  temp storage  /tmp's backing (tmpfs or disk), the tmp.mount mask (or that its
+              state is unknown), a reboot still pending after the mask, an
+              /etc/fstab /tmp line or a custom /etc/systemd/system/tmp.mount
+              unit (setup skips the mask for either), upstream tmpfiles ageing
+              of /tmp and a masked systemd-tmpfiles-clean.timer, and the scratch roots
               omarchy.json names (decision 0022, issue #138).
 
 --brief prints only problems, one line each, and nothing when every check
