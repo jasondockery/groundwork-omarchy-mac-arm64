@@ -1433,12 +1433,10 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertEqual(scratch.stat().st_mode & 0o7777, 0o700)
         self.assertIn('Created scratch root', result.stdout)
         self.assertEqual(json.loads(config.read_text())['scratch_dirs'], ['work-scratch'])
-        # A clone in the way fails setup with the reason, after the rest was applied.
+        # A refused root (test_tmp_on_disk owns the reasons) makes setup exit 1.
         (self.root / 'home/.git').mkdir()
         config.write_text(json.dumps(dict(saved, scratch_dirs=['other-scratch'])))
-        result = self.run_install(success=False)
-        self.assertIn('resolves into the git work tree', result.stderr)
-        self.assertFalse((self.root / 'home/.cache/other-scratch').exists())
+        self.run_install(success=False)
 
     def test_update_with_host_tools_present_adds_nothing(self):
         self.prepare_routine_update('--without-keyd', '--without-screen-sharing')

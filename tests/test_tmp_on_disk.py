@@ -105,10 +105,12 @@ class TempStorageTests(unittest.TestCase):
 
     def test_fstab_tmp_line_is_reported_and_left_alone(self):
         fstab = self.system / 'etc/fstab'
-        before = fstab.read_text() + 'tmpfs /tmp tmpfs defaults,size=12G 0 0\n# tmpfs /tmp tmpfs x 0 0\n'
+        before = (fstab.read_text() + 'tmpfs /tmp tmpfs defaults,size=12G 0 0\n# tmpfs /tmp tmpfs x 0 0\n'
+                  'tmpfs //tmp/ tmpfs defaults 0 0\n')
         fstab.write_text(before)
         result = self.tmp_cli('fstab-tmp')
-        self.assertEqual((result.returncode, result.stdout), (0, 'tmpfs /tmp tmpfs defaults,size=12G 0 0\n'))
+        self.assertEqual((result.returncode, result.stdout),
+                         (0, 'tmpfs /tmp tmpfs defaults,size=12G 0 0\ntmpfs //tmp/ tmpfs defaults 0 0\n'))
         problems, _ = self.report()
         self.assertTrue(any('/etc/fstab mounts /tmp' in p and 'remove that line yourself' in p for p in problems), problems)
         self.assertEqual(fstab.read_text(), before)
@@ -133,8 +135,42 @@ class TempStorageTests(unittest.TestCase):
 
     def test_tmpfs_without_mask_names_the_fix(self):
         seed_system(self.system, tmp_kind='tmpfs', masked=False)
-        self.assertEqual(self.report()[0], ['/tmp is tmpfs and tmp.mount is not masked, so /tmp stays in RAM. '
+        self.assertEqual(self.report()[0], ['/tmp is tmpfs (RAM) and tmp.mount is not masked. '
                                             'Run groundwork-update (it masks tmp.mount), then reboot.'])
+
+    def test_disk_tmp_without_mask_is_worded_by_its_backing(self):
+        seed_system(self.system, masked=False)
+        self.assertEqual(self.report()[0], ['/tmp is on btrfs now, but tmp.mount is not masked, so a later boot can '
+                                            'mount it in RAM again. Run groundwork-update (it masks tmp.mount).'])
+
+    def test_missing_or_failing_systemctl_is_an_unknown_mask_state(self):
+        # A failing systemctl's output is not trusted, whatever it printed.
+        for body in (None, f'#!{sys.executable}\nimport sys\nprint("static")\nsys.exit(4)\n'):
+            with self.subTest(systemctl='missing' if body is None else 'fails'):
+                (self.bin / 'systemctl').unlink(missing_ok=True)
+                if body:
+                    (self.bin / 'systemctl').write_text(body)
+                    (self.bin / 'systemctl').chmod(0o755)
+                problems, summary = self.report()
+                self.assertEqual(len(problems), 1)
+                self.assertIn('mask state is unknown', problems[0])
+                self.assertNotIn('not masked', problems[0] + summary)
+                self.assertIn('tmp.mount mask state unknown', summary)
+
+    def test_custom_tmp_mount_unit_is_reported_and_not_masked(self):
+        # What systemctl edit --full tmp.mount leaves behind; systemctl mask refuses to replace it.
+        unit = self.system / 'etc/systemd/system/tmp.mount'
+        unit.unlink()
+        unit.write_text('[Mount]\nWhat=tmpfs\nWhere=/tmp\nType=tmpfs\nOptions=size=12G\n')
+        result = self.tmp_cli('tmp-unit')
+        self.assertEqual((result.returncode, result.stdout), (0, '/etc/systemd/system/tmp.mount\n'))
+        problems, _ = self.report()
+        self.assertEqual(len(problems), 1)
+        self.assertIn('/etc/systemd/system/tmp.mount is a tmp.mount unit of its own', problems[0])
+        self.assertIn('sudo systemctl revert tmp.mount', problems[0])
+        unit.unlink()
+        unit.symlink_to('/dev/null')
+        self.assertEqual(self.tmp_cli('tmp-unit').returncode, 1)
 
     def test_masked_but_still_tmpfs_is_a_pending_reboot(self):
         (self.system / 'proc/self/mountinfo').write_text(
@@ -249,12 +285,12 @@ class TempStorageTests(unittest.TestCase):
             status = doctor.main([], self.environ)
         self.assertEqual(status, 1)
         self.assertIn('Host tools: ok', output.getvalue())
-        self.assertIn('Temp storage: 1 problem\n  /tmp is tmpfs and tmp.mount is not masked', output.getvalue())
+        self.assertIn('Temp storage: 1 problem\n  /tmp is tmpfs (RAM) and tmp.mount is not masked', output.getvalue())
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             self.assertEqual(doctor.main(['--brief'], self.environ), 0)
         self.assertEqual(output.getvalue().splitlines(),
-                         ['Temp storage: /tmp is tmpfs and tmp.mount is not masked, so /tmp stays in RAM. '
+                         ['Temp storage: /tmp is tmpfs (RAM) and tmp.mount is not masked. '
                           'Run groundwork-update (it masks tmp.mount), then reboot.'])
 
 

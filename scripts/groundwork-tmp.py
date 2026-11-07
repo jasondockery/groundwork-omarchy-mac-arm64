@@ -4,6 +4,9 @@
 
   groundwork-tmp.py fstab-tmp      print each /etc/fstab line that mounts /tmp;
                                    exit 0 when there is one, 1 when there is none
+  groundwork-tmp.py tmp-unit       print /etc/systemd/system/tmp.mount when it is a
+                                   unit of its own, which systemctl mask cannot
+                                   replace; exit 0 when it is, 1 when not
   groundwork-tmp.py tmp-backing    print the filesystem type behind /tmp (tmpfs,
                                    btrfs, ...), or "unknown"
   groundwork-tmp.py apply-scratch  create each scratch root that omarchy.json's
@@ -19,9 +22,9 @@ Syncthing folder this layer manages (scripts/groundwork-syncthing.py). Omarchy,
 not this layer, manages snapper, and it snapshots only the root subvolume;
 ~/.cache is on /home, which has no snapper config.
 
-Exit status: 0 on success; for fstab-tmp, 1 when no line mounts /tmp. 1 when
-apply-scratch refused or could not create a scratch root. 2 when fstab-tmp or
-tmp-backing could not read the system, 64 for bad usage.
+Exit status: 0 on success; 1 from fstab-tmp or tmp-unit when there is none. 1 when
+apply-scratch refused or could not create a scratch root. 2 when fstab-tmp,
+tmp-unit, or tmp-backing could not read the system, 64 for bad usage.
 """
 import importlib.util
 import json
@@ -37,6 +40,7 @@ RAM_FILESYSTEMS = frozenset({'tmpfs', 'ramfs'})
 SCRATCH_MODE = 0o700
 SYSTEMCTL_SECONDS = 10
 # Overrides of the upstream tmpfiles rule, in the order systemd-tmpfiles reads them.
+TMP_UNIT = '/etc/systemd/system/tmp.mount'
 TMPFILES_UPSTREAM = '/usr/lib/tmpfiles.d/tmp.conf'
 TMPFILES_OVERRIDES = ('/etc/tmpfiles.d/tmp.conf', '/run/tmpfiles.d/tmp.conf')
 
@@ -115,9 +119,24 @@ def fstab_tmp_lines(environ):
         fields = line.split()
         if not fields or fields[0].startswith('#') or len(fields) < 2:
             continue
-        if os.path.normpath(unescape(fields[1])) == '/tmp':
+        # normpath keeps a leading "//", so collapse runs of slashes first.
+        if os.path.normpath(re.sub('/+', '/', unescape(fields[1]))) == '/tmp':
             lines.append(line.strip())
     return lines
+
+
+def custom_tmp_unit(environ):
+    """TMP_UNIT when it is a unit of its own (systemctl edit --full, a copy, or a link elsewhere), else None.
+
+    systemctl mask writes a symlink to /dev/null there and refuses to replace a
+    file it did not write, so this layer reports it and does not mask.
+    """
+    path = system_path(environ, TMP_UNIT)
+    if not path.exists() and not path.is_symlink():
+        return None
+    if path.is_symlink() and os.readlink(path) == '/dev/null':
+        return None
+    return TMP_UNIT
 
 
 def tmpfiles_problems(environ):
@@ -268,6 +287,9 @@ def mask_state(environ):
                                 capture_output=True, text=True, timeout=SYSTEMCTL_SECONDS)
     except (OSError, subprocess.TimeoutExpired):
         return None
+    # is-enabled exits 1 for a masked unit; anything else past 1 is a failure.
+    if result.returncode not in (0, 1):
+        return None
     return result.stdout.strip() or None
 
 
@@ -278,17 +300,31 @@ def report(environ):
     except TmpError as error:
         return [str(error)], ''
     backing = tmp_backing(environ)
-    masked = mask_state(environ) == 'masked'
+    state = mask_state(environ)
+    masked = state == 'masked'
     fstab = fstab_tmp_lines(environ)
+    unit = custom_tmp_unit(environ)
     problems = []
     if enabled:
         for line in fstab:
             problems.append(f'/etc/fstab mounts /tmp ("{line}"), which defeats masking tmp.mount. Setup does not edit '
                             'fstab: remove that line yourself, then run groundwork-update and reboot.')
-        if not fstab and not masked:
-            problems.append(f'/tmp is {backing} and tmp.mount is not masked, so /tmp stays in RAM. '
+        if unit:
+            problems.append(f'{unit} is a tmp.mount unit of its own (from systemctl edit --full or a copy), so '
+                            'systemctl mask cannot replace it and setup did not mask tmp.mount. Review it; to drop it, '
+                            'run: sudo systemctl revert tmp.mount, then groundwork-update, then reboot.')
+        if fstab or unit:
+            pass  # The conflict above is the finding; setup does not mask while it exists.
+        elif state is None:
+            problems.append('The tmp.mount mask state is unknown: systemctl is-enabled tmp.mount gave no answer. '
+                            'Check it with: systemctl is-enabled tmp.mount')
+        elif not masked and backing in RAM_FILESYSTEMS:
+            problems.append(f'/tmp is {backing} (RAM) and tmp.mount is not masked. '
                             'Run groundwork-update (it masks tmp.mount), then reboot.')
-        elif masked and backing in RAM_FILESYSTEMS:
+        elif not masked:
+            problems.append(f'/tmp is on {backing} now, but tmp.mount is not masked, so a later boot can mount '
+                            'it in RAM again. Run groundwork-update (it masks tmp.mount).')
+        elif backing in RAM_FILESYSTEMS:
             problems.append('tmp.mount is masked, but /tmp is still tmpfs until the next reboot. '
                             'Reboot to move /tmp to disk, then check it with: findmnt -T /tmp')
     problems.extend(tmpfiles_problems(environ))
@@ -299,10 +335,13 @@ def report(environ):
             problems.append(f'Scratch root refused: {problem}')
         elif not target.is_dir():
             problems.append(f'Scratch root {target} is missing. Run groundwork-update to create it.')
+        elif target.stat().st_uid != os.getuid():
+            problems.append(f'Scratch root {target} is not owned by you. Move it away, then run groundwork-update.')
         elif stat.S_IMODE(target.stat().st_mode) != SCRATCH_MODE:
             problems.append(f'Scratch root {target} is not mode 0700. Run groundwork-update, or: chmod 700 {target}')
     choice = 'on' if enabled else 'off by choice'
-    summary = (f'/tmp on {backing}, tmp.mount {"masked" if masked else "not masked"} (/tmp on disk {choice}), '
+    mask = 'masked' if masked else ('mask state unknown' if state is None else 'not masked')
+    summary = (f'/tmp on {backing}, tmp.mount {mask} (/tmp on disk {choice}), '
                f'tmpfiles ages /tmp after {tmpfiles_age(environ) or "?"}, '
                f'{len(names)} scratch root{"" if len(names) == 1 else "s"}')
     return problems, summary
@@ -311,8 +350,8 @@ def report(environ):
 def main(argv=None, environ=None):
     argv = sys.argv[1:] if argv is None else argv
     environ = dict(os.environ if environ is None else environ)
-    if len(argv) != 1 or argv[0] not in ('fstab-tmp', 'tmp-backing', 'apply-scratch'):
-        print('Usage: groundwork-tmp.py fstab-tmp|tmp-backing|apply-scratch', file=sys.stderr)
+    if len(argv) != 1 or argv[0] not in ('fstab-tmp', 'tmp-unit', 'tmp-backing', 'apply-scratch'):
+        print('Usage: groundwork-tmp.py fstab-tmp|tmp-unit|tmp-backing|apply-scratch', file=sys.stderr)
         return 64
     try:
         if argv[0] == 'fstab-tmp':
@@ -320,13 +359,18 @@ def main(argv=None, environ=None):
             for line in lines:
                 print(line)
             return 0 if lines else 1
+        if argv[0] == 'tmp-unit':
+            unit = custom_tmp_unit(environ)
+            if unit:
+                print(unit)
+            return 0 if unit else 1
         if argv[0] == 'tmp-backing':
             print(tmp_backing(environ))
             return 0
         return apply_scratch(environ)
     except (TmpError, OSError) as error:
         print(f'Groundwork temp storage: {error}', file=sys.stderr)
-        # 1 from fstab-tmp means "no /tmp line", so a failure there is 2.
+        # 1 from fstab-tmp and tmp-unit means "none", so a failure there is 2.
         if 'test-only' in str(error):
             return 64
         return 1 if argv[0] == 'apply-scratch' else 2

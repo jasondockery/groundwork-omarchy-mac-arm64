@@ -173,8 +173,8 @@ existing plugin checkouts at their current revisions. It can install a newly dec
 the settings. Use `./install.sh` with explicit `--with-keyd`, `--without-keyd`,
 `--with-screen-sharing`, `--without-screen-sharing`, `--with-blip`,
 `--without-blip`, `--with-local-inference`, `--without-local-inference`,
-`--with-git-filter-repo`, or `--without-git-filter-repo`
-when changing those preferences. Skipping an existing feature
+`--with-git-filter-repo`, `--without-git-filter-repo`, `--with-tmp-on-disk`,
+or `--without-tmp-on-disk` when changing those preferences. Skipping an existing feature
 does not disable its service or remove Blip.
 
 When an app this layer manages was installed another way than Omarchy's own

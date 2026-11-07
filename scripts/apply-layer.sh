@@ -326,7 +326,9 @@ syncthing_linger_needed() {
 # half of it, on machines whose only swap is zram. Masking it leaves /tmp a
 # directory on the root filesystem from the next boot. systemctl reads the mask
 # without sudo. An /etc/fstab line for /tmp would defeat the mask, so this
-# layer never writes one, and it does not mask while one exists.
+# layer never writes one, and it does not mask while one exists. A unit file
+# of its own at /etc/systemd/system/tmp.mount (systemctl edit --full) makes
+# systemctl mask fail, so that is reported and not masked either.
 tmp_mount_masked() {
   [[ $(systemctl is-enabled tmp.mount 2>/dev/null || true) == masked ]]
 }
@@ -336,8 +338,14 @@ tmp_fstab_conflict() {
   python3 "$root/scripts/groundwork-tmp.py" fstab-tmp >/dev/null || status=$?
   [[ $status -ne 1 ]]
 }
+# Exit 0 (a conflict) on a custom tmp.mount unit, and on any error checking it.
+tmp_unit_conflict() {
+  local status=0
+  python3 "$root/scripts/groundwork-tmp.py" tmp-unit >/dev/null || status=$?
+  [[ $status -ne 1 ]]
+}
 tmp_mask_needed() {
-  [[ $with_tmp_on_disk -eq 1 ]] && ! tmp_mount_masked && ! tmp_fstab_conflict
+  [[ $with_tmp_on_disk -eq 1 ]] && ! tmp_mount_masked && ! tmp_fstab_conflict && ! tmp_unit_conflict
 }
 # Brave (decision 0015). Install with Omarchy's browser installer, then keep it
 # only when its ELF files and a short launch work on this kernel. Chromium stays.
@@ -699,7 +707,7 @@ fi
 if [[ "$EUID" -ne 0 && $needs_privilege -eq 1 ]]; then
   if [[ $updating -eq 0 ]] && ! sudo -n true 2>/dev/null; then
     if [[ -r /dev/tty && -w /dev/tty ]] && : </dev/tty >/dev/null; then
-      echo "This install needs an administrator password for Tailscale, the browser extension, keyd, and lingering."
+      echo "This install needs an administrator password for Tailscale, the browser extension, keyd, lingering, and masking tmp.mount."
       echo "Enter your password when asked. This approval covers the privileged steps in this run."
       sudo_status=0
       # sudo -v reads the password on its own standard input. Point that prompt
@@ -935,14 +943,28 @@ apply_tmp_on_disk() {
     echo "/etc/fstab could not be read, so tmp.mount was not masked. Fix the message above, then rerun." >&2
     return 0
   fi
+  status=0
+  lines=$(python3 "$root/scripts/groundwork-tmp.py" tmp-unit) || status=$?
+  if [[ $status -eq 0 ]]; then
+    echo "$lines is a tmp.mount unit of its own (from systemctl edit --full or a copy), which systemctl mask cannot replace, so tmp.mount was not masked." >&2
+    echo "Review it. To drop it: sudo systemctl revert tmp.mount, then rerun groundwork-update and reboot." >&2
+    return 0
+  elif [[ $status -ne 1 ]]; then
+    echo "/etc/systemd/system/tmp.mount could not be checked, so tmp.mount was not masked. Fix the message above, then rerun." >&2
+    return 0
+  fi
   if ! tmp_mount_masked; then
-    sudo systemctl mask tmp.mount
+    if ! sudo systemctl mask tmp.mount; then
+      tmp_problem="tmp.mount could not be masked, so /tmp stays in RAM. Fix the message above, then rerun groundwork-update."
+      return 0
+    fi
     echo "Masked tmp.mount. /tmp stays in RAM until the next reboot, which moves it to disk. Nothing in /tmp was moved or removed."
   fi
   if [[ $(python3 "$root/scripts/groundwork-tmp.py" tmp-backing) == tmpfs ]]; then
     echo "Reboot to move /tmp to disk. Then check it with: findmnt -T /tmp"
   fi
 }
+tmp_problem=""
 apply_tmp_on_disk
 
 # Scratch roots under ~/.cache named in this machine's omarchy.json
@@ -2045,6 +2067,10 @@ if [[ -n $syncthing_problem ]]; then
 fi
 if [[ -n $t3_problem ]]; then
   echo "$t3_problem" >&2
+  exit 1
+fi
+if [[ -n $tmp_problem ]]; then
+  echo "$tmp_problem" >&2
   exit 1
 fi
 if [[ -n $scratch_problem ]]; then
