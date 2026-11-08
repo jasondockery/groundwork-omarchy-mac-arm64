@@ -10,8 +10,9 @@ Checks:
               Each missing tool is printed with the exact command that installs it.
   storage     TRIM through LUKS, the plocate prune drop-in, and btrfs zstd:1 on
               three build directories (decision 0022). Each gap is printed with
-              the command that fixes it. Nothing here enables discards, starts
-              a timer, or sets a property.
+              the command that fixes it. A checkout without the storage helper
+              reports that gap. Nothing here enables discards, starts a timer,
+              or sets a property. --help and bad usage do not need the helper.
 
 --brief prints only problems, one line each, and nothing when every check
 passes. update-all runs it that way, after the update, next to its other reports.
@@ -44,7 +45,10 @@ PS_PROBE_SECONDS = 5
 
 
 def load_storage():
+    """The storage helper beside this script, or None when this checkout does not have it."""
     path = Path(__file__).with_name('groundwork-storage.py')
+    if not path.is_file():
+        return None
     spec = importlib.util.spec_from_file_location('groundwork_storage', path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -79,6 +83,19 @@ def host_tool_problems(environ):
     return problems
 
 
+def storage_report(environ, brief):
+    """(text, failed). A missing helper is a reported problem, not a traceback."""
+    if STORAGE is None:
+        line = 'groundwork-storage.py is missing from this checkout.'
+        if brief:
+            return f'Storage defaults: {line}\n', True
+        return f'Storage defaults: 1 problem\n  {line}\n', True
+    machine = STORAGE.machine_from(environ)
+    if machine is None:
+        return '', False
+    return STORAGE.format_report(STORAGE.gather(machine), brief=brief)
+
+
 def main(argv=None, environ=None):
     parser = argparse.ArgumentParser(prog='groundwork-doctor',
                                      description='Check this machine and print the fix for each problem. Changes nothing.')
@@ -86,10 +103,7 @@ def main(argv=None, environ=None):
     args = parser.parse_args(argv)
     environ = dict(os.environ if environ is None else environ)
     problems = host_tool_problems(environ)
-    storage_text, storage_failed = '', False
-    machine = STORAGE.machine_from(environ)
-    if machine is not None:
-        storage_text, storage_failed = STORAGE.format_report(STORAGE.gather(machine), brief=args.brief)
+    storage_text, storage_failed = storage_report(environ, brief=args.brief)
     if args.brief:
         for line in problems:
             print(f'Host tools: {line}')

@@ -172,6 +172,34 @@ class HostToolsTests(unittest.TestCase):
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual((result.returncode, result.stdout), (0, ''), result.stderr)
 
+    def test_help_and_unknown_do_not_need_the_storage_helper(self):
+        """A checkout that has the doctor but not the storage sibling still answers usage."""
+        alone = self.root / 'alone'
+        alone.mkdir()
+        script = alone / 'groundwork-doctor.py'
+        script.write_text(SCRIPT.read_text())
+        script.chmod(0o755)
+        help_result = subprocess.run([sys.executable, str(script), '--help'],
+                                     capture_output=True, text=True, timeout=10)
+        self.assertEqual(help_result.returncode, 0, help_result.stderr)
+        self.assertIn('groundwork-doctor', help_result.stdout)
+        self.assertNotIn('Traceback', help_result.stderr)
+        unknown = subprocess.run([sys.executable, str(script), '--nope'],
+                                 capture_output=True, text=True, timeout=10)
+        self.assertEqual(unknown.returncode, 2, unknown.stderr)
+        self.assertNotIn('Traceback', unknown.stderr)
+        check = subprocess.run([sys.executable, str(script)],
+                               env={'PATH': str(self.bin), 'HOME': self.environ['HOME']},
+                               capture_output=True, text=True, timeout=10)
+        self.assertEqual(check.returncode, 1, check.stderr)
+        self.assertIn('groundwork-storage.py is missing from this checkout.', check.stdout)
+        self.assertNotIn('Traceback', check.stderr)
+        brief = subprocess.run([sys.executable, str(script), '--brief'],
+                               env={'PATH': str(self.bin), 'HOME': self.environ['HOME']},
+                               capture_output=True, text=True, timeout=10)
+        self.assertEqual(brief.returncode, 0, brief.stderr)
+        self.assertEqual(brief.stdout, 'Storage defaults: groundwork-storage.py is missing from this checkout.\n')
+
     def test_bad_usage_exits_2(self):
         result = subprocess.run([sys.executable, str(SCRIPT), '--nope'], env=self.environ,
                                 capture_output=True, text=True, timeout=10)
