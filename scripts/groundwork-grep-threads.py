@@ -12,8 +12,9 @@ its text differs from the rendered cap below, so a value of 4 beside another
 key, or without the reason comment, is replaced. A second run of that exact
 text does not rewrite it. ~/.config/git/config gains an include.path for the
 canonical file when that path is absent. Any other include.path whose file is
-named grep-threads.gitconfig is removed, including one listed later, so a
-stale copy cannot override the cap. Other include paths are left as they are.
+named grep-threads.gitconfig is removed, including repeated copies and one
+listed later, so a stale copy cannot override the cap. Other include paths
+are left as they are.
 
 Subcommand: apply
 Exit status: 0 done or nothing to do, 1 a step failed, 2 usage.
@@ -118,26 +119,38 @@ def same_include(value, include):
 
 
 def drop_stale_includes(target, include):
-    """Remove include.path entries for a different grep-threads.gitconfig.
+    """Remove every include.path for a different grep-threads.gitconfig.
 
     Git uses the last value. A later copy of this file would override the cap
-    even when the canonical path is already listed. Other include paths stay.
+    even when the canonical path is already listed. The same path may be listed
+    more than once. `git config --unset` then exits 5 and deletes nothing, so
+    this uses `--unset-all` once per distinct path and checks that none remain.
+    Other include paths stay.
     """
     require_regular_or_absent(target)
     current = git_values(target, 'include.path') or []
-    stale = [
-        value for value in current
-        if not same_include(value, include) and Path(value).name == include.name
-    ]
+    stale = []
+    for value in current:
+        if same_include(value, include) or Path(value).name != include.name:
+            continue
+        if value not in stale:
+            stale.append(value)
     if not stale:
         return False
     for value in stale:
         result = subprocess.run(
             ['git', 'config', '--file', str(target), '--fixed-value',
-             '--unset', 'include.path', value],
+             '--unset-all', 'include.path', value],
             capture_output=True, text=True, env=git_env())
-        if result.returncode not in (0, 5):
-            raise OSError(result.stderr.strip() or f'cannot remove include.path {value}')
+        if result.returncode != 0:
+            detail = result.stderr.strip() or f'exit {result.returncode}'
+            raise OSError(f'cannot remove include.path {value} ({detail})')
+    remaining = [
+        value for value in (git_values(target, 'include.path') or [])
+        if not same_include(value, include) and Path(value).name == include.name
+    ]
+    if remaining:
+        raise OSError(f'stale include.path still present: {remaining[0]}')
     return True
 
 

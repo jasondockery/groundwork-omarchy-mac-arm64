@@ -2,7 +2,7 @@
 
 Protects: the Groundwork-owned include renders exactly 4, a later run of that
 exact text does not rewrite it, a file that merely parses as 4 is replaced,
-and a stale grep-threads.gitconfig include path is removed.
+and every copy of a stale grep-threads.gitconfig include path is removed.
 Distinct value: no other test writes or parses this include.
 """
 import os
@@ -171,6 +171,32 @@ class GrepThreadsTests(unittest.TestCase):
         self.assertEqual(effective.stdout, '4\n', effective.stderr)
         included = self.git('config', '--file', str(config), '--get-all', 'include.path')
         self.assertEqual(included.stdout.splitlines(), [str(self.include())])
+
+    def test_repeated_stale_grep_include_is_removed(self):
+        first = self.apply()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        stale = self.home / 'stale' / 'grep-threads.gitconfig'
+        stale.parent.mkdir(parents=True)
+        stale.write_text('[grep]\n\tthreads = 8\n')
+        other = self.home / 'other.gitconfig'
+        other.write_text('[diff]\n\trenames = true\n')
+        config = self.gitconfig()
+        with config.open('a', encoding='utf-8') as output:
+            output.write(
+                f'[include]\n\tpath = {stale}\n\tpath = {stale}\n\tpath = {other}\n')
+        before = self.git('config', '--get', 'grep.threads')
+        self.assertEqual(before.stdout, '8\n', before.stderr)
+        result = self.apply()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(str(stale), config.read_text())
+        effective = self.git('config', '--get-all', 'grep.threads')
+        self.assertEqual(effective.stdout, '4\n', effective.stderr)
+        included = self.git('config', '--file', str(config), '--get-all', 'include.path')
+        self.assertEqual(included.stdout.splitlines(), [str(self.include()), str(other)])
+        again = self.apply()
+        self.assertEqual(again.returncode, 0, again.stderr)
+        effective = self.git('config', '--get-all', 'grep.threads')
+        self.assertEqual(effective.stdout, '4\n', effective.stderr)
 
     def test_xdg_config_home_is_honored(self):
         xdg = Path(self.temp.name) / 'xdg'

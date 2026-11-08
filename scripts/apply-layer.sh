@@ -1787,7 +1787,7 @@ fi
 
 # One git-default exception (decision 0001): cap git grep at 4 threads. Agents run
 # many searches, and upstream starts one worker per core. The helper rewrites its
-# include when the text differs, and drops a stale grep-threads.gitconfig path.
+# include when the text differs, and drops every stale grep-threads.gitconfig path.
 # A failure here is reported but does not stop setup.
 python3 "$root/scripts/groundwork-grep-threads.py" apply ||
   echo "grep.threads was not set. Run groundwork-update after fixing the message above." >&2
