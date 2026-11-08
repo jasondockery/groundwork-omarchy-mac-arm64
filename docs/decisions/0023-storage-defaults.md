@@ -1,4 +1,4 @@
-# 0022. TRIM through LUKS, a smaller locate index, and no per-directory zstd level
+# 0023. TRIM through LUKS, a smaller locate index, and no per-directory zstd level
 
 Checked against the reference machine's reported layout on 2026-11-08. Issue #145. This apply has not been run on the machine; the owner runs `./install.sh` or `update-all`. A package check is not that proof.
 

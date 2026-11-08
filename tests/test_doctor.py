@@ -1,7 +1,8 @@
 """groundwork-doctor's host-tools check (decision 0021, issue #130).
 
-Every run uses a private PATH of stub binaries, so the host's own tools never
-decide a result.
+Every run uses a private PATH of stub binaries and a private system root with
+/tmp already on disk, so the host's own tools, /tmp, and the LUKS root never
+decide a result. The temp-storage findings are in test_tmp_on_disk.
 """
 import contextlib
 import importlib.util
@@ -13,6 +14,8 @@ import sys
 import tempfile
 import unittest
 
+import test_tmp_on_disk
+
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / 'scripts/groundwork-doctor.py'
 spec = importlib.util.spec_from_file_location('groundwork_doctor', SCRIPT)
@@ -23,6 +26,7 @@ TOOLS = ('lsof', 'ps', 'rg', 'jq', 'shellcheck', 'ssh', 'git')
 # procps-ng prints a start time for `ps -o lstart= -p PID`.
 PROCPS_PS = '#!/bin/sh\n[ "$1" = -o ] && [ "$2" = lstart= ] && { echo "Tue Nov  3 21:38:13 2026"; exit 0; }\nexit 0\n'
 # busybox ps rejects the lstart format.
+TEMP_OK = '/tmp on btrfs, tmp.mount masked (/tmp on disk on), tmpfiles ages /tmp after 10d, 0 scratch roots'
 BUSYBOX_PS = '#!/bin/sh\necho "ps: bad -o argument \'lstart\'" >&2\nexit 1\n'
 
 
@@ -30,16 +34,19 @@ class HostToolsTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory(prefix='groundwork-doctor-')
         self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name)
+        self.root = Path(temp.name).resolve()
         self.bin = self.root / 'bin'
         self.bin.mkdir()
         for name in TOOLS:
             self.stub(name, PROCPS_PS if name == 'ps' else '#!/bin/sh\nexit 0\n')
         home = self.root / 'home'
         home.mkdir()
+        system = self.root / 'system'
+        test_tmp_on_disk.seed_system(system)
+        test_tmp_on_disk.fake_systemctl(self.bin)
         self.environ = {
-            'PATH': str(self.bin), 'HOME': str(home),
-            'GROUNDWORK_STORAGE_ROOT': str(self.root), 'GROUNDWORK_TESTING': '1',
+            'PATH': str(self.bin), 'HOME': str(home), 'GROUNDWORK_TESTING': '1',
+            'GROUNDWORK_TEST_ROOT': str(system), 'GROUNDWORK_STORAGE_ROOT': str(self.root),
         }
         self.install_storage_stubs(home)
         for key, sub in (('XDG_CONFIG_HOME', '.config'), ('XDG_STATE_HOME', '.local/state'),
@@ -68,10 +75,19 @@ class HostToolsTests(unittest.TestCase):
         self.stub('findmnt', '#!/bin/sh\n[ "$3" = FSTYPE ] && { echo btrfs; exit 0; }\n'
                               '[ "$1" = -n ] && [ "$4" = / ] && echo /dev/mapper/root\n')
         self.stub('lsblk', '#!/bin/sh\ncase "$2" in TYPE) echo crypt ;; DISC-GRAN) echo 512B ;; esac\n')
-        self.stub('systemctl', '#!/bin/sh\n[ "$1" = is-enabled ] && { echo enabled; exit 0; }\n'
-                               '[ "$1" = show ] && { printf "%s\\n" '
-                               '"$GROUNDWORK_STORAGE_ROOT/etc/systemd/system/plocate-updatedb.service.d/groundwork-prunes.conf"; exit 0; }\n'
-                               'exit 0\n')
+        systemctl = test_tmp_on_disk.FAKE_SYSTEMCTL
+        extra = (
+            "if sys.argv[1:] == ['is-enabled', 'fstrim.timer']:\n"
+            "    print('enabled')\n"
+            "    sys.exit(0)\n"
+            "if sys.argv[1:4] == ['show', '-p', 'DropInPaths']:\n"
+            "    print(os.environ['GROUNDWORK_STORAGE_ROOT'] + "
+            "'/etc/systemd/system/plocate-updatedb.service.d/groundwork-prunes.conf')\n"
+            "    sys.exit(0)\n"
+        )
+        needle = "if sys.argv[1:] != ['is-enabled', 'tmp.mount']:"
+        self.assertIn(needle, systemctl)
+        self.stub('systemctl', systemctl.replace(needle, extra + needle, 1))
         self.stub('btrfs', '#!/bin/sh\necho "btrfs must not be used" >&2\nexit 1\n')
 
     def storage_ok(self):
@@ -90,7 +106,8 @@ class HostToolsTests(unittest.TestCase):
     def test_all_present_passes(self):
         status, text = self.doctor()
         self.assertEqual(status, 0)
-        self.assertEqual(text, 'Host tools: ok (lsof, ps -o lstart=, rg, jq, shellcheck, ssh, git)\n' + self.storage_ok())
+        self.assertEqual(text, 'Host tools: ok (lsof, ps -o lstart=, rg, jq, shellcheck, ssh, git)\n'
+                               f'Temp storage: ok ({TEMP_OK})\n' + self.storage_ok())
         self.assertEqual(self.doctor('--brief'), (0, ''))
 
     def test_each_missing_tool_names_its_install_line(self):
@@ -123,6 +140,7 @@ class HostToolsTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertEqual(text, 'Host tools: 1 problem\n'
                                '  lsof is missing (lsof). Install it with: sudo pacman -S --needed lsof\n'
+                               f'Temp storage: ok ({TEMP_OK})\n'
                                + self.storage_ok())
 
     def test_several_missing_tools_are_each_listed(self):
@@ -194,12 +212,14 @@ class HostToolsTests(unittest.TestCase):
                                capture_output=True, text=True, timeout=10)
         self.assertEqual(check.returncode, 1, check.stderr)
         self.assertIn('groundwork-storage.py is missing from this checkout.', check.stdout)
+        self.assertIn('groundwork-tmp.py is missing from this checkout.', check.stdout)
         self.assertNotIn('Traceback', check.stderr)
         brief = subprocess.run([sys.executable, str(script), '--brief'],
                                env={'PATH': str(self.bin), 'HOME': self.environ['HOME']},
                                capture_output=True, text=True, timeout=10)
         self.assertEqual(brief.returncode, 0, brief.stderr)
-        self.assertEqual(brief.stdout, 'Storage defaults: groundwork-storage.py is missing from this checkout.\n')
+        self.assertEqual(brief.stdout, 'Temp storage: groundwork-tmp.py is missing from this checkout.\n'
+                                       'Storage defaults: groundwork-storage.py is missing from this checkout.\n')
 
     def test_bad_usage_exits_2(self):
         result = subprocess.run([sys.executable, str(SCRIPT), '--nope'], env=self.environ,

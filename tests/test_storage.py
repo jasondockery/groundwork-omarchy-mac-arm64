@@ -1,4 +1,4 @@
-"""TRIM through LUKS and plocate prunes (decision 0022).
+"""TRIM through LUKS and plocate prunes (decision 0023).
 
 Every command is a stand-in. Nothing here calls cryptsetup, systemctl, or btrfs
 on the machine running the tests.
@@ -162,7 +162,7 @@ class StorageTests(unittest.TestCase):
         account = 'ja' + 'son'
         self.assertNotIn(account, text.lower())
         self.assertNotIn('SW' + 'ORPS', text)
-        for path in (SCRIPT, storage.TEMPLATE, REPO / 'docs/decisions/0022-storage-defaults.md', Path(__file__)):
+        for path in (SCRIPT, storage.TEMPLATE, REPO / 'docs/decisions/0023-storage-defaults.md', Path(__file__)):
             source = path.read_text(encoding='utf-8')
             self.assertNotIn('SW' + 'ORPS', source)
             self.assertNotIn('/home/' + account, source)

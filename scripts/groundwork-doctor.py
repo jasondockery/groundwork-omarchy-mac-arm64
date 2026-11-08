@@ -8,12 +8,19 @@ Checks:
   host tools  lsof, ps with `-o lstart=`, rg, jq, shellcheck, ssh, and git, the
               binaries common scripts and test harnesses assume (issue #130).
               Each missing tool is printed with the exact command that installs it.
-  storage     TRIM through LUKS and the plocate prune drop-in (decision 0022).
+  temp storage  /tmp's backing (tmpfs or disk), the tmp.mount mask (or that its
+              state is unknown), a reboot still pending after the mask, an
+              /etc/fstab /tmp line or a custom /etc/systemd/system/tmp.mount
+              unit (setup skips the mask for either), upstream tmpfiles ageing
+              of /tmp and a masked systemd-tmpfiles-clean.timer, and the scratch roots
+              omarchy.json names (decision 0022, issue #138). A checkout without
+              the temp-storage helper reports that gap.
+  storage     TRIM through LUKS and the plocate prune drop-in (decision 0023).
               Each gap is printed with the command that fixes it. A directory
               property cannot choose a zstd level, so that check does not set
               one. A checkout without the storage helper reports that gap.
               Nothing here enables discards, starts a timer, or sets a property.
-              --help and bad usage do not need the helper.
+              --help and bad usage do not need either helper.
 
 --brief prints only problems, one line each, and nothing when every check
 passes. update-all runs it that way, after the update, next to its other reports.
@@ -84,6 +91,20 @@ def host_tool_problems(environ):
     return problems
 
 
+def temp_storage(environ):
+    """(problems, summary) from scripts/groundwork-tmp.py, which sits next to this file."""
+    path = Path(__file__).resolve().parent / 'groundwork-tmp.py'
+    if not path.is_file():
+        return ['groundwork-tmp.py is missing from this checkout.'], ''
+    spec = importlib.util.spec_from_file_location('groundwork_tmp', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        return module.report(environ)
+    except (module.TmpError, OSError) as error:
+        return [f'The check could not run: {error}'], ''
+
+
 def storage_report(environ, brief):
     """(text, failed). A missing helper is a reported problem, not a traceback."""
     if STORAGE is None:
@@ -109,24 +130,26 @@ def main(argv=None, environ=None):
     parser.add_argument('--brief', action='store_true', help='print only problems, one line each; exit 0 unless usage is wrong')
     args = parser.parse_args(argv)
     environ = dict(os.environ if environ is None else environ)
-    problems = host_tool_problems(environ)
+    names = ', '.join('ps -o lstart=' if command == 'ps' else command for command, _, _ in HOST_TOOLS)
+    sections = [('Host tools', host_tool_problems(environ), names), ('Temp storage', *temp_storage(environ))]
+    status = 0
+    for label, problems, summary in sections:
+        if args.brief:
+            for line in problems:
+                print(f'{label}: {line}')
+        elif problems:
+            status = 1
+            print(f'{label}: {len(problems)} problem{"s" if len(problems) != 1 else ""}')
+            for line in problems:
+                print(f'  {line}')
+        else:
+            print(f'{label}: ok ({summary})')
     storage_text, storage_failed = storage_report(environ, brief=args.brief)
-    if args.brief:
-        for line in problems:
-            print(f'Host tools: {line}')
-        if storage_text:
-            print(storage_text, end='')
-        return 0
-    if problems:
-        print(f'Host tools: {len(problems)} problem{"s" if len(problems) != 1 else ""}')
-        for line in problems:
-            print(f'  {line}')
-    else:
-        names = ', '.join('ps -o lstart=' if command == 'ps' else command for command, _, _ in HOST_TOOLS)
-        print(f'Host tools: ok ({names})')
     if storage_text:
         print(storage_text, end='')
-    return 1 if problems or storage_failed else 0
+    if storage_failed and not args.brief:
+        status = 1
+    return status
 
 
 if __name__ == '__main__':

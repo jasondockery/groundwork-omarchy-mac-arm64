@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Storage defaults (decision 0022, issue #145).
+# Storage defaults (decision 0023, issue #145).
 """Apply and check TRIM through LUKS and plocate prunes.
 
   groundwork-storage.py needed

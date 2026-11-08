@@ -7,7 +7,7 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip] [--with-local-inference|--without-local-inference] [--with-git-filter-repo|--without-git-filter-repo] [--migrate-to-omarchy-installers] [--keep-standalone-t3]"
+  echo "Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip] [--with-local-inference|--without-local-inference] [--with-git-filter-repo|--without-git-filter-repo] [--with-tmp-on-disk|--without-tmp-on-disk] [--migrate-to-omarchy-installers] [--keep-standalone-t3]"
   echo "Caps Lock defaults to Escape on tap and Control while held."
   echo "Saved setup choices are reused; explicit options change those choices."
   echo "--without-keyd leaves any existing keyd configuration and service unchanged."
@@ -18,6 +18,8 @@ usage() {
   echo "--without-local-inference records that preference as off. See docs/local-inference.md."
   echo "--with-git-filter-repo installs git-filter-repo for your user with mise, never with sudo. It is off by default."
   echo "--without-git-filter-repo records that preference as off and leaves an installed copy alone. See docs/git-filter-repo.md."
+  echo "--with-tmp-on-disk (the default) masks tmp.mount, so /tmp is on the root filesystem after the next reboot."
+  echo "--without-tmp-on-disk records that preference as off and leaves an existing mask alone. See docs/decisions/0022-tmp-on-disk.md."
   echo "--migrate-to-omarchy-installers moves apps installed another way to Omarchy's own installer,"
   echo "  even after an earlier no. Without it, setup asks first and updates only report."
   echo "--keep-standalone-t3 points ~/.local/bin/t3 back at the standalone t3 CLI that setup switched"
@@ -29,11 +31,13 @@ with_screen_sharing=1
 with_blip=0
 with_local_inference=0
 with_git_filter_repo=0
+with_tmp_on_disk=1
 keyd_choice=""
 sharing_choice=""
 blip_choice=""
 local_inference_choice=""
 git_filter_repo_choice=""
+tmp_on_disk_choice=""
 updating=0
 update_plugins=0
 migrate_requested=0
@@ -83,6 +87,14 @@ for arg in "$@"; do
       fi
       git_filter_repo_choice=$arg
       [[ $arg == --with-git-filter-repo ]] && with_git_filter_repo=1 || with_git_filter_repo=0
+      ;;
+    --with-tmp-on-disk | --without-tmp-on-disk)
+      if [[ -n $tmp_on_disk_choice && $tmp_on_disk_choice != "$arg" ]]; then
+        echo "Choose only one of --with-tmp-on-disk and --without-tmp-on-disk." >&2
+        exit 64
+      fi
+      tmp_on_disk_choice=$arg
+      [[ $arg == --with-tmp-on-disk ]] && with_tmp_on_disk=1 || with_tmp_on_disk=0
       ;;
     --update) updating=1 ;;
     --update-plugins) update_plugins=1 ;;
@@ -176,6 +188,17 @@ if [[ -n $stored ]]; then
         ;;
     esac
   fi
+  # Only an opt-out is saved; no line means on (decision 0022).
+  if [[ -z $tmp_on_disk_choice ]]; then
+    case ${preferences[7]-} in
+      '') ;;
+      0) with_tmp_on_disk=0 ;;
+      *)
+        echo "Saved /tmp on disk choice is invalid. Preserve ~/.config/groundwork/omarchy.json and repair it before rerunning." >&2
+        exit 1
+        ;;
+    esac
+  fi
 fi
 
 # An updater installed before the Brave spec fast-forwards and then runs this
@@ -187,8 +210,8 @@ fi
 
 # Fail before installing packages or moving files when the checkout is incomplete.
 # The Bitwarden extension id and Brave policies are read from core, not a copy here.
-[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$root/scripts/groundwork-node-pin.py" && -f "$root/scripts/groundwork-commit-guard.py" && -f "$root/scripts/groundwork-storage.py" && -f "$root/config/plocate-updatedb.service.d.conf" && -f "$root/core/browser/brave.json" && ! -L "$root/core/browser/brave.json" ]] || {
-  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, Node pin helper, commit guard helper, storage helper, plocate drop-in, or Brave spec is missing." >&2
+[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$root/scripts/groundwork-node-pin.py" && -f "$root/scripts/groundwork-commit-guard.py" && -f "$root/scripts/groundwork-tmp.py" && -f "$root/scripts/groundwork-storage.py" && -f "$root/config/plocate-updatedb.service.d.conf" && -f "$root/core/browser/brave.json" && ! -L "$root/core/browser/brave.json" ]] || {
+  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, Node pin helper, commit guard helper, temp storage helper, storage helper, plocate drop-in, or Brave spec is missing." >&2
   exit 1
 }
 
@@ -298,6 +321,31 @@ syncthing_linger_enabled() {
 }
 syncthing_linger_needed() {
   syncthing_always_on && ! syncthing_linger_enabled
+}
+# /tmp on disk (decision 0022). systemd's tmp.mount puts /tmp in RAM, capped at
+# half of it, on machines whose only swap is zram. Masking it leaves /tmp a
+# directory on the root filesystem from the next boot. systemctl reads the mask
+# without sudo. An /etc/fstab line for /tmp would defeat the mask, so this
+# layer never writes one, and it does not mask while one exists. A unit file
+# of its own at /etc/systemd/system/tmp.mount (systemctl edit --full) makes
+# systemctl mask fail, so that is reported and not masked either.
+tmp_mount_masked() {
+  [[ $(systemctl is-enabled tmp.mount 2>/dev/null || true) == masked ]]
+}
+# Exit 0 (a conflict) on an fstab /tmp line, and on any error reading fstab.
+tmp_fstab_conflict() {
+  local status=0
+  python3 "$root/scripts/groundwork-tmp.py" fstab-tmp >/dev/null || status=$?
+  [[ $status -ne 1 ]]
+}
+# Exit 0 (a conflict) on a custom tmp.mount unit, and on any error checking it.
+tmp_unit_conflict() {
+  local status=0
+  python3 "$root/scripts/groundwork-tmp.py" tmp-unit >/dev/null || status=$?
+  [[ $status -ne 1 ]]
+}
+tmp_mask_needed() {
+  [[ $with_tmp_on_disk -eq 1 ]] && ! tmp_mount_masked && ! tmp_fstab_conflict && ! tmp_unit_conflict
 }
 # Brave (decision 0015). Install with Omarchy's browser installer, then keep it
 # only when its ELF files and a short launch work on this kernel. Chromium stays.
@@ -589,6 +637,7 @@ privileged_changes_needed() {
   for executable in cursor herdr tailscale syncthing obsidian bw readelf lsof; do
     command -v "$executable" >/dev/null || return 0
   done
+  tmp_mask_needed && return 0
   # FreeTube is a user Flatpak, so a missing flatpak package still needs
   # administrator permission even when a native Bitwarden desktop is present.
   if ! command -v flatpak >/dev/null; then
@@ -628,7 +677,7 @@ privileged_changes_needed() {
   if [[ $with_local_inference -eq 1 ]] && ! local_inference_ready; then
     return 0
   fi
-  # TRIM, fstrim.timer, or the plocate drop-in still pending (decision 0022).
+  # TRIM, fstrim.timer, or the plocate drop-in still pending (decision 0023).
   # Read-only. A directory zstd level is not applied.
   if python3 "$root/scripts/groundwork-storage.py" needed; then
     return 0
@@ -663,7 +712,7 @@ fi
 if [[ "$EUID" -ne 0 && $needs_privilege -eq 1 ]]; then
   if [[ $updating -eq 0 ]] && ! sudo -n true 2>/dev/null; then
     if [[ -r /dev/tty && -w /dev/tty ]] && : </dev/tty >/dev/null; then
-      echo "This install needs an administrator password for Tailscale, the browser extension, keyd, and lingering."
+      echo "This install needs an administrator password for Tailscale, the browser extension, keyd, lingering, and masking tmp.mount."
       echo "Enter your password when asked. This approval covers the privileged steps in this run."
       sudo_status=0
       # sudo -v reads the password on its own standard input. Point that prompt
@@ -876,6 +925,61 @@ install_shellcheck() {
   echo "Install it later with: omarchy pkg aur add shellcheck-bin" >&2
 }
 install_shellcheck
+
+# Mask tmp.mount once. The live /tmp is not stopped, unmounted, resized, or
+# emptied: the change takes effect at the next boot. Upstream systemd-tmpfiles
+# keeps ageing the on-disk /tmp (q /tmp 1777 root root 10d), which
+# groundwork-doctor checks.
+apply_tmp_on_disk() {
+  local lines line status=0
+  if [[ $with_tmp_on_disk -eq 0 ]]; then
+    if [[ $updating -eq 0 ]] && tmp_mount_masked; then
+      echo "/tmp on disk is off, and tmp.mount stays masked. To put /tmp back in RAM: sudo systemctl unmask tmp.mount, then reboot."
+    fi
+    return 0
+  fi
+  lines=$(python3 "$root/scripts/groundwork-tmp.py" fstab-tmp) || status=$?
+  if [[ $status -eq 0 ]]; then
+    echo "/etc/fstab mounts /tmp, which would defeat masking tmp.mount, so it was not masked and fstab was not edited:" >&2
+    while IFS= read -r line; do printf '  %s\n' "$line"; done <<<"$lines" >&2
+    echo "To put /tmp on disk, remove that line yourself, then rerun groundwork-update and reboot." >&2
+    return 0
+  elif [[ $status -ne 1 ]]; then
+    echo "/etc/fstab could not be read, so tmp.mount was not masked. Fix the message above, then rerun." >&2
+    return 0
+  fi
+  status=0
+  lines=$(python3 "$root/scripts/groundwork-tmp.py" tmp-unit) || status=$?
+  if [[ $status -eq 0 ]]; then
+    echo "$lines is a tmp.mount unit of its own (from systemctl edit --full or a copy), which systemctl mask cannot replace, so tmp.mount was not masked." >&2
+    echo "Review it. To drop it: sudo systemctl revert tmp.mount, then rerun groundwork-update and reboot." >&2
+    return 0
+  elif [[ $status -ne 1 ]]; then
+    echo "/etc/systemd/system/tmp.mount could not be checked, so tmp.mount was not masked. Fix the message above, then rerun." >&2
+    return 0
+  fi
+  if ! tmp_mount_masked; then
+    if ! sudo systemctl mask tmp.mount; then
+      tmp_problem="tmp.mount could not be masked, so /tmp stays in RAM. Fix the message above, then rerun groundwork-update."
+      return 0
+    fi
+    echo "Masked tmp.mount. /tmp stays in RAM until the next reboot, which moves it to disk. Nothing in /tmp was moved or removed."
+  fi
+  if [[ $(python3 "$root/scripts/groundwork-tmp.py" tmp-backing) == tmpfs ]]; then
+    echo "Reboot to move /tmp to disk. Then check it with: findmnt -T /tmp"
+  fi
+}
+tmp_problem=""
+apply_tmp_on_disk
+
+# Scratch roots under ~/.cache named in this machine's omarchy.json
+# (scratch_dirs, decision 0022). Each is created with mode 0700 on disk, and a
+# name that resolves onto tmpfs, into a git work tree, ~/code, or a Syncthing
+# folder this layer manages is refused. No sudo.
+scratch_problem=""
+if ! python3 "$root/scripts/groundwork-tmp.py" apply-scratch; then
+  scratch_problem="A scratch root in omarchy.json was refused. Fix the message above and rerun."
+fi
 install_package herdr
 install_package tailscale
 if [[ $updating -eq 0 ]] || ! service_ready tailscaled; then
@@ -1558,7 +1662,7 @@ install_syncthing
 register_choices() {
   python3 "$root/scripts/groundwork-update.py" register "$root" "$with_keyd" "$with_screen_sharing" \
     "${GROUNDWORK_OBSIDIAN_VAULT:-$HOME/Documents/Obsidian/my_obsidian_vault}" "$with_blip" "$with_local_inference" \
-    "$declined_migrations" "$with_git_filter_repo"
+    "$declined_migrations" "$with_git_filter_repo" "$with_tmp_on_disk"
 }
 register_choices
 saved_declines=$declined_migrations
@@ -1970,10 +2074,18 @@ if [[ -n $t3_problem ]]; then
   echo "$t3_problem" >&2
   exit 1
 fi
+if [[ -n $tmp_problem ]]; then
+  echo "$tmp_problem" >&2
+  exit 1
+fi
+if [[ -n $scratch_problem ]]; then
+  echo "$scratch_problem" >&2
+  exit 1
+fi
 if [[ $updating -eq 0 && -n $syncthing_pending_note ]]; then
   echo "Not finished: $syncthing_pending_note" >&2
 fi
-# Storage defaults (decision 0022). Idempotent. A second run prints nothing
+# Storage defaults (decision 0023). Idempotent. A second run prints nothing
 # when discards, fstrim.timer, and the plocate drop-in are already set.
 # GROUNDWORK_STORAGE_APPLY lets the helper change a real
 # machine; without it the helper refuses.
