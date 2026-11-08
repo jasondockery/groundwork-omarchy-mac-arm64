@@ -287,6 +287,21 @@ class ReportTests(FeedWatchFixture):
         self.run_watch('report', '--json')
         self.assertEqual(sorted(p for p in self.root.rglob('*')), before)
 
+    def test_repo_table_is_quiet_about_t3_on_a_host_set_up_per_decision_0020(self):
+        # After the t3-cli switch: the app's CLI is linked, the old bun builds are kept
+        # (the switch never deletes them), and Omarchy's installer is on PATH.
+        self.table = TABLE
+        executable(self.bin / 'omarchy-install-ai-t3-code')
+        executable(self.home / '.t3/runtime/versions/0.1.6-nightly.20261031.3977/t3')
+        executable(self.home / '.t3/bin/t3')
+        (self.home / '.local/bin').mkdir(parents=True)
+        (self.home / '.local/bin/t3').symlink_to(self.home / '.t3/bin/t3')
+        (self.home / '.local/share/t3code').mkdir(parents=True)
+        (self.home / '.local/share/t3code/T3-Code.AppImage').write_text('')
+        result = self.run_watch('report', '--brief')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('T3', result.stdout)
+
 
 class OwnedCommandTests(FeedWatchFixture):
     def setUp(self):
@@ -496,12 +511,6 @@ class TableTests(unittest.TestCase):
             self.assertRegex(record.get('checked', ''), r'^\d{4}-\d{2}-\d{2}$', app['id'])
             self.assertRegex(record.get('recheck', ''), r'^\d{4}-\d{2}-\d{2}$', app['id'])
             self.assertTrue(record.get('evidence'), app['id'])
-
-    def test_t3_is_offered_only_through_omarchys_installer_per_decision_0020(self):
-        t3 = {app['id']: app for app in watch.load_table(TABLE)}['t3-code']
-        self.assertEqual([c.get('installer') for c in t3['candidates']], ['omarchy-install-ai-t3-code'])
-        for text in (t3['offer'], t3['self_install']['evidence']):
-            self.assertIn('0020-t3-code-through-omarchy-installer.md', text)
 
     def test_bitwarden_is_its_package_not_the_menus_generic_helper(self):
         bitwarden = {app['id']: app for app in watch.load_table(TABLE)}['bitwarden-desktop']
