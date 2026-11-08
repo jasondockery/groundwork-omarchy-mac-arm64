@@ -37,7 +37,8 @@ class HostToolsTests(unittest.TestCase):
             self.stub(name, PROCPS_PS if name == 'ps' else '#!/bin/sh\nexit 0\n')
         home = self.root / 'home'
         home.mkdir()
-        self.environ = {'PATH': str(self.bin), 'HOME': str(home)}
+        self.environ = {'PATH': str(self.bin), 'HOME': str(home), 'GROUNDWORK_STORAGE_ROOT': str(self.root)}
+        self.install_storage_stubs(home)
         for key, sub in (('XDG_CONFIG_HOME', '.config'), ('XDG_STATE_HOME', '.local/state'),
                          ('XDG_CACHE_HOME', '.cache'), ('XDG_DATA_HOME', '.local/share'),
                          ('GNUPGHOME', '.gnupg')):
@@ -48,6 +49,37 @@ class HostToolsTests(unittest.TestCase):
         path.write_text(body)
         path.chmod(0o755)
 
+    def install_storage_stubs(self, home):
+        """A healthy storage fixture so host-tool tests do not read this machine."""
+        for relative in ('.t3/worktrees', 'code', '.cache'):
+            (home / relative).mkdir(parents=True)
+        unit = self.root / 'usr/lib/systemd/system'
+        unit.mkdir(parents=True)
+        (unit / 'fstrim.timer').write_text('[Timer]\n')
+        (unit / 'plocate-updatedb.service').write_text('[Service]\nExecStart=/usr/bin/updatedb\n')
+        rendered = doctor.STORAGE.render_dropin(doctor.STORAGE.TEMPLATE.read_text(encoding='utf-8'), str(home))
+        dropin = self.root / doctor.STORAGE.DROPIN_RELATIVE
+        dropin.parent.mkdir(parents=True)
+        dropin.write_text(rendered)
+        dropin.chmod(0o644)
+        self.stub('findmnt', '#!/bin/sh\n[ "$3" = FSTYPE ] && { echo btrfs; exit 0; }\n'
+                              '[ "$1" = -n ] && [ "$4" = / ] && echo /dev/mapper/root\n')
+        self.stub('lsblk', '#!/bin/sh\ncase "$2" in TYPE) echo crypt ;; DISC-GRAN) echo 512B ;; esac\n')
+        self.stub('systemctl', '#!/bin/sh\n[ "$1" = is-enabled ] && { echo enabled; exit 0; }\n'
+                               '[ "$1" = show ] && { printf "%s\\n" '
+                               '"$GROUNDWORK_STORAGE_ROOT/etc/systemd/system/plocate-updatedb.service.d/groundwork-prunes.conf"; exit 0; }\n'
+                               'exit 0\n')
+        self.stub('btrfs', '#!/bin/sh\nif [ "$1" = version ]; then echo btrfs-progs; exit 0; fi\n'
+                           'if [ "$1" = property ] && [ "$2" = get ]; then echo compression=zstd:1; exit 0; fi\n'
+                           'echo "btrfs must not change the filesystem" >&2\nexit 1\n')
+
+    def storage_ok(self):
+        home = self.environ['HOME']
+        storage = doctor.STORAGE
+        return (f'TRIM through LUKS: {storage.TRIM_OK}\n'
+                f'Locate index: {storage.locate_ok(home)}\n'
+                f'Compression: {storage.COMPRESSION_OK}\n')
+
     def doctor(self, *args):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
@@ -57,7 +89,7 @@ class HostToolsTests(unittest.TestCase):
     def test_all_present_passes(self):
         status, text = self.doctor()
         self.assertEqual(status, 0)
-        self.assertEqual(text, 'Host tools: ok (lsof, ps -o lstart=, rg, jq, shellcheck, ssh, git)\n')
+        self.assertEqual(text, 'Host tools: ok (lsof, ps -o lstart=, rg, jq, shellcheck, ssh, git)\n' + self.storage_ok())
         self.assertEqual(self.doctor('--brief'), (0, ''))
 
     def test_each_missing_tool_names_its_install_line(self):
@@ -89,7 +121,8 @@ class HostToolsTests(unittest.TestCase):
         status, text = self.doctor()
         self.assertEqual(status, 1)
         self.assertEqual(text, 'Host tools: 1 problem\n'
-                               '  lsof is missing (lsof). Install it with: sudo pacman -S --needed lsof\n')
+                               '  lsof is missing (lsof). Install it with: sudo pacman -S --needed lsof\n'
+                               + self.storage_ok())
 
     def test_several_missing_tools_are_each_listed(self):
         (self.bin / 'lsof').unlink()

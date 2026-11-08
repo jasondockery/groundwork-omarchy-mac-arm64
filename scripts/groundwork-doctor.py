@@ -8,6 +8,10 @@ Checks:
   host tools  lsof, ps with `-o lstart=`, rg, jq, shellcheck, ssh, and git, the
               binaries common scripts and test harnesses assume (issue #130).
               Each missing tool is printed with the exact command that installs it.
+  storage     TRIM through LUKS, the plocate prune drop-in, and btrfs zstd:1 on
+              three build directories (decision 0022). Each gap is printed with
+              the command that fixes it. Nothing here enables discards, starts
+              a timer, or sets a property.
 
 --brief prints only problems, one line each, and nothing when every check
 passes. update-all runs it that way, after the update, next to its other reports.
@@ -16,7 +20,9 @@ Exit status: 0 when every check passes (or with --brief), 1 when a check
 fails, 2 for bad usage.
 """
 import argparse
+import importlib.util
 import os
+from pathlib import Path
 import shutil
 import subprocess
 import sys
@@ -35,6 +41,17 @@ HOST_TOOLS = (
     ('git', 'git', 'sudo pacman -S --needed git'),
 )
 PS_PROBE_SECONDS = 5
+
+
+def load_storage():
+    path = Path(__file__).with_name('groundwork-storage.py')
+    spec = importlib.util.spec_from_file_location('groundwork_storage', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+STORAGE = load_storage()
 
 
 def ps_supports_lstart(ps, environ):
@@ -69,18 +86,26 @@ def main(argv=None, environ=None):
     args = parser.parse_args(argv)
     environ = dict(os.environ if environ is None else environ)
     problems = host_tool_problems(environ)
+    storage_text, storage_failed = '', False
+    machine = STORAGE.machine_from(environ)
+    if machine is not None:
+        storage_text, storage_failed = STORAGE.format_report(STORAGE.gather(machine), brief=args.brief)
     if args.brief:
         for line in problems:
             print(f'Host tools: {line}')
+        if storage_text:
+            print(storage_text, end='')
         return 0
     if problems:
         print(f'Host tools: {len(problems)} problem{"s" if len(problems) != 1 else ""}')
         for line in problems:
             print(f'  {line}')
-        return 1
-    names = ', '.join('ps -o lstart=' if command == 'ps' else command for command, _, _ in HOST_TOOLS)
-    print(f'Host tools: ok ({names})')
-    return 0
+    else:
+        names = ', '.join('ps -o lstart=' if command == 'ps' else command for command, _, _ in HOST_TOOLS)
+        print(f'Host tools: ok ({names})')
+    if storage_text:
+        print(storage_text, end='')
+    return 1 if problems or storage_failed else 0
 
 
 if __name__ == '__main__':

@@ -36,6 +36,8 @@ The commit identity guard from groundwork-core is on by default: user-level `com
 
 Setup and `update-all` also keep two host tools that scripts and test harnesses assume but Omarchy does not ship: `lsof` (`omarchy pkg add lsof`) and `shellcheck`. Arch Linux ARM and the Omarchy feed have no aarch64 `shellcheck`, so it comes from the AUR's `shellcheck-bin` (`omarchy pkg aur add shellcheck-bin`, upstream's static release); a `shellcheck` you already have is kept, and it is tried only when administrator permission is already granted for the run, so on its own it never prompts for a password or fails an update; a skip or AUR failure prints the install command and setup continues. `groundwork-doctor` checks the full list, `lsof`, `ps` with `-o lstart=`, `rg`, `jq`, `shellcheck`, `ssh`, and `git`, and prints the install command for each one that is missing; it exits 0 when all are present and changes nothing ([decision 0021](docs/decisions/0021-default-host-tools.md)).
 
+Setup and `update-all` also keep three storage defaults ([decision 0022](docs/decisions/0022-storage-defaults.md)). When `/` is the LUKS mapping `/dev/mapper/root`, discards stay on (`cryptsetup refresh --allow-discards --persistent root`) and `fstrim.timer` stays enabled. Discard reveals which encrypted blocks are free. plocate keeps the distribution prunes and also skips `node_modules`, `.turbo`, `.next`, `~/.t3/worktrees`, and `~/.local/share/pnpm`. When the home directory is on btrfs, `~/.t3/worktrees`, `~/code`, and `~/.cache` use `zstd:1` for new files. The mount stays `compress=zstd:3`. `groundwork-doctor` checks all three and changes nothing. A second run changes nothing that is already set.
+
 git-filter-repo stays off unless you pass `--with-git-filter-repo`. It installs per user with mise, needs no root, and is proven by `git filter-repo -h` listing `--sensitive-data-removal`. `--without-git-filter-repo` records a no. The procedure is the shared [history purge runbook](https://github.com/jasondockery/groundwork-core/blob/v0.8.1/docs/history-purge.md); this layer's install, proof, and removal are in [git-filter-repo](docs/git-filter-repo.md).
 
 Finish [Tailscale setup](docs/remote-access.md), including the tailnet policy review, interactive sign-in, and device approval. The local commands are:
@@ -149,7 +151,9 @@ and is skipped; it never changes the exit status. Each prints only what it finds
 - `scripts/groundwork-disk-report.py --brief`: free space on `/` under, or within
   5 GiB of, the 10 GiB Omarchy needs to update.
 - `scripts/groundwork-doctor.py --brief`: each missing host tool with the command
-  that installs it ([decision 0021](docs/decisions/0021-default-host-tools.md)).
+  that installs it, and any storage default that is not set
+  ([decision 0021](docs/decisions/0021-default-host-tools.md),
+  [decision 0022](docs/decisions/0022-storage-defaults.md)).
 
 When none of them finds anything, `update-all` prints one line saying so. Run a
 script without `--brief` for the full report. Set `GROUNDWORK_SKIP_REPORTS=1` to
@@ -363,7 +367,9 @@ Omarchy keeps its own desktop, tmux file, shell, and Super keybindings. Practice
 | `scripts/omarchy-feed-watch.py` | Reports apps this layer installs itself that Omarchy now provides, and offers the move (`report`, `--json`, `--brief`, `dismiss <app>`). Read-only and offline unless `--online` is passed. `update-all` runs `report --brief` |
 | `omarchy-feed-watch.json` | The apps that report checks, each with Groundwork's method, Omarchy's candidates, and the dated evidence for keeping the self-install |
 | `scripts/groundwork-syncthing.py` | Syncthing as a user service on the tailnet, the `~/Shared` and FreeTube folders, and `groundwork syncthing-pair` |
-| `scripts/groundwork-doctor.py` | Read-only host-tools check, installed as `groundwork-doctor`: each missing tool with its install command, exit 1 until all are present. `update-all` runs `--brief` ([decision 0021](docs/decisions/0021-default-host-tools.md)) |
+| `scripts/groundwork-doctor.py` | Read-only host-tools check, installed as `groundwork-doctor`: each missing tool with its install command, exit 1 until all are present. Also checks TRIM through LUKS, the plocate drop-in, and directory compression. `update-all` runs `--brief` ([decision 0021](docs/decisions/0021-default-host-tools.md), [decision 0022](docs/decisions/0022-storage-defaults.md)) |
+| `scripts/groundwork-storage.py` | Applies those three storage defaults on setup and update. Idempotent. Refuses a real machine unless `GROUNDWORK_STORAGE_APPLY=1`, which the apply script sets |
+| `config/plocate-updatedb.service.d.conf` | The only plocate override: extra prune names and paths, each with a one-line reason. `@HOME@` becomes the setup account's home when it is installed |
 | `scripts/groundwork-path-shadow.py` | Read-only report of PATH entries that shadow a managed command (pacman or Omarchy package, mise, Groundwork-installed `t3`), with the shell file that sets the winning entry. Run it from the checkout; `--json`, `--brief`, and `--strict` are available. `update-all` runs `--brief`, and setup's `t3` check prints its report when another `t3` wins. It never deletes or edits anything. |
 
 ## Syncthing shared folders

@@ -187,8 +187,8 @@ fi
 
 # Fail before installing packages or moving files when the checkout is incomplete.
 # The Bitwarden extension id and Brave policies are read from core, not a copy here.
-[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$root/scripts/groundwork-node-pin.py" && -f "$root/scripts/groundwork-commit-guard.py" && -f "$root/core/browser/brave.json" && ! -L "$root/core/browser/brave.json" ]] || {
-  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, Node pin helper, commit guard helper, or Brave spec is missing." >&2
+[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$root/scripts/groundwork-node-pin.py" && -f "$root/scripts/groundwork-commit-guard.py" && -f "$root/scripts/groundwork-storage.py" && -f "$root/config/plocate-updatedb.service.d.conf" && -f "$root/core/browser/brave.json" && ! -L "$root/core/browser/brave.json" ]] || {
+  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, Node pin helper, commit guard helper, storage helper, plocate drop-in, or Brave spec is missing." >&2
   exit 1
 }
 
@@ -626,6 +626,11 @@ privileged_changes_needed() {
     done
   fi
   if [[ $with_local_inference -eq 1 ]] && ! local_inference_ready; then
+    return 0
+  fi
+  # TRIM, fstrim.timer, or the plocate drop-in still pending (decision 0022).
+  # Read-only. Directory compression does not ask for sudo on its own.
+  if python3 "$root/scripts/groundwork-storage.py" needed; then
     return 0
   fi
   return 1
@@ -1967,6 +1972,14 @@ if [[ -n $t3_problem ]]; then
 fi
 if [[ $updating -eq 0 && -n $syncthing_pending_note ]]; then
   echo "Not finished: $syncthing_pending_note" >&2
+fi
+# Storage defaults (decision 0022). Idempotent. A second run prints nothing
+# when discards, fstrim.timer, the plocate drop-in, and directory compression
+# are already set. GROUNDWORK_STORAGE_APPLY lets the helper change a real
+# machine; without it the helper refuses.
+if ! GROUNDWORK_STORAGE_APPLY=1 python3 "$root/scripts/groundwork-storage.py" apply; then
+  echo "Storage defaults were not fully applied. Fix the message above, then rerun groundwork-update." >&2
+  exit 1
 fi
 if [[ $updating -eq 1 ]]; then
   echo "Groundwork settings applied. Saved keyd, screen-sharing, Blip, local inference, and vault choices were preserved."
