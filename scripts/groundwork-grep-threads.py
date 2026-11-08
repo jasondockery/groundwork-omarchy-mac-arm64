@@ -7,11 +7,13 @@ gitconfig is not applied on Omarchy (decision 0001). Agents run many git grep
 searches, and upstream starts one worker per core.
 
 The include is ~/.config/groundwork/grep-threads.gitconfig (XDG_CONFIG_HOME
-when that path is absolute). ~/.config/git/config gains an include.path for it
-when that path is absent. Other include paths are left as they are. The include
-file is written only when grep.threads there is missing or not exactly 4, and
-only when the file bytes differ from the text below. A file that already has
-exactly one value, 4, is not rewritten.
+when that path is absolute). The file is written only when it is missing or
+its text differs from the rendered cap below, so a value of 4 beside another
+key, or without the reason comment, is replaced. A second run of that exact
+text does not rewrite it. ~/.config/git/config gains an include.path for the
+canonical file when that path is absent. Any other include.path whose file is
+named grep-threads.gitconfig is removed, including one listed later, so a
+stale copy cannot override the cap. Other include paths are left as they are.
 
 Subcommand: apply
 Exit status: 0 done or nothing to do, 1 a step failed, 2 usage.
@@ -89,17 +91,53 @@ def write_atomic(path, text):
 
 
 def write_include(path):
-    """Write the include only when its grep.threads is missing or not exactly 4."""
+    """Rewrite the include when its text is not exactly the rendered cap.
+
+    Parsing grep.threads as 4 is not enough. Another key in the same file, or
+    a missing reason comment, would otherwise stay in place.
+    """
     require_regular_or_absent(path)
-    if git_values(path, 'grep.threads') == ['4']:
-        return False
-    try:
-        same = path.is_file() and path.read_text() == INCLUDE_TEXT
-    except (OSError, UnicodeError):
-        same = False
-    if same:
-        return False
+    if path.is_file():
+        try:
+            current = path.read_text(encoding='utf-8')
+        except (OSError, UnicodeError) as error:
+            raise OSError(f'cannot read {path}') from error
+        if current == INCLUDE_TEXT:
+            return False
     write_atomic(path, INCLUDE_TEXT)
+    return True
+
+
+def same_include(value, include):
+    if value == str(include):
+        return True
+    try:
+        return Path(value).expanduser().resolve() == include.resolve()
+    except OSError:
+        return False
+
+
+def drop_stale_includes(target, include):
+    """Remove include.path entries for a different grep-threads.gitconfig.
+
+    Git uses the last value. A later copy of this file would override the cap
+    even when the canonical path is already listed. Other include paths stay.
+    """
+    require_regular_or_absent(target)
+    current = git_values(target, 'include.path') or []
+    stale = [
+        value for value in current
+        if not same_include(value, include) and Path(value).name == include.name
+    ]
+    if not stale:
+        return False
+    for value in stale:
+        result = subprocess.run(
+            ['git', 'config', '--file', str(target), '--fixed-value',
+             '--unset', 'include.path', value],
+            capture_output=True, text=True, env=git_env())
+        if result.returncode not in (0, 5):
+            raise OSError(result.stderr.strip() or f'cannot remove include.path {value}')
     return True
 
 
@@ -119,8 +157,10 @@ def ensure_included(target, include):
 
 def apply():
     include = include_path()
+    target = gitconfig_path()
     changed = write_include(include)
-    changed = ensure_included(gitconfig_path(), include) or changed
+    changed = drop_stale_includes(target, include) or changed
+    changed = ensure_included(target, include) or changed
     if changed:
         print(f'Groundwork grep.threads: set to 4 in {include}.')
     return 0

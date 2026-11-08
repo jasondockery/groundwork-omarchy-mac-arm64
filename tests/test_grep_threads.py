@@ -1,7 +1,8 @@
 """grep.threads cap (decision 0001), against fixture homes only.
 
-Protects: the Groundwork-owned include renders exactly 4, and a later run that
-already finds 4 does not rewrite that file.
+Protects: the Groundwork-owned include renders exactly 4, a later run of that
+exact text does not rewrite it, a file that merely parses as 4 is replaced,
+and a stale grep-threads.gitconfig include path is removed.
 Distinct value: no other test writes or parses this include.
 """
 import os
@@ -13,6 +14,11 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 HELPER = REPO / 'scripts/groundwork-grep-threads.py'
 APPLY_LAYER = REPO / 'scripts/apply-layer.sh'
+INCLUDE_TEXT = (
+    '# Agents run many git grep searches. Upstream starts one worker per core.\n'
+    '[grep]\n'
+    '\tthreads = 4\n'
+)
 
 
 class GrepThreadsTests(unittest.TestCase):
@@ -73,20 +79,26 @@ class GrepThreadsTests(unittest.TestCase):
         self.assertEqual(self.file_stamp(self.gitconfig()), config_before)
         self.assertEqual(second.stdout, '')
 
-    def test_existing_4_is_not_rewritten(self):
+    def test_threads_4_beside_another_key_is_rewritten(self):
         include = self.include()
         include.parent.mkdir(parents=True)
-        original = '# kept\n[grep]\n\tthreads = 4\n'
-        include.write_text(original)
-        before = self.file_stamp(include)
+        include.write_text('[grep]\n\tthreads = 4\n[pull]\n\trebase = true\n')
         result = self.apply()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.file_stamp(include), before)
-        self.assertEqual(include.read_text(), original)
-        included = self.git('config', '--file', str(self.gitconfig()), '--get-all', 'include.path')
-        self.assertEqual(included.stdout, str(include) + '\n')
-        effective = self.git('config', '--get-all', 'grep.threads')
-        self.assertEqual(effective.stdout, '4\n')
+        self.assertEqual(include.read_text(), INCLUDE_TEXT)
+        names = self.git('config', '--file', str(include), '--name-only', '--list')
+        self.assertEqual(names.stdout, 'grep.threads\n', names.stderr)
+        rendered = self.git('config', '--file', str(include), '--get-all', 'grep.threads')
+        self.assertEqual(rendered.stdout, '4\n')
+        self.assertNotIn('rebase', include.read_text())
+
+    def test_threads_4_without_the_reason_comment_is_rewritten(self):
+        include = self.include()
+        include.parent.mkdir(parents=True)
+        include.write_text('[grep]\n\tthreads = 4\n')
+        result = self.apply()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(include.read_text(), INCLUDE_TEXT)
 
     def test_different_value_is_rewritten_to_exactly_4(self):
         include = self.include()
@@ -122,6 +134,43 @@ class GrepThreadsTests(unittest.TestCase):
         self.assertIn(f'path = {other}', config.read_text())
         effective = self.git('config', '--get-all', 'grep.threads')
         self.assertEqual(effective.stdout, '4\n')
+
+    def test_later_stale_grep_include_is_removed(self):
+        first = self.apply()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        stale = self.home / 'stale' / 'grep-threads.gitconfig'
+        stale.parent.mkdir(parents=True)
+        stale.write_text('[grep]\n\tthreads = 8\n')
+        other = self.home / 'other.gitconfig'
+        other.write_text('[diff]\n\trenames = true\n')
+        config = self.gitconfig()
+        with config.open('a', encoding='utf-8') as output:
+            output.write(f'[include]\n\tpath = {stale}\n\tpath = {other}\n')
+        before = self.git('config', '--get', 'grep.threads')
+        self.assertEqual(before.stdout, '8\n', before.stderr)
+        include_before = self.file_stamp(self.include())
+        result = self.apply()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.file_stamp(self.include()), include_before)
+        effective = self.git('config', '--get-all', 'grep.threads')
+        self.assertEqual(effective.stdout, '4\n', effective.stderr)
+        included = self.git('config', '--file', str(config), '--get-all', 'include.path')
+        self.assertEqual(included.stdout.splitlines(), [str(self.include()), str(other)])
+        self.assertNotIn(str(stale), config.read_text())
+
+    def test_only_stale_grep_include_is_replaced(self):
+        stale = self.home / 'old' / 'grep-threads.gitconfig'
+        stale.parent.mkdir(parents=True)
+        stale.write_text('[grep]\n\tthreads = 8\n')
+        config = self.gitconfig()
+        config.parent.mkdir(parents=True)
+        config.write_text(f'[include]\n\tpath = {stale}\n')
+        result = self.apply()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        effective = self.git('config', '--get-all', 'grep.threads')
+        self.assertEqual(effective.stdout, '4\n', effective.stderr)
+        included = self.git('config', '--file', str(config), '--get-all', 'include.path')
+        self.assertEqual(included.stdout.splitlines(), [str(self.include())])
 
     def test_xdg_config_home_is_honored(self):
         xdg = Path(self.temp.name) / 'xdg'
