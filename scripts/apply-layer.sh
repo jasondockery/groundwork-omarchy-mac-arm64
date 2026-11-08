@@ -695,6 +695,9 @@ if [[ "$EUID" -ne 0 && $needs_privilege -eq 1 && $updating -eq 1 ]]; then
   # Prime sudo once in the foreground terminal before the first privileged step.
   if [[ -r /dev/tty && -w /dev/tty ]] && : </dev/tty >/dev/null; then
     echo "This update changes system settings and needs administrator permission."
+    # Read-only. When discards are still off, this says the disk passphrase is
+    # a separate prompt from the administrator password.
+    python3 "$root/scripts/groundwork-storage.py" explain || true
     sudo_status=0
     # shellcheck disable=SC2024
     sudo /usr/bin/true </dev/tty >/dev/tty 2>/dev/tty || sudo_status=$?
@@ -704,6 +707,7 @@ if [[ "$EUID" -ne 0 && $needs_privilege -eq 1 && $updating -eq 1 ]]; then
     fi
   elif ! sudo -n /usr/bin/true 2>/dev/null; then
     echo "This update needs administrator permission, and no terminal is available to ask for it." >&2
+    python3 "$root/scripts/groundwork-storage.py" explain >&2 || true
     echo "Nothing was changed. Run update-all or groundwork-update from a terminal." >&2
     exit 1
   fi
@@ -2089,9 +2093,13 @@ fi
 # when discards, fstrim.timer, and the plocate drop-in are already set.
 # GROUNDWORK_STORAGE_APPLY lets the helper change a real
 # machine; without it the helper refuses.
+storage_status=0
 if ! GROUNDWORK_STORAGE_APPLY=1 python3 "$root/scripts/groundwork-storage.py" apply; then
+  storage_status=$?
+fi
+if [[ $storage_status -ne 0 ]]; then
   echo "Storage defaults were not fully applied. Fix the message above, then rerun groundwork-update." >&2
-  exit 1
+  exit "$storage_status"
 fi
 if [[ $updating -eq 1 ]]; then
   echo "Groundwork settings applied. Saved keyd, screen-sharing, Blip, local inference, and vault choices were preserved."

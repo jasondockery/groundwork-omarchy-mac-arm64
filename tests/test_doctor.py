@@ -73,7 +73,7 @@ class HostToolsTests(unittest.TestCase):
         dropin.write_text(rendered)
         dropin.chmod(0o644)
         self.stub('findmnt', '#!/bin/sh\n[ "$3" = FSTYPE ] && { echo btrfs; exit 0; }\n'
-                              '[ "$1" = -n ] && [ "$4" = / ] && echo /dev/mapper/root\n')
+                              '[ "$1" = -n ] && [ "$4" = / ] && echo "/dev/mapper/root compress=zstd:3"\n')
         self.stub('lsblk', '#!/bin/sh\ncase "$2" in TYPE) echo crypt ;; DISC-GRAN) echo 512B ;; esac\n')
         systemctl = test_tmp_on_disk.FAKE_SYSTEMCTL
         extra = (

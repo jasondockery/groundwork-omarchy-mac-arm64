@@ -5,12 +5,14 @@ on the machine running the tests.
 """
 import importlib.util
 import io
-from contextlib import redirect_stderr, redirect_stdout
-from pathlib import Path
+import os
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
@@ -29,12 +31,11 @@ class World:
         self.timer = 'disabled'
         self.mapper = 'root'
         self.kind = 'crypt'
-        self.fstype = 'btrfs'
-        self.btrfs = True
+        self.mount_options = 'compress=zstd:3'
         self.reloaded = False
         self.show = 'ok'
-        self.props = {}
         self.fail = set()
+        self.fail_text = {}
         self.missing = set()
         self.keep_gran = False
         self.units = {'fstrim.timer', 'plocate-updatedb.service'}
@@ -48,23 +49,20 @@ class World:
         if args[0] in self.missing:
             raise FileNotFoundError(args[0])
         if args[0] in self.fail:
-            return storage.Result(1, '', f'{args[0]} failed')
+            return storage.Result(1, '', self.fail_text.get(args[0], f'{args[0]} failed'))
         if args[0] == 'findmnt':
-            if len(args) >= 4 and args[3] == 'FSTYPE':
-                if self.fstype == 'missing':
-                    raise FileNotFoundError('findmnt')
-                if self.fstype == 'failed':
-                    return storage.Result(1, '', 'findmnt failed')
-                return storage.Result(0, self.fstype + '\n')
             if self.mapper == 'missing':
                 raise FileNotFoundError('findmnt')
             if self.mapper == 'failed':
                 return storage.Result(1, '', 'findmnt failed')
             if self.mapper == 'root':
-                return storage.Result(0, '/dev/mapper/root\n')
-            if self.mapper == 'subvol':
-                return storage.Result(0, '/dev/mapper/root[/@]\n')
-            return storage.Result(0, f'{self.mapper}\n')
+                source = '/dev/mapper/root'
+            elif self.mapper == 'subvol':
+                source = '/dev/mapper/root[/@]'
+            else:
+                source = self.mapper
+            line = f'{source} {self.mount_options}' if self.mount_options else source
+            return storage.Result(0, line + '\n')
         if args[0] == 'lsblk':
             if self.kind == 'missing':
                 raise FileNotFoundError('lsblk')
@@ -76,6 +74,8 @@ class World:
         if args[:2] == ['systemctl', 'is-enabled']:
             if self.timer == 'enabled':
                 return storage.Result(0, 'enabled\n')
+            if self.timer in ('enabled-runtime', 'static', 'indirect'):
+                return storage.Result(0, self.timer + '\n')
             if self.timer == 'masked':
                 return storage.Result(1, 'masked\n')
             if self.timer == 'unknown':
@@ -178,9 +178,12 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(cryptsetup, [{
             'sudo': True,
             'args': ['cryptsetup', 'refresh', '--allow-discards', '--persistent', 'root'],
-            'timeout': 30,
+            'timeout': storage.CRYPTSETUP_SECONDS,
             'terminal': True,
         }])
+        self.assertLess(storage.CRYPTSETUP_SECONDS, 900)
+        self.assertGreaterEqual(storage.CRYPTSETUP_SECONDS, 300)
+        self.assertIn('The passphrase wait is 300 seconds.', output)
         enable = [call for call in self.world.calls if call['args'][:3] == ['systemctl', 'enable', '--now']]
         self.assertEqual(enable[0]['args'], ['systemctl', 'enable', '--now', 'fstrim.timer'])
         self.assertEqual(enable[0]['timeout'], storage.FSTRIM_SECONDS)
@@ -289,17 +292,17 @@ class StorageTests(unittest.TestCase):
         self.assertEqual((status, output), (0, ''))
         self.assertFalse(any(call['sudo'] for call in self.world.calls))
 
-    def test_home_that_is_not_btrfs_is_left_alone(self):
-        self.world.fstype = 'ext4'
+    def test_a_mount_without_zstd3_is_not_called_zstd3(self):
+        self.world.mount_options = 'defaults'
         status, _, errors = self.apply()
         self.assertEqual(status, 0, errors)
         self.assertFalse((self.home / 'code').exists())
-        self.assertFalse(any(call['args'][:3] == ['btrfs', 'property', 'set'] for call in self.world.calls))
+        self.assertNotIn('btrfs', self.world.names())
         text, failed = self.report()
         self.assertFalse(failed)
-        self.assertIn(storage.COMPRESSION_OK, text)
+        self.assertNotIn(storage.COMPRESSION_OK, text)
+        self.assertIn('does not set compress=zstd:3', text)
         self.assertNotIn('btrfs-progs', text)
-        self.assertNotIn('does not exist', text)
 
     def test_unloaded_dropin_is_loaded_again(self):
         self.world.gran = '512B'
@@ -451,7 +454,7 @@ class StorageTests(unittest.TestCase):
         self.world.timer = 'enabled'
         self.world.reloaded = True
         dropin = self.root / storage.DROPIN_RELATIVE
-        dropin.parent.mkdir(parents=True)
+        dropin.parent.mkdir(parents=True, exist_ok=True)
         dropin.write_text(storage.render_dropin(storage.TEMPLATE.read_text(encoding='utf-8'), str(self.home)))
         dropin.chmod(0o644)
 
@@ -505,6 +508,8 @@ class StorageTests(unittest.TestCase):
         self.world.timer = 'masked'
         text, failed = self.report()
         self.assertFalse(failed)
+        self.assertIn('fstrim.timer is masked and was left alone', text)
+        self.assertNotIn(storage.TRIM_OK, text)
         self.assertNotIn('enable --now', text)
         self.assertFalse(storage.needs_privilege(self.world.machine()))
         status, output, errors = self.apply()
@@ -602,16 +607,264 @@ class StorageTests(unittest.TestCase):
             seen['kwargs'] = kwargs
             return Process()
 
-        with mock.patch.object(storage.subprocess, 'Popen', popen):
-            result = storage.run_process(['sudo', 'cryptsetup', 'refresh'], 30, {'PATH': '/bin'}, terminal=True)
+        with mock.patch.object(storage.subprocess, 'Popen', popen), \
+             mock.patch.object(storage, 'terminal_stdio', return_value=12), \
+             mock.patch.object(storage.os, 'tcgetpgrp', return_value=1), \
+             mock.patch.object(storage.os, 'tcsetpgrp') as foreground, \
+             mock.patch.object(storage.os, 'kill'), \
+             mock.patch.object(storage.os, 'close'):
+            result = storage.run_process(
+                ['sudo', 'cryptsetup', 'refresh'], 30, {'PATH': '/bin'}, terminal=True, keep_session=True)
         self.assertEqual(result.returncode, 0)
-        self.assertNotIn('stdin', seen['kwargs'])
+        self.assertIs(seen['kwargs']['stdin'], 12)
+        self.assertIs(seen['kwargs']['stdout'], 12)
+        self.assertIs(seen['kwargs']['stderr'], 12)
+        self.assertEqual(seen['kwargs'].get('process_group'), 0)
+        self.assertNotIn('preexec_fn', seen['kwargs'])
         self.assertNotIn('start_new_session', seen['kwargs'])
+        self.assertIn(mock.call(12, 7), foreground.call_args_list)
+
+    def test_sudo_keeps_the_terminal_session(self):
+        seen = {}
+
+        class Process:
+            pid = 7
+            returncode = 0
+
+            def communicate(self, timeout=None):
+                return ('', '')
+
+        def popen(command, **kwargs):
+            seen['kwargs'] = kwargs
+            return Process()
+
+        with mock.patch.object(storage.subprocess, 'Popen', popen):
+            result = storage.run_process(['sudo', 'systemctl'], 30, {}, terminal=False, keep_session=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(seen['kwargs'].get('process_group'), 0)
+        self.assertNotIn('preexec_fn', seen['kwargs'])
+        self.assertNotIn('start_new_session', seen['kwargs'])
+        self.assertIs(seen['kwargs']['stdin'], subprocess.DEVNULL)
+
+    def test_a_probe_uses_its_own_session(self):
+        seen = {}
+
+        class Process:
+            pid = 7
+            returncode = 0
+
+            def communicate(self, timeout=None):
+                return ('', '')
+
+        def popen(command, **kwargs):
+            seen['kwargs'] = kwargs
+            return Process()
+
+        with mock.patch.object(storage.subprocess, 'Popen', popen):
+            storage.run_process(['findmnt'], 10, {}, terminal=False, keep_session=False)
+        self.assertTrue(seen['kwargs']['start_new_session'])
+
+    def test_sudo_without_a_terminal_does_not_wait_for_a_password(self):
+        captured = {}
+
+        def fake_run_process(command, timeout, environ, terminal, keep_session=False):
+            captured['command'] = command
+            captured['keep_session'] = keep_session
+            return storage.Result(0)
+
+        with mock.patch.object(storage.shutil, 'which', return_value='/usr/bin/sudo'), \
+             mock.patch.object(storage, 'terminal_available', return_value=False), \
+             mock.patch.object(storage, 'run_process', fake_run_process):
+            storage.default_run({'PATH': '/usr/bin'}, Path('/'))(
+                ['systemctl', 'daemon-reload'], sudo=True, timeout=30)
+        self.assertEqual(captured['command'][:2], ['/usr/bin/sudo', '-n'])
+        self.assertFalse(captured['keep_session'])
+
+    def test_sudo_with_a_terminal_keeps_the_session_and_omits_noninteractive(self):
+        captured = {}
+
+        def fake_run_process(command, timeout, environ, terminal, keep_session=False):
+            captured['command'] = command
+            captured['keep_session'] = keep_session
+            captured['terminal'] = terminal
+            return storage.Result(0)
+
+        with mock.patch.object(storage.shutil, 'which', return_value='/usr/bin/sudo'), \
+             mock.patch.object(storage, 'terminal_available', return_value=True), \
+             mock.patch.object(storage, 'run_process', fake_run_process):
+            storage.default_run({'PATH': '/usr/bin'}, Path('/'))(
+                ['systemctl', 'enable', '--now', 'fstrim.timer'], sudo=True, timeout=30, terminal=False)
+        self.assertNotIn('-n', captured['command'])
+        self.assertTrue(captured['keep_session'])
+        self.assertFalse(captured['terminal'])
+
+    def test_a_fixture_root_does_not_run_a_host_binary(self):
+        def which(name, path=None):
+            return '/usr/bin/findmnt' if name == 'findmnt' else None
+
+        with mock.patch.object(storage.shutil, 'which', which), \
+             mock.patch.object(storage.subprocess, 'Popen', side_effect=AssertionError('host command ran')):
+            machine = storage.machine_from({
+                'GROUNDWORK_TESTING': '1',
+                'GROUNDWORK_STORAGE_ROOT': str(self.root),
+                'PATH': '/usr/bin',
+                'HOME': str(self.home),
+            })
+            state = storage.gather(machine)
+        self.assertEqual(state['where'], 'missing')
+
+    def test_a_fixture_root_can_run_its_own_stub(self):
+        bindir = self.root / 'bin'
+        bindir.mkdir()
+        stub = bindir / 'findmnt'
+        stub.write_text('#!/bin/sh\necho "/dev/mapper/root compress=zstd:3"\n')
+        stub.chmod(0o755)
+        machine = storage.machine_from({
+            'GROUNDWORK_TESTING': '1',
+            'GROUNDWORK_STORAGE_ROOT': str(self.root),
+            'PATH': str(bindir),
+            'HOME': str(self.home),
+        })
+        state = storage.gather(machine)
+        self.assertEqual(state['where'], 'root')
+        self.assertEqual(state['options'], 'compress=zstd:3')
+
+    def test_enabled_runtime_and_static_do_not_fail_or_enable(self):
+        for timer in ('enabled-runtime', 'static'):
+            with self.subTest(timer=timer):
+                self.world.calls.clear()
+                self._ready_except_dropin_load()
+                self.world.timer = timer
+                text, failed = self.report()
+                self.assertFalse(failed, text)
+                self.assertIn(f'fstrim.timer is {timer} and was left alone', text)
+                self.assertNotIn(storage.TRIM_OK, text)
+                status, output, errors = self.apply()
+                self.assertEqual((status, output, errors), (0, '', ''))
+                self.assertFalse(any(call['args'][:2] == ['systemctl', 'enable'] for call in self.world.calls))
+
+    def test_an_unrecognized_granularity_does_not_start_trim(self):
+        self.world.gran = '-'
+        status, _output, errors = self.apply()
+        self.assertEqual(status, 1)
+        self.assertIn('discard granularity', errors)
+        self.assertNotIn('cryptsetup', self.world.names())
+        self.assertFalse(any(call['args'][:3] == ['systemctl', 'enable', '--now'] for call in self.world.calls))
+
+    def test_a_failed_stamp_does_not_claim_the_refresh_is_done(self):
+        self.world.keep_gran = True
+        self.world.fail.add('install')
+        status, _output, errors = self.apply()
+        self.assertEqual(status, 1)
+        self.assertIn('still zero', errors)
+        self.assertIn('ask again', errors)
+        self.assertNotIn('will not be retried', errors)
+        self.assertFalse((self.root / storage.STAMP_RELATIVE).is_file())
+
+    def test_an_unsupported_header_is_recorded_and_not_retried(self):
+        self.world.fail.add('cryptsetup')
+        self.world.fail_text['cryptsetup'] = 'Option --persistent is only supported for LUKS2.'
+        status, _output, errors = self.apply()
+        self.assertEqual(status, 1)
+        self.assertIn('cannot store allow-discards', errors)
+        self.assertIn('will not be retried', errors)
+        self.assertTrue((self.root / storage.STAMP_RELATIVE).is_file())
+        self.assertEqual(self.world.timer, 'disabled')
+        self.world.calls.clear()
+        status, output, errors = self.apply()
+        self.assertEqual((status, output, errors), (0, '', ''))
+        self.assertNotIn('cryptsetup', self.world.names())
+
+    def test_a_plus_or_trailing_slash_in_home_does_not_block_the_dropin(self):
+        plus = self.root / 'a+b'
+        plus.mkdir()
+        for home in (str(plus), str(self.home) + '/'):
+            with self.subTest(home=home):
+                self.world.calls.clear()
+                self.world.home = home
+                self.world.gran = '512B'
+                self.world.timer = 'enabled'
+                status, _output, errors = self.apply()
+                self.assertEqual(status, 0, errors)
+                self.assertIn('install', self.world.names())
+
+    def test_explain_names_the_passphrase_without_running_cryptsetup(self):
+        lines = storage.explain_lines(storage.gather(self.world.machine()))
+        self.assertIn('disk passphrase is separate', '\n'.join(lines))
+        self.assertIn('sudo cryptsetup refresh --allow-discards --persistent root', '\n'.join(lines))
+        self.assertNotIn('cryptsetup', self.world.names())
+        self.world.gran = '512B'
+        self.assertEqual(storage.explain_lines(storage.gather(self.world.machine())), [])
+
+    def _pty_exit(self, argv_repr, send_repr, timeout):
+        """Run one command on a fresh terminal, outside this process.
+
+        Forking the test process is unsafe once it has other threads. A new
+        interpreter has none. The timeout is the bound if that child stalls.
+        """
+        script = f'''
+import importlib.util, os, pty, sys, time, fcntl
+spec = importlib.util.spec_from_file_location("groundwork_storage", {str(SCRIPT)!r})
+storage = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(storage)
+pid, fd = pty.fork()
+if pid == 0:
+    try:
+        result = storage.run_process({argv_repr}, {timeout}, {{"PATH": "/usr/bin:/bin"}}, terminal=True, keep_session=True)
+        os._exit(result.returncode if result.returncode >= 0 else 9)
+    except BaseException:
+        import traceback
+        traceback.print_exc()
+        os._exit(9)
+flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+time.sleep(0.4)
+try:
+    os.write(fd, {send_repr})
+except BlockingIOError:
+    sys.stderr.write("write blocked\\n")
+deadline = time.monotonic() + {timeout} + 3
+status = None
+while time.monotonic() < deadline:
+    try:
+        chunk = os.read(fd, 200)
+        if chunk:
+            sys.stderr.write(repr(chunk) + "\\n")
+    except BlockingIOError:
+        pass
+    waited, status = os.waitpid(pid, os.WNOHANG)
+    if waited:
+        code = os.waitstatus_to_exitcode(status)
+        sys.stderr.write("wait %s\\n" % code)
+        os._exit(code & 0xff)
+    time.sleep(0.05)
+sys.stderr.write("deadline\\n")
+os.kill(pid, 9)
+os._exit(9)
+'''
+        completed = subprocess.run([sys.executable, '-I', '-c', script], timeout=8, capture_output=True)
+        return completed.returncode, completed.stderr.decode()
+
+    def test_ctrl_c_at_the_prompt_returns_130(self):
+        # Protects: Ctrl+C during the passphrase prompt exits 130 without a traceback.
+        # Distinct value: the Popen stand-in never owns a terminal.
+        code, errors = self._pty_exit("['/bin/sleep', '30']", r"b'\x03'", 2)
+        self.assertEqual(code, 130, errors)
+
+    def test_the_prompt_reads_the_terminal(self):
+        # Protects: the passphrase is read from the terminal when stdin is not that terminal.
+        # Distinct value: the stand-in records arguments and never reads a terminal.
+        argv = repr([sys.executable, '-I', '-c',
+                     'import sys; sys.exit(0 if sys.stdin.readline()=="ready\\n" else 3)'])
+        code, errors = self._pty_exit(argv, "b'ready\\n'", 2)
+        self.assertEqual(code, 0, errors)
 
     def test_apply_layer_calls_the_helper(self):
         text = (REPO / 'scripts/apply-layer.sh').read_text(encoding='utf-8')
         self.assertIn('python3 "$root/scripts/groundwork-storage.py" needed', text)
+        self.assertIn('python3 "$root/scripts/groundwork-storage.py" explain', text)
         self.assertIn('GROUNDWORK_STORAGE_APPLY=1 python3 "$root/scripts/groundwork-storage.py" apply', text)
+        self.assertIn('exit "$storage_status"', text)
 
 
 if __name__ == '__main__':

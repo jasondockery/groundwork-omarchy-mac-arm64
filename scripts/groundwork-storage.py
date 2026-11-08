@@ -14,11 +14,13 @@ This file does not edit Limine, crypttab, or /etc/updatedb.conf. Discard
 reveals which encrypted blocks are free; that tradeoff is accepted so TRIM can
 run. The plocate drop-in adds names and paths. It does not replace the
 distribution lists. A btrfs directory property cannot choose a zstd level, so
-this file does not set one. The mount stays compress=zstd:3.
+this file does not set one and does not change the mount. Doctor reports the
+mount's compress option.
 """
 import argparse
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import signal
@@ -36,14 +38,33 @@ DROPIN_RELATIVE = Path('etc/systemd/system/plocate-updatedb.service.d/groundwork
 STAMP_RELATIVE = Path('var/lib/groundwork/luks-discard-unsupported')
 TEMPLATE = Path(__file__).resolve().parent.parent / 'config' / 'plocate-updatedb.service.d.conf'
 PROBE_SECONDS = 10
-CRYPTSETUP_SECONDS = 30
+# A person may be asked for the disk passphrase after a long update.
+# Sibling prompts in this layer allow 300 seconds. The timer start below is
+# not that wait.
+CRYPTSETUP_SECONDS = 300
 FSTRIM_SECONDS = 30
 INSTALL_SECONDS = 30
 # update-all stops groundwork-doctor --brief at 15 seconds and discards that
 # output. Probes we can signal share this budget. A path check, a command
 # stuck in uninterruptible sleep, or a root child we cannot signal is outside it.
 DOCTOR_SECONDS = 8
-HOME_CHARS = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/-')
+HOME_CHARS = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/+-')
+GRANULARITY = re.compile(r'(?P<number>\d+(?:\.\d+)?)(?P<unit>(?:[KMGTPE]i?B?)|B)?\Z', re.IGNORECASE)
+HOST_BIN_PREFIXES = (
+    '/bin/', '/sbin/', '/usr/bin/', '/usr/sbin/', '/usr/local/bin/', '/usr/local/sbin/',
+    '/opt/homebrew/bin/', '/run/',
+)
+RECOGNIZED_TIMERS = {
+    'enabled', 'enabled-runtime', 'disabled', 'masked', 'masked-runtime', 'static',
+    'indirect', 'alias', 'linked', 'linked-runtime', 'generated', 'transient',
+}
+UNSUPPORTED_DISCARDS = (
+    'only supported for luks2',
+    'integrity protection',
+    'cannot use discard',
+    'discards are not supported',
+    'discard is not supported',
+)
 TRIM_OK = 'ok (discards on /dev/mapper/root, fstrim.timer enabled)'
 COMPRESSION_OK = 'ok (a directory property cannot choose a zstd level, so the mount stays compress=zstd:3)'
 REFUSED = object()
@@ -94,6 +115,8 @@ def storage_root(environ):
 def safe_home(environ):
     """Absolute home with no spaces or shell metacharacters, or None."""
     raw = environ.get('HOME', '')
+    if len(raw) > 1 and raw.endswith('/'):
+        raw = raw.rstrip('/')
     if not raw or not raw.startswith('/') or '//' in raw:
         return None
     parts = raw.split('/')
@@ -147,16 +170,38 @@ def first_line(result):
 
 
 def mapper_state(machine):
-    """How / relates to the LUKS root this layer knows how to open."""
-    result, missing = probe(machine, ['findmnt', '-n', '-o', 'SOURCE', '/'])
+    """How / relates to the LUKS root this layer knows how to open.
+
+    The third value is the mount option string, or None when it was not read.
+    """
+    result, missing = probe(machine, ['findmnt', '-n', '-o', 'SOURCE,OPTIONS', '/'])
     if missing:
-        return 'missing', ''
-    source = first_line(result)
-    if not source:
-        return 'failed', ''
+        return 'missing', '', None
+    line = first_line(result)
+    if not line:
+        return 'failed', '', None
+    source, _, options = line.partition(' ')
     if source == MAPPER or source.startswith(MAPPER + '['):
-        return 'root', source
-    return 'other', source
+        return 'root', source, options
+    return 'other', source, options
+
+
+def classify_granularity(token):
+    """'off', 'on', or 'unrecognized'. A size lsblk did not print is not on."""
+    if token in ZERO_GRANULARITY:
+        return 'off'
+    match = GRANULARITY.fullmatch(token)
+    if match is None:
+        return 'unrecognized'
+    if float(match.group('number')) == 0:
+        return 'off'
+    return 'on'
+
+
+def discards_cannot_persist(result):
+    """True when cryptsetup says this header cannot store allow-discards."""
+    text = f'{result.stderr}\n{result.stdout}'.lower()
+    return any(needle in text for needle in UNSUPPORTED_DISCARDS)
 
 
 def crypt_type(machine):
@@ -174,8 +219,8 @@ def discard_granularity(machine):
     if missing:
         return 'missing', ''
     token = first_line(result).split()[0] if first_line(result) else ''
-    if not token:
-        return 'failed', ''
+    if not token or classify_granularity(token) == 'unrecognized':
+        return 'failed', token
     return 'ok', token
 
 
@@ -186,12 +231,10 @@ def timer_enabled(machine):
     if result.returncode == 124:
         return 'timed-out'
     text = result.stdout.strip()
-    if text == 'enabled' and result.returncode == 0:
-        return 'enabled'
-    if text == 'masked':
-        return 'masked'
-    if text == 'disabled':
-        return 'disabled'
+    if text in ('enabled', 'enabled-runtime') and result.returncode == 0:
+        return text
+    if text in RECOGNIZED_TIMERS - {'enabled', 'enabled-runtime'}:
+        return text
     return 'unknown'
 
 
@@ -249,7 +292,7 @@ def dropin_loaded(machine, path):
 
 def gather(machine):
     home = safe_home(machine.environ)
-    where, source = mapper_state(machine)
+    where, source, options = mapper_state(machine)
     kind_state, kind = ('skipped', '')
     gran_state, gran = ('skipped', '')
     if where == 'root':
@@ -260,6 +303,7 @@ def gather(machine):
         'home': home,
         'where': where,
         'source': source,
+        'options': options,
         'kind_state': kind_state,
         'kind': kind,
         'gran_state': gran_state,
@@ -290,9 +334,9 @@ def trim_problems(state):
         problems.append('lsblk is missing, so the discard granularity was not checked. Install it with: sudo pacman -S --needed util-linux')
     elif state['gran_state'] == 'failed':
         problems.append(f'lsblk did not report a discard granularity for {MAPPER}, so discards were not checked.')
-    elif state.get('discard_unsupported') and state['gran'] in ZERO_GRANULARITY:
+    elif state.get('discard_unsupported') and classify_granularity(state['gran']) == 'off':
         pass
-    elif state['gran'] in ZERO_GRANULARITY:
+    elif classify_granularity(state['gran']) == 'off':
         problems.append(
             f'discards are off on {MAPPER} (discard granularity is {state["gran"]}). '
             'Discard reveals which encrypted blocks are free. '
@@ -303,9 +347,7 @@ def trim_problems(state):
         problems.append('systemctl is missing, so fstrim.timer was not checked. Install it with: sudo pacman -S --needed systemd')
     elif state['timer'] in ('timed-out', 'unknown'):
         problems.append('systemctl did not show whether fstrim.timer is enabled, so it was not changed.')
-    elif state['timer'] == 'masked':
-        pass
-    elif state['timer'] != 'enabled':
+    elif state['timer'] == 'disabled':
         if fstrim_is_safe(state):
             problems.append('fstrim.timer is not enabled. Enable it with: sudo systemctl enable --now fstrim.timer')
         elif discards_are_off(state):
@@ -322,13 +364,13 @@ def discards_are_off(state):
     if state.get('discard_unsupported'):
         return False
     return (state['where'] == 'root' and state['kind'] == 'crypt' and state['gran_state'] == 'ok'
-            and state['gran'] in ZERO_GRANULARITY)
+            and classify_granularity(state['gran']) == 'off')
 
 
 def fstrim_is_safe(state):
     """True only when this LUKS root already has a non-zero discard granularity."""
     return (state['where'] == 'root' and state['kind'] == 'crypt' and state['gran_state'] == 'ok'
-            and state['gran'] not in ZERO_GRANULARITY)
+            and classify_granularity(state['gran']) == 'on')
 
 
 def locate_problems(state):
@@ -359,10 +401,30 @@ def trim_ok_line(state):
         return f'ok (root is {state["source"]}, not {MAPPER}, so TRIM through LUKS does not apply)'
     if state['kind_state'] == 'ok' and state['kind'] != 'crypt':
         return f'ok ({MAPPER} is type {state["kind"]}, not crypt, so TRIM through LUKS does not apply)'
-    if state.get('discard_unsupported') and state['gran'] in ZERO_GRANULARITY:
-        return ('ok (a refresh left discards off, so it is not retried; '
+    if state.get('discard_unsupported') and classify_granularity(state['gran']) == 'off':
+        return ('ok (discards stay off, so the refresh is not retried; '
                 'delete /var/lib/groundwork/luks-discard-unsupported to try again)')
-    return TRIM_OK
+    if state['timer'] == 'enabled':
+        return TRIM_OK
+    if state['timer'] in ('absent', 'disabled', 'missing'):
+        return TRIM_OK
+    return f'ok (discards on {MAPPER}, fstrim.timer is {state["timer"]} and was left alone)'
+
+
+def compression_line(options):
+    """Say what the mount is doing. Never claim compress=zstd:3 unless findmnt did."""
+    if options is None:
+        return ('ok (a directory property cannot choose a zstd level, and the mount options '
+                'were not read, so nothing was changed)')
+    parts = [part for part in options.split(',') if part]
+    if 'compress=zstd:3' in parts:
+        return COMPRESSION_OK
+    compress = next((part for part in parts if part.startswith('compress=')), '')
+    if compress:
+        return (f'ok (a directory property cannot choose a zstd level; the mount says {compress} '
+                'and was not changed)')
+    return ('ok (a directory property cannot choose a zstd level; this mount does not set '
+            'compress=zstd:3 and was not changed)')
 
 
 def sections(state):
@@ -371,7 +433,7 @@ def sections(state):
     return (
         ('TRIM through LUKS', trim_problems(state), trim_ok_line(state)),
         ('Locate index', locate_problems(state), locate_ok(home) if home else 'ok'),
-        ('Compression', [], COMPRESSION_OK),
+        ('Compression', [], compression_line(state.get('options'))),
     )
 
 
@@ -459,40 +521,125 @@ def stop_child(process, group):
         pass
 
 
-def run_process(command, timeout, environ, terminal):
-    if terminal:
-        process = subprocess.Popen(command)
-    else:
-        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, text=True, env=environ, start_new_session=True)
+def terminal_stdio():
+    """The controlling terminal, or None when this process has none."""
     try:
-        if terminal:
-            process.wait(timeout=timeout)
-            return Result(process.returncode, '', '')
-        stdout, stderr = process.communicate(timeout=timeout)
-        return Result(process.returncode, stdout, stderr)
-    except subprocess.TimeoutExpired:
-        stop_child(process, group=not terminal)
-        return Result(124, '', f'Timed out after {timeout} seconds.')
+        return os.open('/dev/tty', os.O_RDWR)
+    except OSError:
+        return None
 
 
-def default_run(environ):
+def finished_code(process):
+    code = process.returncode
+    if code is None:
+        return 1
+    if code < 0:
+        return 128 - code
+    return code
+
+
+def is_host_binary(path):
+    """True for a system binary. A fixture root must not run one."""
+    try:
+        resolved = str(Path(path).resolve())
+    except OSError:
+        return True
+    return any(resolved == prefix[:-1] or resolved.startswith(prefix) for prefix in HOST_BIN_PREFIXES)
+
+
+def run_process(command, timeout, environ, terminal, keep_session=False):
+    """Run one command.
+
+    A new session has no controlling terminal, so stock sudo ignores the
+    per-terminal credential apply-layer just primed. Privileged commands stay
+    in this session and use their own process group, which can still be
+    signalled without signalling this process. The passphrase prompt is given
+    the terminal itself, not whatever stdin the parent inherited.
+    """
+    tty_fd = None
+    previous = None
+    if terminal:
+        tty_fd = terminal_stdio()
+        if tty_fd is None:
+            return Result(1, '', 'No terminal is available to ask for a passphrase.')
+        try:
+            previous = os.tcgetpgrp(tty_fd)
+        except OSError:
+            previous = None
+    process = None
+    try:
+        try:
+            if terminal:
+                # process_group keeps the session, so sudo's per-terminal
+                # credential still matches, and it does not run Python between
+                # fork and exec. The command may be stopped by the terminal
+                # until this process makes that group the foreground.
+                process = subprocess.Popen(
+                    command, stdin=tty_fd, stdout=tty_fd, stderr=tty_fd, process_group=0)
+                try:
+                    os.tcsetpgrp(tty_fd, process.pid)
+                except OSError:
+                    pass
+                try:
+                    os.kill(process.pid, signal.SIGCONT)
+                except OSError:
+                    pass
+            elif keep_session:
+                process = subprocess.Popen(
+                    command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, env=environ, process_group=0)
+            else:
+                process = subprocess.Popen(
+                    command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, env=environ, start_new_session=True)
+            if terminal:
+                process.wait(timeout=timeout)
+                return Result(finished_code(process), '', '')
+            stdout, stderr = process.communicate(timeout=timeout)
+            return Result(finished_code(process), stdout, stderr)
+        except subprocess.TimeoutExpired:
+            stop_child(process, group=True)
+            return Result(124, '', f'Timed out after {timeout} seconds.')
+        except KeyboardInterrupt:
+            if process is not None:
+                stop_child(process, group=True)
+            return Result(130, '', 'Stopped.')
+    finally:
+        if tty_fd is not None and previous is not None:
+            try:
+                os.tcsetpgrp(tty_fd, previous)
+            except OSError:
+                pass
+        if tty_fd is not None:
+            os.close(tty_fd)
+
+
+def default_run(environ, root):
     path = environ.get('PATH', os.defpath)
+    try:
+        fixture = Path(root).resolve() != Path('/').resolve()
+    except OSError:
+        fixture = True
+
+    def consider(binary, label):
+        if binary is None or (fixture and is_host_binary(binary)):
+            raise FileNotFoundError(label)
+        return binary
 
     def run(args, sudo=False, timeout=PROBE_SECONDS, terminal=False):
         if sudo and os.geteuid() != 0:
-            sudo_bin = shutil.which('sudo', path=path)
-            if sudo_bin is None:
-                raise FileNotFoundError('sudo')
-            command = [sudo_bin, *args]
+            command = [consider(shutil.which('sudo', path=path), 'sudo')]
+            # No terminal: fail immediately instead of waiting for a prompt
+            # that cannot be answered. The caller prints the manual command.
+            if not terminal_available():
+                command.append('-n')
+            command.extend(args)
         else:
-            binary = shutil.which(args[0], path=path)
-            if binary is None:
-                raise FileNotFoundError(args[0])
-            command = [binary, *args[1:]]
+            command = [consider(shutil.which(args[0], path=path), args[0]), *args[1:]]
         if terminal and not terminal_available():
             return Result(1, '', 'No terminal is available to ask for a passphrase.')
-        return run_process(command, timeout, environ, terminal)
+        keep_session = terminal or (sudo and terminal_available())
+        return run_process(command, timeout, environ, terminal, keep_session=keep_session)
 
     return run
 
@@ -503,7 +650,8 @@ def machine_from(environ, run=None, allow_live=False):
         return None
     if root is REFUSED:
         return REFUSED
-    return Machine(environ, root, run or default_run(environ), allow_live=allow_live, real_commands=run is None)
+    return Machine(environ, root, run or default_run(environ, root), allow_live=allow_live,
+                   real_commands=run is None)
 
 
 def needs_privilege(machine):
@@ -538,7 +686,7 @@ def quoted(args, sudo):
 def write_stamp(machine):
     handle = tempfile.NamedTemporaryFile('w', encoding='utf-8', prefix='groundwork-discard-', delete=False)
     try:
-        handle.write('cryptsetup refresh left the discard granularity at zero.\n')
+        handle.write('discards stay off, so the refresh is not retried.\n')
         handle.close()
         return machine.run(
             ['install', '-D', '-o', 'root', '-g', 'root', '-m', '0644', handle.name, str(machine.path(STAMP_RELATIVE))],
@@ -596,12 +744,18 @@ def apply_storage(machine):
                     failed = True
                     trim_failed = True
                     continue
-                print(f'Enabling discards on {MAPPER}. Discard reveals which encrypted blocks are free.')
-                print(f'Running: {shown}')
+                print(f'Enabling discards on {MAPPER}. Discard reveals which encrypted blocks are free.', flush=True)
+                print('This stores allow-discards in the LUKS2 header. If that header already has other flags, '
+                      'they can be replaced. Read the Flags line from cryptsetup luksDump before the first run.',
+                      flush=True)
+                print(f'The passphrase wait is {timeout} seconds. A timeout fails this run. '
+                      'A root cryptsetup that cannot be stopped may still be running.', flush=True)
+                print(f'Running: {shown}', flush=True)
                 result = machine.run(command, sudo=True, timeout=timeout, terminal=True)
             else:
-                print('Enabling fstrim.timer. This waits for the timer to start, not for the trim to finish.')
-                print(f'Running: {quoted(command, sudo=True)}')
+                print('Enabling fstrim.timer. This waits for the timer to start, not for the trim to finish.',
+                      flush=True)
+                print(f'Running: {quoted(command, sudo=True)}', flush=True)
                 result = machine.run(command, sudo=True, timeout=timeout)
         except FileNotFoundError as error:
             print(f'{kind} was not applied. {error} is missing.', file=sys.stderr)
@@ -609,22 +763,25 @@ def apply_storage(machine):
             if kind == 'trim':
                 trim_failed = True
             continue
+        if result.returncode == 130:
+            print('Stopped. This storage step did not finish.', file=sys.stderr)
+            return 130
         if kind == 'trim' and result.returncode == 0:
             gran_state, gran = discard_granularity(machine)
-            if not (gran_state == 'ok' and gran not in ZERO_GRANULARITY):
+            if not (gran_state == 'ok' and classify_granularity(gran) == 'on'):
                 trim_failed = True
                 failed = True
-                if gran_state == 'ok' and gran in ZERO_GRANULARITY:
-                    print('The refresh finished, but the discard granularity is still zero. It will not be retried.',
-                          file=sys.stderr)
-                    print('Delete /var/lib/groundwork/luks-discard-unsupported to try again.', file=sys.stderr)
-                    stamp = write_stamp(machine)
-                    if stamp.returncode != 0:
-                        print(stamp.stderr.strip(), file=sys.stderr)
+                if gran_state == 'ok' and classify_granularity(gran) == 'off':
+                    record_unsupported(machine, 'The refresh finished, but the discard granularity is still zero.')
                 else:
                     print('The discard granularity could not be read after the refresh, so fstrim.timer stays disabled.',
                           file=sys.stderr)
                 continue
+        if kind == 'trim' and result.returncode != 0 and discards_cannot_persist(result):
+            trim_failed = True
+            failed = True
+            record_unsupported(machine, 'This header cannot store allow-discards.')
+            continue
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip()
             extra = f' Run: {quoted(command, sudo=True)}.' if command else ''
@@ -635,20 +792,62 @@ def apply_storage(machine):
     return 1 if failed else 0
 
 
-def main(argv=None, environ=None):
-    parser = argparse.ArgumentParser(prog='groundwork-storage')
-    parser.add_argument('command', choices=('needed', 'apply'))
-    args = parser.parse_args(argv)
-    environ = dict(os.environ if environ is None else environ)
-    allow_live = environ.get('GROUNDWORK_STORAGE_APPLY') == '1'
-    machine = machine_from(environ, allow_live=allow_live and args.command == 'apply')
+def record_unsupported(machine, happened):
+    """Record that the refresh must not run again, and say so only after the record exists."""
+    stamp = write_stamp(machine)
+    if stamp.returncode != 0:
+        print(f'{happened} That was not recorded, so the next run will ask again.', file=sys.stderr)
+        detail = stamp.stderr.strip()
+        if detail:
+            print(detail, file=sys.stderr)
+        return False
+    print(f'{happened} It will not be retried.', file=sys.stderr)
+    print('Delete /var/lib/groundwork/luks-discard-unsupported to try again.', file=sys.stderr)
+    return True
+
+
+def explain_lines(state):
+    if not discards_are_off(state):
+        return []
+    shown = quoted(['cryptsetup', 'refresh', '--allow-discards', '--persistent', CRYPT_NAME], sudo=True)
+    return [
+        'Discards are still off. The disk passphrase is separate from the administrator password.',
+        f'Without a terminal, the LUKS header is not changed. Run this from a terminal: {shown}',
+    ]
+
+
+def explain(machine):
+    if machine is None:
+        return 0
     if machine is REFUSED:
         print('GROUNDWORK_STORAGE_ROOT and INSTALL_FIXTURE are test-only. Unset them and rerun; nothing was changed.',
               file=sys.stderr)
         return 64
+    for line in explain_lines(gather(machine)):
+        print(line)
+    return 0
+
+
+def main(argv=None, environ=None):
+    parser = argparse.ArgumentParser(prog='groundwork-storage')
+    parser.add_argument('command', choices=('needed', 'apply', 'explain'))
+    args = parser.parse_args(argv)
+    environ = dict(os.environ if environ is None else environ)
+    allow_live = environ.get('GROUNDWORK_STORAGE_APPLY') == '1' and args.command == 'apply'
+    machine = machine_from(environ, allow_live=allow_live)
+    if machine is REFUSED:
+        print('GROUNDWORK_STORAGE_ROOT and INSTALL_FIXTURE are test-only. Unset them and rerun; nothing was changed.',
+              file=sys.stderr)
+        return 64
+    if args.command == 'explain':
+        return explain(machine)
     if args.command == 'needed':
         return 0 if needs_privilege(machine) else 1
-    return apply_storage(machine)
+    try:
+        return apply_storage(machine)
+    except KeyboardInterrupt:
+        print('Stopped. This storage step did not finish.', file=sys.stderr)
+        return 130
 
 
 if __name__ == '__main__':
