@@ -493,7 +493,7 @@ class UpdateTests(unittest.TestCase):
         (self.seed / 'scripts/apply-layer.sh').write_text(script)
         for name in ('seed-obsidian.py', 'groundwork-screen-share.py',
                      'groundwork-syncthing.py', 'omarchy-plugins.py',
-                     'groundwork-node-pin.py', 'groundwork-commit-guard.py'):
+                     'groundwork-node-pin.py', 'groundwork-commit-guard.py', 'groundwork-tmp.py'):
             (self.seed / 'scripts' / name).write_text('# fixture\n')
         self.commit(self.seed)
         self.command('git', '-C', str(self.seed), 'push', 'origin', 'main')
@@ -572,6 +572,16 @@ class UpdateTests(unittest.TestCase):
             updater.update('all')
         self.assertEqual(self.git('rev-parse', 'HEAD'), self.initial)
         self.assertEqual(self.machine_calls, [['omarchy', 'update']])
+
+    def test_tmp_on_disk_opt_out_is_saved_and_opting_back_in_removes_it(self):
+        # Decision 0022: only the opt-out is stored; on is the default.
+        vault = str(self.home / 'Notes')
+        updater.register(str(self.source), '0', '0', vault, '0', '0', '', '0', '0')
+        self.assertIs(json.loads(self.config.read_text())['tmp_on_disk'], False)
+        self.assertFalse(updater.tmp_on_disk_enabled(updater.settings()))
+        updater.register(str(self.source), '0', '0', vault, '0', '0', '', '0', '1')
+        self.assertNotIn('tmp_on_disk', json.loads(self.config.read_text()))
+        self.assertTrue(updater.tmp_on_disk_enabled(updater.settings()))
 
     def test_failed_keyd_copy_and_newer_candidate_keep_both_retry_boundaries_recoverable(self):
         installed = self.root / 'installed-keyd.conf'
@@ -833,7 +843,7 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
             ('Host tools check', [python, str(self.source / 'scripts/groundwork-doctor.py'), '--brief']),
         ])
         self.assertTrue(all(0 < deadline <= 60 for _, _, deadline in self.report_calls))
-        self.assertIn('Reports: no Omarchy offers, PATH shadows, low disk space, or missing host tools.', output.getvalue())
+        self.assertIn('Reports: no Omarchy offers, PATH shadows, low disk space, missing host tools, or temp storage problems.', output.getvalue())
         self.report_calls.clear()
         updater.update('layer')
         updater.update('all', check=True)
@@ -844,7 +854,7 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
             updater.update('all')
         tail = output.getvalue().split('FreeTube user Flatpak update command completed', 1)[1]
         self.assertEqual([line for line in tail.splitlines() if line.strip()],
-                         ['Reports: no Omarchy offers, PATH shadows, low disk space, or missing host tools.'])
+                         ['Reports: no Omarchy offers, PATH shadows, low disk space, missing host tools, or temp storage problems.'])
         self.report_answers['Disk report'] = 'Disk: 9.0 GiB free on /, under the 10.0 GiB Omarchy needs to update.'
         with patch('sys.stdout', new_callable=io.StringIO) as output:
             updater.update('all')

@@ -1,7 +1,8 @@
 """groundwork-doctor's host-tools check (decision 0021, issue #130).
 
-Every run uses a private PATH of stub binaries, so the host's own tools never
-decide a result.
+Every run uses a private PATH of stub binaries and a private system root with
+/tmp already on disk, so the host's own tools and /tmp never decide a result.
+The temp-storage findings are in test_tmp_on_disk.
 """
 import contextlib
 import importlib.util
@@ -13,6 +14,8 @@ import sys
 import tempfile
 import unittest
 
+import test_tmp_on_disk
+
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / 'scripts/groundwork-doctor.py'
 spec = importlib.util.spec_from_file_location('groundwork_doctor', SCRIPT)
@@ -23,6 +26,7 @@ TOOLS = ('lsof', 'ps', 'rg', 'jq', 'shellcheck', 'ssh', 'git')
 # procps-ng prints a start time for `ps -o lstart= -p PID`.
 PROCPS_PS = '#!/bin/sh\n[ "$1" = -o ] && [ "$2" = lstart= ] && { echo "Tue Nov  3 21:38:13 2026"; exit 0; }\nexit 0\n'
 # busybox ps rejects the lstart format.
+TEMP_OK = '/tmp on btrfs, tmp.mount masked (/tmp on disk on), tmpfiles ages /tmp after 10d, 0 scratch roots'
 BUSYBOX_PS = '#!/bin/sh\necho "ps: bad -o argument \'lstart\'" >&2\nexit 1\n'
 
 
@@ -37,7 +41,11 @@ class HostToolsTests(unittest.TestCase):
             self.stub(name, PROCPS_PS if name == 'ps' else '#!/bin/sh\nexit 0\n')
         home = self.root / 'home'
         home.mkdir()
-        self.environ = {'PATH': str(self.bin), 'HOME': str(home)}
+        system = self.root / 'system'
+        test_tmp_on_disk.seed_system(system)
+        test_tmp_on_disk.fake_systemctl(self.bin)
+        self.environ = {'PATH': str(self.bin), 'HOME': str(home),
+                        'GROUNDWORK_TESTING': '1', 'GROUNDWORK_TEST_ROOT': str(system)}
         for key, sub in (('XDG_CONFIG_HOME', '.config'), ('XDG_STATE_HOME', '.local/state'),
                          ('XDG_CACHE_HOME', '.cache'), ('XDG_DATA_HOME', '.local/share'),
                          ('GNUPGHOME', '.gnupg')):
@@ -57,7 +65,8 @@ class HostToolsTests(unittest.TestCase):
     def test_all_present_passes(self):
         status, text = self.doctor()
         self.assertEqual(status, 0)
-        self.assertEqual(text, 'Host tools: ok (lsof, ps -o lstart=, rg, jq, shellcheck, ssh, git)\n')
+        self.assertEqual(text, 'Host tools: ok (lsof, ps -o lstart=, rg, jq, shellcheck, ssh, git)\n'
+                               f'Temp storage: ok ({TEMP_OK})\n')
         self.assertEqual(self.doctor('--brief'), (0, ''))
 
     def test_each_missing_tool_names_its_install_line(self):
@@ -89,7 +98,8 @@ class HostToolsTests(unittest.TestCase):
         status, text = self.doctor()
         self.assertEqual(status, 1)
         self.assertEqual(text, 'Host tools: 1 problem\n'
-                               '  lsof is missing (lsof). Install it with: sudo pacman -S --needed lsof\n')
+                               '  lsof is missing (lsof). Install it with: sudo pacman -S --needed lsof\n'
+                               f'Temp storage: ok ({TEMP_OK})\n')
 
     def test_several_missing_tools_are_each_listed(self):
         (self.bin / 'lsof').unlink()
