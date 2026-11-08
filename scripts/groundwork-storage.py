@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 MAPPER = '/dev/mapper/root'
 CRYPT_NAME = 'root'
@@ -38,6 +39,10 @@ CRYPTSETUP_SECONDS = 30
 FSTRIM_SECONDS = 900
 INSTALL_SECONDS = 30
 BTRFS_SECONDS = 30
+# update-all stops groundwork-doctor --brief at 15 seconds and discards that
+# output. Every storage probe in the doctor shares this shorter budget, so a
+# stalled btrfs query cannot take the host-tools report with it.
+DOCTOR_SECONDS = 8
 HOME_CHARS = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/-')
 TRIM_OK = 'ok (discards on /dev/mapper/root, fstrim.timer enabled)'
 COMPRESSION_OK = 'ok (zstd:1 for new files in ~/.t3/worktrees, ~/code, and ~/.cache; the mount stays compress=zstd:3)'
@@ -48,6 +53,16 @@ class Result:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
+
+
+class Deadline:
+    """A shared clock for one doctor pass. Apply does not set one."""
+
+    def __init__(self, seconds):
+        self.ends = time.monotonic() + seconds
+
+    def remaining(self):
+        return self.ends - time.monotonic()
 
 
 class Machine:
@@ -108,6 +123,11 @@ def unit_file(machine, name):
 
 def probe(machine, args, timeout=PROBE_SECONDS):
     """(Result or None, missing). missing is True when the command is not installed."""
+    budget = getattr(machine, 'deadline', None)
+    if budget is not None:
+        timeout = min(timeout, budget.remaining())
+        if timeout < 0.1:
+            return Result(124, '', 'The storage check ran out of time.'), False
     try:
         return machine.run(args, sudo=False, timeout=timeout), False
     except FileNotFoundError:
@@ -169,6 +189,8 @@ def timer_enabled(machine):
     result, missing = probe(machine, ['systemctl', 'is-enabled', 'fstrim.timer'])
     if missing:
         return 'missing'
+    if result.returncode == 124:
+        return 'timed-out'
     if result.returncode == 0 and result.stdout.strip() == 'enabled':
         return 'enabled'
     return 'disabled'
@@ -187,7 +209,7 @@ def compression_line(machine, directory):
 
 
 def dropin_state(machine, home):
-    """'missing-unit', 'bad-home', 'bad-template', 'missing', 'differs', 'unsafe', 'unloaded', or 'ok'."""
+    """'missing-unit', 'bad-home', 'bad-template', 'missing', 'differs', 'unsafe', 'unloaded', 'unconfirmed', 'systemctl-missing', or 'ok'."""
     if unit_file(machine, 'plocate-updatedb.service') is None:
         return 'missing-unit'
     if home is None:
@@ -215,18 +237,27 @@ def dropin_state(machine, home):
         return 'unsafe'
     if machine.root.resolve() == Path('/').resolve() and path.stat().st_uid != 0:
         return 'unsafe'
-    if not dropin_loaded(machine, path):
-        return 'unloaded'
-    return 'ok'
+    loaded = dropin_loaded(machine, path)
+    if loaded == 'loaded':
+        return 'ok'
+    if loaded == 'missing':
+        return 'systemctl-missing'
+    if loaded == 'failed':
+        return 'unconfirmed'
+    return 'unloaded'
 
 
 def dropin_loaded(machine, path):
-    """True when systemd lists this drop-in, or when that question cannot be asked."""
+    """'loaded', 'unloaded', 'missing', or 'failed'. A question we cannot answer is not loaded."""
     result, missing = probe(
         machine, ['systemctl', 'show', '-p', 'DropInPaths', '--value', 'plocate-updatedb.service'])
-    if missing or result is None or result.returncode != 0:
-        return True
-    return str(path) in result.stdout.split()
+    if missing or result is None:
+        return 'missing'
+    if result.returncode != 0:
+        return 'failed'
+    if str(path) in result.stdout.split():
+        return 'loaded'
+    return 'unloaded'
 
 
 def gather(machine):
@@ -314,9 +345,30 @@ def trim_problems(state):
         problems.append('fstrim.timer is not installed, so scheduled TRIM is not enabled. Install it with: sudo pacman -S --needed util-linux')
     elif state['timer'] == 'missing':
         problems.append('systemctl is missing, so fstrim.timer was not checked. Install it with: sudo pacman -S --needed systemd')
+    elif state['timer'] == 'timed-out':
+        problems.append('systemctl did not answer in time, so fstrim.timer was not checked.')
     elif state['timer'] != 'enabled':
-        problems.append('fstrim.timer is not enabled. Enable it with: sudo systemctl enable --now fstrim.timer')
+        if fstrim_is_safe(state):
+            problems.append('fstrim.timer is not enabled. Enable it with: sudo systemctl enable --now fstrim.timer')
+        elif discards_are_off(state):
+            problems.append('fstrim.timer stays disabled until discards are on, so the first trim is not a catch-up while discards are blocked.')
+        else:
+            problems.append('fstrim.timer stays disabled until discards on /dev/mapper/root are confirmed.')
     return problems
+
+
+def discards_are_off(state):
+    """The LUKS root is open and its discard granularity is still zero."""
+    return (state['where'] == 'root' and state['kind'] == 'crypt' and state['gran_state'] == 'ok'
+            and state['gran'] in ZERO_GRANULARITY)
+
+
+def fstrim_is_safe(state):
+    """True when a catch-up trim would see discards, or / is not this LUKS root."""
+    if state['where'] == 'other':
+        return True
+    return (state['where'] == 'root' and state['kind'] == 'crypt' and state['gran_state'] == 'ok'
+            and state['gran'] not in ZERO_GRANULARITY)
 
 
 def locate_problems(state):
@@ -329,6 +381,10 @@ def locate_problems(state):
         return ['the home directory is not a plain absolute path, so the plocate prunes were not written.']
     if dropin == 'unsafe':
         return ['the plocate drop-in is group-writable, world-writable, or not owned by root. Rerun update-all.']
+    if dropin == 'systemctl-missing':
+        return ['systemctl is missing, so the plocate drop-in was not confirmed. Install it with: sudo pacman -S --needed systemd']
+    if dropin == 'unconfirmed':
+        return ['systemctl could not show whether the plocate drop-in is loaded. Rerun update-all.']
     if dropin == 'unloaded':
         return ['the plocate drop-in is on disk, but systemd has not loaded it. Rerun update-all.']
     if dropin in ('missing', 'differs'):
@@ -403,11 +459,14 @@ def format_report(state, brief=False):
 def privileged_actions(state):
     """Commands a root step still has to run. Empty when those steps are done or do not apply."""
     actions = []
-    if (state['where'] == 'root' and state['kind'] == 'crypt' and state['gran'] in ZERO_GRANULARITY):
+    refreshing = discards_are_off(state)
+    if refreshing:
         actions.append(('trim', ['cryptsetup', 'refresh', '--allow-discards', '--persistent', CRYPT_NAME], CRYPTSETUP_SECONDS))
-    if state['timer_unit'] and state['timer'] == 'disabled':
+    # Queue the timer with the refresh so a successful refresh still starts it
+    # in this run. apply_storage drops it when that refresh does not succeed.
+    if state['timer_unit'] and state['timer'] == 'disabled' and (fstrim_is_safe(state) or refreshing):
         actions.append(('fstrim', ['systemctl', 'enable', '--now', 'fstrim.timer'], FSTRIM_SECONDS))
-    if state['dropin'] in ('missing', 'differs', 'unsafe', 'unloaded'):
+    if state['dropin'] in ('missing', 'differs', 'unsafe', 'unloaded', 'unconfirmed'):
         actions.append(('locate', None, INSTALL_SECONDS))
     return actions
 
@@ -524,7 +583,12 @@ def apply_storage(machine):
         if result.returncode != 0:
             print(f'Could not set compression on {directory}. {result.stderr.strip()}', file=sys.stderr)
             failed = True
+    trim_failed = False
     for kind, command, timeout in privileged_actions(state):
+        if kind == 'fstrim' and trim_failed:
+            print('Leaving fstrim.timer disabled because discards are still off.', file=sys.stderr)
+            failed = True
+            continue
         try:
             if kind == 'locate':
                 print('plocate will also skip node_modules, .turbo, .next, worktrees, and the pnpm store.')
@@ -540,11 +604,15 @@ def apply_storage(machine):
         except FileNotFoundError as error:
             print(f'{kind} was not applied. {error} is missing.', file=sys.stderr)
             failed = True
+            if kind == 'trim':
+                trim_failed = True
             continue
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip()
             print(f'{kind} was not applied. {detail}'.rstrip(), file=sys.stderr)
             failed = True
+            if kind == 'trim':
+                trim_failed = True
     return 1 if failed else 0
 
 

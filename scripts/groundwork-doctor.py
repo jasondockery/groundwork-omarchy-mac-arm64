@@ -93,6 +93,7 @@ def storage_report(environ, brief):
     machine = STORAGE.machine_from(environ)
     if machine is None:
         return '', False
+    machine.deadline = STORAGE.Deadline(STORAGE.DOCTOR_SECONDS)
     return STORAGE.format_report(STORAGE.gather(machine), brief=brief)
 
 

@@ -30,8 +30,10 @@ class World:
         self.fstype = 'btrfs'
         self.btrfs = True
         self.reloaded = False
+        self.show = 'ok'
         self.props = {}
         self.fail = set()
+        self.missing = set()
         self.units = {'fstrim.timer', 'plocate-updatedb.service'}
         unit = self.root / 'usr/lib/systemd/system'
         unit.mkdir(parents=True)
@@ -40,6 +42,8 @@ class World:
 
     def run(self, args, sudo=False, timeout=10):
         self.calls.append({'sudo': sudo, 'args': list(args), 'timeout': timeout})
+        if args[0] in self.missing:
+            raise FileNotFoundError(args[0])
         if args[0] in self.fail:
             return storage.Result(1, '', f'{args[0]} failed')
         if args[0] == 'findmnt':
@@ -77,6 +81,10 @@ class World:
             self.reloaded = True
             return storage.Result(0, '')
         if args[:4] == ['systemctl', 'show', '-p', 'DropInPaths']:
+            if self.show == 'missing':
+                raise FileNotFoundError('systemctl')
+            if self.show == 'failed':
+                return storage.Result(1, '', 'systemctl show failed')
             if not self.reloaded:
                 return storage.Result(0, '')
             return storage.Result(0, str(self.root / storage.DROPIN_RELATIVE) + '\n')
@@ -218,8 +226,8 @@ class StorageTests(unittest.TestCase):
         self.assertTrue(failed)
         self.assertIn('discard granularity is 0B', text)
         self.assertIn('sudo cryptsetup refresh --allow-discards --persistent root', text)
-        self.assertIn('fstrim.timer is not enabled', text)
-        self.assertIn('sudo systemctl enable --now fstrim.timer', text)
+        self.assertIn('fstrim.timer stays disabled until discards are on', text)
+        self.assertNotIn('systemctl enable --now fstrim.timer', text)
         self.assertIn('node_modules', text)
         self.assertIn(str(self.home / '.local/share/pnpm'), text)
         for relative in storage.COMPRESS_RELATIVE:
@@ -366,7 +374,87 @@ class StorageTests(unittest.TestCase):
         status, _, errors = self.apply()
         self.assertEqual(status, 1)
         self.assertIn('trim was not applied', errors)
+        self.assertIn('Leaving fstrim.timer disabled', errors)
         self.assertEqual(self.world.gran, '0B')
+        self.assertEqual(self.world.timer, 'disabled')
+        self.assertFalse(any(call['args'][:3] == ['systemctl', 'enable', '--now'] for call in self.world.calls))
+
+    def test_missing_cryptsetup_does_not_enable_the_timer(self):
+        self.world.missing.add('cryptsetup')
+        status, _, errors = self.apply()
+        self.assertEqual(status, 1, errors)
+        self.assertIn('trim was not applied', errors)
+        self.assertEqual(self.world.timer, 'disabled')
+        self.assertEqual(self.world.gran, '0B')
+        self.assertFalse(any(call['args'][:3] == ['systemctl', 'enable', '--now'] for call in self.world.calls))
+
+    def test_timer_is_enabled_only_after_discards_are_on(self):
+        self.world.gran = '512B'
+        text, failed = self.report()
+        self.assertTrue(failed)
+        self.assertIn('sudo systemctl enable --now fstrim.timer', text)
+        kinds = [kind for kind, _, _ in storage.privileged_actions(storage.gather(self.world.machine()))]
+        self.assertIn('fstrim', kinds)
+        self.assertNotIn('trim', kinds)
+
+    def test_unconfirmed_dropin_is_not_reported_ok(self):
+        self._ready_except_dropin_load()
+        self.world.show = 'failed'
+        text, failed = self.report()
+        self.assertTrue(failed)
+        self.assertNotIn('Locate index: ok', text)
+        self.assertIn('could not show whether the plocate drop-in is loaded', text)
+        self.assertTrue(storage.needs_privilege(self.world.machine()))
+        status, _, errors = self.apply()
+        self.assertEqual(status, 0, errors)
+        self.assertIn({'sudo': True, 'args': ['systemctl', 'daemon-reload'], 'timeout': 30}, self.world.calls)
+
+    def test_missing_systemctl_show_is_not_a_loaded_dropin(self):
+        self._ready_except_dropin_load()
+        self.world.show = 'missing'
+        text, failed = self.report()
+        self.assertTrue(failed)
+        self.assertNotIn('Locate index: ok', text)
+        self.assertIn('systemctl is missing, so the plocate drop-in was not confirmed', text)
+        self.assertFalse(storage.needs_privilege(self.world.machine()))
+
+    def test_doctor_probes_share_a_budget_under_the_report_deadline(self):
+        update = (REPO / 'scripts/groundwork-update.py').read_text(encoding='utf-8')
+        self.assertIn("('Host tools check', 'groundwork-doctor.py', ('--brief',), 15)", update)
+        self.assertLess(storage.DOCTOR_SECONDS, 15)
+        doctor = (REPO / 'scripts/groundwork-doctor.py').read_text(encoding='utf-8')
+        self.assertIn('machine.deadline = STORAGE.Deadline(STORAGE.DOCTOR_SECONDS)', doctor)
+        calls = []
+
+        def run(args, sudo=False, timeout=10):
+            calls.append(timeout)
+            return storage.Result(124, '', 'stalled')
+
+        machine = storage.Machine({'HOME': str(self.home), 'PATH': '/nonexistent'}, self.root, run)
+        machine.deadline = storage.Deadline(0)
+        result, missing = storage.probe(machine, ['btrfs', 'property', 'get', str(self.home), 'compression'],
+                                         storage.BTRFS_SECONDS)
+        self.assertEqual(calls, [])
+        self.assertFalse(missing)
+        self.assertEqual(result.returncode, 124)
+        machine.deadline = storage.Deadline(2)
+        storage.compression_line(machine, str(self.home / 'code'))
+        self.assertEqual(len(calls), 1)
+        self.assertLess(calls[0], storage.BTRFS_SECONDS)
+        self.assertLessEqual(calls[0], 2)
+
+    def _ready_except_dropin_load(self):
+        self.world.gran = '512B'
+        self.world.timer = 'enabled'
+        self.world.reloaded = True
+        for relative in storage.COMPRESS_RELATIVE:
+            directory = self.home / relative
+            directory.mkdir(parents=True)
+            self.world.props[str(directory)] = 'zstd:1'
+        dropin = self.root / storage.DROPIN_RELATIVE
+        dropin.parent.mkdir(parents=True)
+        dropin.write_text(storage.render_dropin(storage.TEMPLATE.read_text(encoding='utf-8'), str(self.home)))
+        dropin.chmod(0o644)
 
     def test_live_apply_without_the_flag_does_not_probe(self):
         calls = []
