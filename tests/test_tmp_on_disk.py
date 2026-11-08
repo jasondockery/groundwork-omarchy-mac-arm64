@@ -8,11 +8,13 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -166,12 +168,53 @@ class TempStorageTests(unittest.TestCase):
                 self.assertNotIn('not masked', ' '.join(problems) + summary)
                 self.assertIn('tmp.mount mask state unknown', summary)
 
+    def test_is_enabled_exit_1_is_the_units_name(self):
+        # disabled and linked exit 1, the same status as masked. The printed name is the state.
+        seed_system(self.system, masked=False)
+        disk = ['/tmp is on btrfs now, but tmp.mount is not masked, so a later boot can '
+                'mount it in RAM again. Run groundwork-update (it masks tmp.mount).']
+        unknown = ['The tmp.mount mask state is unknown: systemctl is-enabled tmp.mount gave no answer. '
+                   'Check it with: systemctl is-enabled tmp.mount']
+        cases = {'disabled': ("print('disabled')\nsys.exit(1)\n", disk), 'empty': ('sys.exit(1)\n', unknown)}
+        for name, (action, expected) in cases.items():
+            with self.subTest(state=name):
+                (self.bin / 'systemctl').write_text(
+                    f'#!{sys.executable}\nimport sys\n'
+                    "if sys.argv[1:] == ['is-enabled', 'systemd-tmpfiles-clean.timer']:\n"
+                    "    print('static')\n    sys.exit(0)\n"
+                    "if sys.argv[1:] != ['is-enabled', 'tmp.mount']:\n    sys.exit(1)\n"
+                    f'{action}')
+                (self.bin / 'systemctl').chmod(0o755)
+                problems, summary = self.report()
+                self.assertEqual(problems, expected, summary)
+                if name == 'empty':
+                    self.assertIn('mask state unknown', summary)
+                    self.assertNotIn('not masked', summary)
+                else:
+                    self.assertIn('not masked', summary)
+                    self.assertNotIn('unknown', summary)
+
     def test_masked_tmpfiles_clean_timer_is_reported(self):
         timer = self.system / 'etc/systemd/system/systemd-tmpfiles-clean.timer'
         timer.symlink_to('/dev/null')
         problems, _ = self.report()
         self.assertEqual(problems, ['systemd-tmpfiles-clean.timer is masked, so nothing ages /tmp. '
                                     'Unmask it with: sudo systemctl unmask systemd-tmpfiles-clean.timer'])
+
+    def test_masked_runtime_clean_timer_is_reported(self):
+        # A runtime mask is still a mask: is-enabled prints masked-runtime and exits 1.
+        (self.bin / 'systemctl').write_text(
+            f'#!{sys.executable}\nimport sys\n'
+            "if sys.argv[1:] == ['is-enabled', 'systemd-tmpfiles-clean.timer']:\n"
+            "    print('masked-runtime')\n    sys.exit(1)\n"
+            "if sys.argv[1:] == ['is-enabled', 'tmp.mount']:\n"
+            "    print('masked')\n    sys.exit(1)\n"
+            'sys.exit(1)\n')
+        (self.bin / 'systemctl').chmod(0o755)
+        problems, summary = self.report()
+        self.assertEqual(problems, ['systemd-tmpfiles-clean.timer is masked, so nothing ages /tmp. '
+                                    'Unmask it with: sudo systemctl unmask systemd-tmpfiles-clean.timer'])
+        self.assertNotIn('unknown', summary)
 
     def test_custom_tmp_mount_unit_is_reported_and_not_masked(self):
         # What systemctl edit --full tmp.mount leaves behind; systemctl mask refuses to replace it.
@@ -187,6 +230,20 @@ class TempStorageTests(unittest.TestCase):
         unit.unlink()
         unit.symlink_to('/dev/null')
         self.assertEqual(self.tmp_cli('tmp-unit').returncode, 1)
+
+    def test_tmp_mount_link_elsewhere_is_a_custom_unit(self):
+        # systemctl mask refuses a symlink that is not the /dev/null mask, including one whose target is missing.
+        unit = self.system / 'etc/systemd/system/tmp.mount'
+        for link in ('/etc/systemd/system/tmp.mount.custom', 'not-the-mask.mount'):
+            with self.subTest(link=link):
+                unit.unlink(missing_ok=True)
+                unit.symlink_to(link)
+                result = self.tmp_cli('tmp-unit')
+                self.assertEqual((result.returncode, result.stdout), (0, '/etc/systemd/system/tmp.mount\n'))
+                problems, _ = self.report()
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn('is a tmp.mount unit of its own', problems[0])
+                self.assertIn('sudo systemctl revert tmp.mount', problems[0])
 
     def test_masked_but_still_tmpfs_is_a_pending_reboot(self):
         (self.system / 'proc/self/mountinfo').write_text(
@@ -228,6 +285,27 @@ class TempStorageTests(unittest.TestCase):
         self.assertEqual((second.returncode, second.stdout, second.stderr), (0, '', ''))
         self.assertEqual(self.report(), ([], '/tmp on btrfs, tmp.mount masked (/tmp on disk on), '
                                              'tmpfiles ages /tmp after 10d, 1 scratch root'))
+
+    def test_scratch_root_owned_by_someone_else_is_reported(self):
+        # This user cannot chown to another uid, so the owner check is fed a substituted stat uid.
+        self.save(scratch_dirs=['work-scratch'])
+        target = self.home / '.cache/work-scratch'
+        target.mkdir()
+        os.chmod(target, 0o700)
+        real_stat = os.stat
+
+        def other_owner(path, *args, **kwargs):
+            info = real_stat(path, *args, **kwargs)
+            if Path(os.fspath(path)) == target:
+                fields = list(info)
+                fields[4] = 0 if info.st_uid != 0 else 1
+                return os.stat_result(tuple(fields))
+            return info
+
+        with unittest.mock.patch('os.stat', side_effect=other_owner):
+            problems, _ = self.report()
+        self.assertEqual(problems, [f'Scratch root {target} is not owned by you. '
+                                    'Move it away, then run groundwork-update.'])
 
     def test_no_scratch_dirs_creates_nothing(self):
         self.save()

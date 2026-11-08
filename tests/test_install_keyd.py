@@ -1423,9 +1423,26 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertIn('sudo was not used', result.stdout)
         self.assertFalse(any(call[0] == 'sudo' for call in self.calls()))
 
+    def test_tmp_mount_link_elsewhere_is_reported_and_never_asks_for_sudo(self):
+        # A symlink other than the /dev/null mask is the same conflict as a unit file of its own.
+        unit = self.root / 'etc/systemd/system/tmp.mount'
+        unit.parent.mkdir(parents=True)
+        unit.symlink_to('/etc/systemd/system/tmp.mount.custom')
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertNotIn(['sudo', 'systemctl', 'mask', 'tmp.mount'], self.calls())
+        self.assertIn('sudo systemctl revert tmp.mount', result.stderr)
+        self.assertEqual(os.readlink(unit), '/etc/systemd/system/tmp.mount.custom')
+        (self.root / 'calls.jsonl').unlink()
+        self.env['FIXTURE_SUDO_CACHED'] = '0'
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('sudo was not used', result.stdout)
+        self.assertFalse(any(call[0] == 'sudo' for call in self.calls()))
+
     def test_failed_mask_finishes_setup_then_exits_1(self):
         self.env['FIXTURE_MASK_STATUS'] = '1'
         result = self.run_install(success=False)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn(['sudo', 'systemctl', 'mask', 'tmp.mount'], self.calls())
         self.assertIn('tmp.mount could not be masked, so /tmp stays in RAM', result.stderr)
         self.assertNotIn('Masked tmp.mount', result.stdout)
