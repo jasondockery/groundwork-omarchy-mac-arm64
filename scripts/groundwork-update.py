@@ -108,8 +108,9 @@ REPORTS = (
     ('Omarchy feed watch', 'omarchy-feed-watch.py', ('report', '--brief'), 60),
     ('PATH shadow check', 'groundwork-path-shadow.py', ('--brief',), 30),
     ('Disk report', 'groundwork-disk-report.py', ('--brief',), 15),
-    # The doctor also checks storage. Those probes share DOCTOR_SECONDS in
-    # groundwork-storage.py, which is shorter than this deadline.
+    # The doctor also checks storage. Probes it can signal share DOCTOR_SECONDS
+    # in groundwork-storage.py. A command that cannot be signalled is stopped
+    # with this deadline, and that report is discarded.
     ('Host tools check', 'groundwork-doctor.py', ('--brief',), 15),
 )
 # Set to anything but empty or 0 to skip all of them.

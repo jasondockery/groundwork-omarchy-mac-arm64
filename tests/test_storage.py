@@ -1,4 +1,4 @@
-"""TRIM through LUKS, plocate prunes, and directory compression (decision 0022).
+"""TRIM through LUKS and plocate prunes (decision 0022).
 
 Every command is a stand-in. Nothing here calls cryptsetup, systemctl, or btrfs
 on the machine running the tests.
@@ -8,8 +8,10 @@ import io
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 import stat
+import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / 'scripts/groundwork-storage.py'
@@ -34,14 +36,15 @@ class World:
         self.props = {}
         self.fail = set()
         self.missing = set()
+        self.keep_gran = False
         self.units = {'fstrim.timer', 'plocate-updatedb.service'}
         unit = self.root / 'usr/lib/systemd/system'
         unit.mkdir(parents=True)
         for name in self.units:
             (unit / name).write_text('[Unit]\n')
 
-    def run(self, args, sudo=False, timeout=10):
-        self.calls.append({'sudo': sudo, 'args': list(args), 'timeout': timeout})
+    def run(self, args, sudo=False, timeout=10, terminal=False):
+        self.calls.append({'sudo': sudo, 'args': list(args), 'timeout': timeout, 'terminal': terminal})
         if args[0] in self.missing:
             raise FileNotFoundError(args[0])
         if args[0] in self.fail:
@@ -73,6 +76,12 @@ class World:
         if args[:2] == ['systemctl', 'is-enabled']:
             if self.timer == 'enabled':
                 return storage.Result(0, 'enabled\n')
+            if self.timer == 'masked':
+                return storage.Result(1, 'masked\n')
+            if self.timer == 'unknown':
+                return storage.Result(1, 'unexpected\n')
+            if self.timer == 'timed-out':
+                return storage.Result(124, '', 'timed out')
             return storage.Result(1, 'disabled\n')
         if args[:4] == ['systemctl', 'enable', '--now', 'fstrim.timer']:
             self.timer = 'enabled'
@@ -89,24 +98,14 @@ class World:
                 return storage.Result(0, '')
             return storage.Result(0, str(self.root / storage.DROPIN_RELATIVE) + '\n')
         if args[0] == 'cryptsetup':
-            self.gran = '512B'
+            if not self.keep_gran:
+                self.gran = '512B'
             return storage.Result(0, '')
         if args[0] == 'install':
             destination = Path(args[-1])
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_text(Path(args[-2]).read_text(encoding='utf-8'), encoding='utf-8')
             destination.chmod(0o644)
-            return storage.Result(0, '')
-        if args[0] == 'btrfs' and args[1:] == ['version']:
-            if not self.btrfs:
-                raise FileNotFoundError('btrfs')
-            return storage.Result(0, 'btrfs-progs\n')
-        if args[:3] == ['btrfs', 'property', 'get']:
-            if self.props.get(args[3]) == 'zstd:1':
-                return storage.Result(0, 'compression=zstd:1\n')
-            return storage.Result(0, '')
-        if args[:3] == ['btrfs', 'property', 'set']:
-            self.props[args[3]] = args[5]
             return storage.Result(0, '')
         raise AssertionError(args)
 
@@ -129,6 +128,9 @@ class StorageTests(unittest.TestCase):
         self.home = self.root / 'home'
         self.home.mkdir()
         self.world = World(self.root, self.home)
+        terminal = mock.patch.object(storage, 'terminal_available', return_value=True)
+        terminal.start()
+        self.addCleanup(terminal.stop)
 
     def apply(self):
         output = io.StringIO()
@@ -157,12 +159,14 @@ class StorageTests(unittest.TestCase):
         self.assertNotIn('--prunenames', body)
         self.assertNotIn('--prunepaths', body)
         self.assertNotIn('.git', text)
-        self.assertNotIn('jason', text.lower())
-        self.assertNotIn('SWORPS', text)
-        for path in (SCRIPT, storage.TEMPLATE, REPO / 'docs/decisions/0022-storage-defaults.md'):
+        account = 'ja' + 'son'
+        self.assertNotIn(account, text.lower())
+        self.assertNotIn('SW' + 'ORPS', text)
+        for path in (SCRIPT, storage.TEMPLATE, REPO / 'docs/decisions/0022-storage-defaults.md', Path(__file__)):
             source = path.read_text(encoding='utf-8')
-            self.assertNotIn('SWORPS', source)
-            self.assertNotIn('/home/jason', source)
+            self.assertNotIn('SW' + 'ORPS', source)
+            self.assertNotIn('/home/' + account, source)
+            self.assertNotIn(account, source.lower())
 
     def test_apply_sets_each_default_once(self):
         status, output, errors = self.apply()
@@ -175,10 +179,13 @@ class StorageTests(unittest.TestCase):
             'sudo': True,
             'args': ['cryptsetup', 'refresh', '--allow-discards', '--persistent', 'root'],
             'timeout': 30,
+            'terminal': True,
         }])
         enable = [call for call in self.world.calls if call['args'][:3] == ['systemctl', 'enable', '--now']]
         self.assertEqual(enable[0]['args'], ['systemctl', 'enable', '--now', 'fstrim.timer'])
-        self.assertEqual(enable[0]['timeout'], 900)
+        self.assertEqual(enable[0]['timeout'], storage.FSTRIM_SECONDS)
+        self.assertLess(storage.FSTRIM_SECONDS, 900)
+        self.assertFalse(enable[0]['terminal'])
         crypt_at = next(index for index, call in enumerate(self.world.calls) if call['args'][0] == 'cryptsetup')
         enable_at = next(index for index, call in enumerate(self.world.calls)
                          if call['args'][:3] == ['systemctl', 'enable', '--now'])
@@ -187,25 +194,17 @@ class StorageTests(unittest.TestCase):
         rendered = dropin.read_text(encoding='utf-8')
         self.assertEqual(rendered, storage.render_dropin(storage.TEMPLATE.read_text(encoding='utf-8'), str(self.home)))
         self.assertNotIn('@HOME@', rendered)
-        self.assertNotIn('jason', rendered)
+        self.assertNotIn('ja' + 'son', rendered)
         self.assertEqual(stat.S_IMODE(dropin.stat().st_mode), 0o644)
         self.assertFalse((self.root / 'etc/updatedb.conf').exists())
         install = [call for call in self.world.calls if call['args'][0] == 'install']
         self.assertEqual(install[0]['args'][1:8], ['-D', '-o', 'root', '-g', 'root', '-m', '0644'])
         self.assertTrue(install[0]['sudo'])
-        self.assertIn({'sudo': True, 'args': ['systemctl', 'daemon-reload'], 'timeout': 30}, self.world.calls)
-        for relative in storage.COMPRESS_RELATIVE:
-            directory = str(self.home / relative)
-            self.assertEqual(self.world.props[directory], 'zstd:1')
-            self.assertTrue((self.home / relative).is_dir())
-        sets = [call['args'] for call in self.world.calls if call['args'][:3] == ['btrfs', 'property', 'set']]
-        self.assertEqual(sets, [
-            ['btrfs', 'property', 'set', str(self.home / relative), 'compression', 'zstd:1']
-            for relative in storage.COMPRESS_RELATIVE
-        ])
-        self.assertTrue(all(call['sudo'] is False for call in self.world.calls if call['args'][0] == 'btrfs'))
+        self.assertIn(
+            {'sudo': True, 'args': ['systemctl', 'daemon-reload'], 'timeout': 30, 'terminal': False},
+            self.world.calls)
+        self.assertNotIn('btrfs', self.world.names())
         self.assertNotIn('mount', self.world.names())
-        self.assertLess(self.world.names().index('btrfs'), self.world.names().index('cryptsetup'))
         text, failed = self.report()
         self.assertFalse(failed)
         self.assertIn('TRIM through LUKS: ' + storage.TRIM_OK, text)
@@ -218,7 +217,7 @@ class StorageTests(unittest.TestCase):
         self.assertNotIn(True, [call['sudo'] for call in self.world.calls])
         self.assertNotIn('cryptsetup', self.world.names())
         self.assertNotIn('install', self.world.names())
-        self.assertFalse(any(call['args'][:3] == ['btrfs', 'property', 'set'] for call in self.world.calls))
+        self.assertNotIn('btrfs', self.world.names())
 
     def test_doctor_is_read_only_and_names_each_gap(self):
         self.world.calls.clear()
@@ -230,18 +229,14 @@ class StorageTests(unittest.TestCase):
         self.assertNotIn('systemctl enable --now fstrim.timer', text)
         self.assertIn('node_modules', text)
         self.assertIn(str(self.home / '.local/share/pnpm'), text)
-        for relative in storage.COMPRESS_RELATIVE:
-            self.assertIn(f'{self.home / relative} does not exist', text)
-        existing = self.home / 'code'
-        existing.mkdir()
-        text, failed = self.report()
-        self.assertTrue(failed)
-        self.assertIn(f'btrfs property set {existing} compression zstd:1', text)
+        self.assertIn(storage.COMPRESSION_OK, text)
+        self.assertNotIn('zstd:1', text)
+        self.assertNotIn('btrfs-progs', text)
         self.assertNotIn('cryptsetup', self.world.names())
         self.assertNotIn('install', self.world.names())
         self.assertTrue(all(call['sudo'] is False for call in self.world.calls))
         self.assertFalse(any(call['args'][:2] == ['systemctl', 'enable'] for call in self.world.calls))
-        self.assertFalse(any(call['args'][:3] == ['btrfs', 'property', 'set'] for call in self.world.calls))
+        self.assertNotIn('btrfs', self.world.names())
         brief, brief_failed = self.report(brief=True)
         self.assertTrue(brief_failed)
         self.assertTrue(all(line.startswith(('TRIM through LUKS: ', 'Locate index: ', 'Compression: '))
@@ -252,9 +247,24 @@ class StorageTests(unittest.TestCase):
         status, _, _ = self.apply()
         self.assertEqual(status, 0)
         self.assertNotIn('cryptsetup', self.world.names())
-        text, failed = self.report()
-        self.assertTrue(failed)
-        self.assertIn('root is /dev/nvme0n1p2, not /dev/mapper/root', text)
+        self.assertFalse(any(call['args'][:3] == ['systemctl', 'enable', '--now'] for call in self.world.calls))
+        text, _failed = self.report()
+        self.assertIn('root is /dev/nvme0n1p2, not /dev/mapper/root, so TRIM through LUKS does not apply', text)
+        self.world.mapper = '/dev/mapper/luks-other'
+        self.world.calls.clear()
+        status, _, errors = self.apply()
+        self.assertEqual(status, 0, errors)
+        self.assertNotIn('cryptsetup', self.world.names())
+        self.assertFalse(any(call['args'][:3] == ['systemctl', 'enable', '--now'] for call in self.world.calls))
+        self.world.mapper = 'root'
+        self.world.kind = 'disk'
+        self.world.calls.clear()
+        text, _failed = self.report()
+        self.assertIn('/dev/mapper/root is type disk, not crypt, so TRIM through LUKS does not apply', text)
+        status, _, errors = self.apply()
+        self.assertEqual(status, 0, errors)
+        self.assertNotIn('cryptsetup', self.world.names())
+        self.assertFalse(any(call['args'][:3] == ['systemctl', 'enable', '--now'] for call in self.world.calls))
 
     def test_btrfs_subvolume_suffix_still_enables_discards(self):
         self.world.mapper = 'subvol'
@@ -267,10 +277,6 @@ class StorageTests(unittest.TestCase):
     def test_nonzero_granularity_and_enabled_timer_skip_privilege(self):
         self.world.gran = '512B'
         self.world.timer = 'enabled'
-        for relative in storage.COMPRESS_RELATIVE:
-            directory = self.home / relative
-            directory.mkdir(parents=True)
-            self.world.props[str(directory)] = 'zstd:1'
         rendered = storage.render_dropin(storage.TEMPLATE.read_text(encoding='utf-8'), str(self.home))
         dropin = self.root / storage.DROPIN_RELATIVE
         dropin.parent.mkdir(parents=True)
@@ -291,16 +297,13 @@ class StorageTests(unittest.TestCase):
         self.assertFalse(any(call['args'][:3] == ['btrfs', 'property', 'set'] for call in self.world.calls))
         text, failed = self.report()
         self.assertFalse(failed)
-        self.assertIn('Compression: ok (home is not btrfs, so directory compression does not apply)', text)
+        self.assertIn(storage.COMPRESSION_OK, text)
+        self.assertNotIn('btrfs-progs', text)
         self.assertNotIn('does not exist', text)
 
     def test_unloaded_dropin_is_loaded_again(self):
         self.world.gran = '512B'
         self.world.timer = 'enabled'
-        for relative in storage.COMPRESS_RELATIVE:
-            directory = self.home / relative
-            directory.mkdir(parents=True)
-            self.world.props[str(directory)] = 'zstd:1'
         dropin = self.root / storage.DROPIN_RELATIVE
         dropin.parent.mkdir(parents=True)
         dropin.write_text(storage.render_dropin(storage.TEMPLATE.read_text(encoding='utf-8'), str(self.home)))
@@ -312,7 +315,9 @@ class StorageTests(unittest.TestCase):
         status, _, errors = self.apply()
         self.assertEqual(status, 0, errors)
         self.assertTrue(self.world.reloaded)
-        self.assertIn({'sudo': True, 'args': ['systemctl', 'daemon-reload'], 'timeout': 30}, self.world.calls)
+        self.assertIn(
+            {'sudo': True, 'args': ['systemctl', 'daemon-reload'], 'timeout': 30, 'terminal': False},
+            self.world.calls)
         self.assertFalse(storage.needs_privilege(self.world.machine()))
 
     def test_ten_bytes_is_not_treated_as_off(self):
@@ -333,9 +338,6 @@ class StorageTests(unittest.TestCase):
     def test_unsafe_dropin_is_replaced(self):
         self.world.gran = '512B'
         self.world.timer = 'enabled'
-        for relative in storage.COMPRESS_RELATIVE:
-            (self.home / relative).mkdir(parents=True)
-            self.world.props[str(self.home / relative)] = 'zstd:1'
         dropin = self.root / storage.DROPIN_RELATIVE
         dropin.parent.mkdir(parents=True)
         dropin.write_text(storage.render_dropin(storage.TEMPLATE.read_text(encoding='utf-8'), str(self.home)))
@@ -349,11 +351,11 @@ class StorageTests(unittest.TestCase):
         target = self.root / 'elsewhere'
         target.mkdir()
         (self.home / 'code').symlink_to(target)
-        text, failed = self.report()
-        self.assertTrue(failed)
-        self.assertIn(f'{self.home / "code"} is a symlink', text)
+        text, _failed = self.report()
+        self.assertNotIn('symlink', text)
+        self.assertIn(storage.COMPRESSION_OK, text)
         self.apply()
-        self.assertNotIn(str(self.home / 'code'), self.world.props)
+        self.assertNotIn('btrfs', self.world.names())
         self.assertTrue((self.home / 'code').is_symlink())
 
     def test_spaced_home_does_not_block_trim(self):
@@ -407,7 +409,9 @@ class StorageTests(unittest.TestCase):
         self.assertTrue(storage.needs_privilege(self.world.machine()))
         status, _, errors = self.apply()
         self.assertEqual(status, 0, errors)
-        self.assertIn({'sudo': True, 'args': ['systemctl', 'daemon-reload'], 'timeout': 30}, self.world.calls)
+        self.assertIn(
+            {'sudo': True, 'args': ['systemctl', 'daemon-reload'], 'timeout': 30, 'terminal': False},
+            self.world.calls)
 
     def test_missing_systemctl_show_is_not_a_loaded_dropin(self):
         self._ready_except_dropin_load()
@@ -432,25 +436,20 @@ class StorageTests(unittest.TestCase):
 
         machine = storage.Machine({'HOME': str(self.home), 'PATH': '/nonexistent'}, self.root, run)
         machine.deadline = storage.Deadline(0)
-        result, missing = storage.probe(machine, ['btrfs', 'property', 'get', str(self.home), 'compression'],
-                                         storage.BTRFS_SECONDS)
+        result, missing = storage.probe(machine, ['findmnt', '-n', '-o', 'SOURCE', '/'], storage.PROBE_SECONDS)
         self.assertEqual(calls, [])
         self.assertFalse(missing)
         self.assertEqual(result.returncode, 124)
         machine.deadline = storage.Deadline(2)
-        storage.compression_line(machine, str(self.home / 'code'))
+        storage.probe(machine, ['lsblk', '-ndo', 'TYPE', storage.MAPPER], storage.PROBE_SECONDS)
         self.assertEqual(len(calls), 1)
-        self.assertLess(calls[0], storage.BTRFS_SECONDS)
+        self.assertLess(calls[0], storage.PROBE_SECONDS)
         self.assertLessEqual(calls[0], 2)
 
     def _ready_except_dropin_load(self):
         self.world.gran = '512B'
         self.world.timer = 'enabled'
         self.world.reloaded = True
-        for relative in storage.COMPRESS_RELATIVE:
-            directory = self.home / relative
-            directory.mkdir(parents=True)
-            self.world.props[str(directory)] = 'zstd:1'
         dropin = self.root / storage.DROPIN_RELATIVE
         dropin.parent.mkdir(parents=True)
         dropin.write_text(storage.render_dropin(storage.TEMPLATE.read_text(encoding='utf-8'), str(self.home)))
@@ -472,6 +471,142 @@ class StorageTests(unittest.TestCase):
         self.assertIsNone(storage.machine_from({'GROUNDWORK_TESTING': '1', 'HOME': '/home/example'}))
         self.assertEqual(storage.main(['needed'], {'GROUNDWORK_TESTING': '1', 'HOME': '/home/example'}), 1)
         self.assertEqual(storage.main(['apply'], {'GROUNDWORK_TESTING': '1', 'HOME': '/home/example'}), 0)
+
+    def test_refresh_without_a_terminal_does_not_change_the_header(self):
+        with mock.patch.object(storage, 'terminal_available', return_value=False):
+            status, _output, errors = self.apply()
+        self.assertEqual(status, 1)
+        self.assertNotIn('cryptsetup', self.world.names())
+        self.assertIn('sudo cryptsetup refresh --allow-discards --persistent root', errors)
+        self.assertIn('LUKS header was not changed', errors)
+        self.assertEqual(self.world.timer, 'disabled')
+        self.assertFalse(any(call['args'][:3] == ['systemctl', 'enable', '--now'] for call in self.world.calls))
+
+    def test_a_refresh_that_leaves_discards_off_is_not_repeated(self):
+        self.world.keep_gran = True
+        status, _output, errors = self.apply()
+        self.assertEqual(status, 1)
+        self.assertIn('still zero', errors)
+        self.assertIn('luks-discard-unsupported', errors)
+        self.assertTrue((self.root / storage.STAMP_RELATIVE).is_file())
+        self.assertEqual(self.world.gran, '0B')
+        self.assertEqual(self.world.timer, 'disabled')
+        self.world.calls.clear()
+        status, output, errors = self.apply()
+        self.assertEqual((status, output, errors), (0, '', ''))
+        self.assertNotIn('cryptsetup', self.world.names())
+        text, failed = self.report()
+        self.assertFalse(failed)
+        self.assertIn('not retried', text)
+        self.assertNotIn('systemctl enable --now', text)
+
+    def test_a_masked_timer_is_left_alone(self):
+        self._ready_except_dropin_load()
+        self.world.timer = 'masked'
+        text, failed = self.report()
+        self.assertFalse(failed)
+        self.assertNotIn('enable --now', text)
+        self.assertFalse(storage.needs_privilege(self.world.machine()))
+        status, output, errors = self.apply()
+        self.assertEqual((status, output, errors), (0, '', ''))
+        self.assertFalse(any(call['args'][:2] == ['systemctl', 'enable'] for call in self.world.calls))
+
+    def test_an_unknown_timer_does_not_queue_enable(self):
+        self.world.gran = '512B'
+        self.world.timer = 'unknown'
+        status, _output, errors = self.apply()
+        self.assertEqual(status, 1)
+        self.assertIn('did not show whether fstrim.timer is enabled', errors)
+        self.assertFalse(any(call['args'][:3] == ['systemctl', 'enable', '--now'] for call in self.world.calls))
+
+    def test_a_failed_probe_fails_the_apply(self):
+        self.world.mapper = 'failed'
+        status, _output, errors = self.apply()
+        self.assertEqual(status, 1)
+        self.assertIn('findmnt could not name the root filesystem', errors)
+        self.assertNotIn('cryptsetup', self.world.names())
+
+    def test_a_fixture_root_without_testing_runs_no_command(self):
+        called = []
+
+        def run(_environ):
+            def inner(*args, **kwargs):
+                called.append(args)
+                raise AssertionError(args)
+            return inner
+
+        with mock.patch.object(storage, 'default_run', run):
+            errors = io.StringIO()
+            with redirect_stderr(errors):
+                status = storage.main(['apply'], {
+                    'GROUNDWORK_STORAGE_ROOT': str(self.root),
+                    'HOME': str(self.home),
+                })
+        self.assertEqual(status, 64)
+        self.assertEqual(called, [])
+        self.assertIn('test-only', errors.getvalue())
+        with mock.patch.object(storage, 'default_run', run):
+            errors = io.StringIO()
+            with redirect_stderr(errors):
+                status = storage.main(['needed'], {'INSTALL_FIXTURE': str(self.root), 'HOME': str(self.home)})
+        self.assertEqual(status, 64)
+        self.assertEqual(called, [])
+
+    def test_real_commands_do_not_mutate_a_fixture_root(self):
+        machine = self.world.machine()
+        machine.real_commands = True
+        errors = io.StringIO()
+        with redirect_stderr(errors):
+            status = storage.apply_storage(machine)
+        self.assertEqual(status, 64)
+        self.assertIn('Nothing was changed', errors.getvalue())
+        self.assertNotIn('cryptsetup', self.world.names())
+        self.assertFalse(any(call['args'][:3] == ['systemctl', 'enable', '--now'] for call in self.world.calls))
+
+    def test_a_denied_kill_does_not_wait_without_a_limit(self):
+        class Process:
+            pid = 4242
+            returncode = None
+
+            def communicate(self, timeout=None):
+                raise subprocess.TimeoutExpired(['sudo'], timeout or 0)
+
+            def wait(self, timeout=None):
+                if timeout is None:
+                    raise AssertionError('waited without a limit')
+                raise subprocess.TimeoutExpired(['sudo'], timeout)
+
+            def kill(self):
+                raise PermissionError('denied')
+
+        errors = io.StringIO()
+        with mock.patch.object(storage.subprocess, 'Popen', lambda *args, **kwargs: Process()), \
+             mock.patch.object(storage.os, 'killpg', side_effect=PermissionError('denied')), \
+             redirect_stderr(errors):
+            result = storage.run_process(['sudo', 'cryptsetup'], 0.5, {}, terminal=False)
+        self.assertEqual(result.returncode, 124)
+        self.assertIn('may still be running', errors.getvalue())
+
+    def test_the_passphrase_prompt_keeps_the_terminal(self):
+        seen = {}
+
+        class Process:
+            pid = 7
+            returncode = 0
+
+            def wait(self, timeout=None):
+                return 0
+
+        def popen(command, **kwargs):
+            seen['command'] = command
+            seen['kwargs'] = kwargs
+            return Process()
+
+        with mock.patch.object(storage.subprocess, 'Popen', popen):
+            result = storage.run_process(['sudo', 'cryptsetup', 'refresh'], 30, {'PATH': '/bin'}, terminal=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn('stdin', seen['kwargs'])
+        self.assertNotIn('start_new_session', seen['kwargs'])
 
     def test_apply_layer_calls_the_helper(self):
         text = (REPO / 'scripts/apply-layer.sh').read_text(encoding='utf-8')

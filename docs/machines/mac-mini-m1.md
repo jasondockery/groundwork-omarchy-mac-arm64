@@ -16,7 +16,7 @@ This is the reference machine. Nothing in `packages/` or `install.sh` depends on
 | Omarchy | `omarchy-dev` and `omarchy-settings-dev` `4.0.0.r7235.g967bbdd-1` (observed 2026-10-23) |
 | Apple Silicon packages | `omarchy-mac 0.1.4-1`, `omarchy-mac-boot 20261023-1` |
 | Boot chain | m1n1-aurora → U-Boot → Limine → `linux-aurora`. Packages: `linux-aurora 7.2.11.aurora1-1` (running `7.2.11`), `m1n1-aurora 1.6.1.aurora20-3`, `limine 12.9.4-1`. `grub` and `linux-asahi` are not installed. |
-| Encryption / disk | LUKS-encrypted btrfs root 384.5G, 2G ext4 `/boot`, 500M vfat `/boot/efi`, macOS APFS 71.1G and RecoveryOS kept. Managed TRIM, locate prunes, and directory compression are decision 0022. They are not recorded as applied here until a read-only check on the machine says so. |
+| Encryption / disk | LUKS-encrypted btrfs root 384.5G, 2G ext4 `/boot`, 500M vfat `/boot/efi`, macOS APFS 71.1G and RecoveryOS kept. Managed TRIM and locate prunes are decision 0022. A per-directory zstd level is not applied; the mount stays `compress=zstd:3`. None of this is recorded as applied here until a read-only check on the machine says so. |
 | Desktop | `hyprland 0.56.2-7`, `quickshell 0.3.2.r7`, `qt6-base 6.12.0-3`, `qt6-declarative 6.12.0-2`. Super+Space / Super+K work; 0 palette `Cannot read property` errors. No failed system or user units. |
 
 Add another Apple Silicon Mac as a new file in this directory. Do not put its host name, Wi-Fi name, or Tailscale address in the file.

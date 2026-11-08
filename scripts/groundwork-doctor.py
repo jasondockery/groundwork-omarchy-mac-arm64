@@ -8,11 +8,12 @@ Checks:
   host tools  lsof, ps with `-o lstart=`, rg, jq, shellcheck, ssh, and git, the
               binaries common scripts and test harnesses assume (issue #130).
               Each missing tool is printed with the exact command that installs it.
-  storage     TRIM through LUKS, the plocate prune drop-in, and btrfs zstd:1 on
-              three build directories (decision 0022). Each gap is printed with
-              the command that fixes it. A checkout without the storage helper
-              reports that gap. Nothing here enables discards, starts a timer,
-              or sets a property. --help and bad usage do not need the helper.
+  storage     TRIM through LUKS and the plocate prune drop-in (decision 0022).
+              Each gap is printed with the command that fixes it. A directory
+              property cannot choose a zstd level, so that check does not set
+              one. A checkout without the storage helper reports that gap.
+              Nothing here enables discards, starts a timer, or sets a property.
+              --help and bad usage do not need the helper.
 
 --brief prints only problems, one line each, and nothing when every check
 passes. update-all runs it that way, after the update, next to its other reports.
@@ -93,6 +94,11 @@ def storage_report(environ, brief):
     machine = STORAGE.machine_from(environ)
     if machine is None:
         return '', False
+    if machine is STORAGE.REFUSED:
+        line = 'GROUNDWORK_STORAGE_ROOT and INSTALL_FIXTURE are test-only. Unset them and rerun.'
+        if brief:
+            return f'Storage defaults: {line}\n', True
+        return f'Storage defaults: 1 problem\n  {line}\n', True
     machine.deadline = STORAGE.Deadline(STORAGE.DOCTOR_SECONDS)
     return STORAGE.format_report(STORAGE.gather(machine), brief=brief)
 

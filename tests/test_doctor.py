@@ -37,7 +37,10 @@ class HostToolsTests(unittest.TestCase):
             self.stub(name, PROCPS_PS if name == 'ps' else '#!/bin/sh\nexit 0\n')
         home = self.root / 'home'
         home.mkdir()
-        self.environ = {'PATH': str(self.bin), 'HOME': str(home), 'GROUNDWORK_STORAGE_ROOT': str(self.root)}
+        self.environ = {
+            'PATH': str(self.bin), 'HOME': str(home),
+            'GROUNDWORK_STORAGE_ROOT': str(self.root), 'GROUNDWORK_TESTING': '1',
+        }
         self.install_storage_stubs(home)
         for key, sub in (('XDG_CONFIG_HOME', '.config'), ('XDG_STATE_HOME', '.local/state'),
                          ('XDG_CACHE_HOME', '.cache'), ('XDG_DATA_HOME', '.local/share'),
@@ -69,9 +72,7 @@ class HostToolsTests(unittest.TestCase):
                                '[ "$1" = show ] && { printf "%s\\n" '
                                '"$GROUNDWORK_STORAGE_ROOT/etc/systemd/system/plocate-updatedb.service.d/groundwork-prunes.conf"; exit 0; }\n'
                                'exit 0\n')
-        self.stub('btrfs', '#!/bin/sh\nif [ "$1" = version ]; then echo btrfs-progs; exit 0; fi\n'
-                           'if [ "$1" = property ] && [ "$2" = get ]; then echo compression=zstd:1; exit 0; fi\n'
-                           'echo "btrfs must not change the filesystem" >&2\nexit 1\n')
+        self.stub('btrfs', '#!/bin/sh\necho "btrfs must not be used" >&2\nexit 1\n')
 
     def storage_ok(self):
         home = self.environ['HOME']

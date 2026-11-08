@@ -629,7 +629,7 @@ privileged_changes_needed() {
     return 0
   fi
   # TRIM, fstrim.timer, or the plocate drop-in still pending (decision 0022).
-  # Read-only. Directory compression does not ask for sudo on its own.
+  # Read-only. A directory zstd level is not applied.
   if python3 "$root/scripts/groundwork-storage.py" needed; then
     return 0
   fi
@@ -1974,8 +1974,8 @@ if [[ $updating -eq 0 && -n $syncthing_pending_note ]]; then
   echo "Not finished: $syncthing_pending_note" >&2
 fi
 # Storage defaults (decision 0022). Idempotent. A second run prints nothing
-# when discards, fstrim.timer, the plocate drop-in, and directory compression
-# are already set. GROUNDWORK_STORAGE_APPLY lets the helper change a real
+# when discards, fstrim.timer, and the plocate drop-in are already set.
+# GROUNDWORK_STORAGE_APPLY lets the helper change a real
 # machine; without it the helper refuses.
 if ! GROUNDWORK_STORAGE_APPLY=1 python3 "$root/scripts/groundwork-storage.py" apply; then
   echo "Storage defaults were not fully applied. Fix the message above, then rerun groundwork-update." >&2
