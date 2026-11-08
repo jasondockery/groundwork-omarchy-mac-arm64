@@ -267,6 +267,9 @@ class UpdateTests(unittest.TestCase):
             raise updater.UpdateError('FreeTube user Flatpak update failed')
         if args[:3] == ['flatpak', '--user', 'list']:
             return 'com.bitwarden.desktop\nio.freetubeapp.FreeTube\norg.example.Unowned'
+        # Absence is pacman's exit status. Empty success is not "no package".
+        if args[:2] == ['pacman', '-Si'] and 'bitwarden' in args:
+            raise updater.UpdateError('pacman failed (exit 1).')
         if args == ['omarchy', 'plugin', 'list', '--json']:
             if self.blip_listed:
                 return '[{"id": "nixfred.blip", "enabled": true}]'
@@ -1020,6 +1023,9 @@ def run(args, **kwargs):
         log.write(json.dumps(args) + '\\n')
     if args[:3] == ['flatpak', '--user', 'list']:
         return 'com.bitwarden.desktop\\nio.freetubeapp.FreeTube'
+    # Absence is pacman's exit status. Empty success is not "no package".
+    if args[:2] == ['pacman', '-Si'] and 'bitwarden' in args:
+        raise UpdateError('pacman failed (exit 1).')
     return ''
 shutil.which = lambda name: '/fixture/' + name
 def update_t3(completed, warnings, source):

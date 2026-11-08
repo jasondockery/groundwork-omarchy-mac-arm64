@@ -633,7 +633,11 @@ class UpdateAllBitwardenSummaryTests(unittest.TestCase):
     run_command = update_base.UpdateTests.run_command
 
     def update_all(self, owner):
-        """update-all without a Bitwarden Flatpak. owner: who pacman says owns bitwarden, or None."""
+        """update-all without a Bitwarden Flatpak. owner: who pacman says owns bitwarden, or None.
+
+        The feed has no bitwarden package. The shared fixture makes `pacman -Si`
+        fail, which is the absence signal.
+        """
         updater = update_base.updater
         previous = self.run_command
 
@@ -683,6 +687,48 @@ class UpdateAllBitwardenSummaryTests(unittest.TestCase):
         self.assertNotIn('Bitwarden user Flatpak update command completed', receipt['completed'])
         self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'io.freetubeapp.FreeTube'], self.machine_calls)
         self.assertIn('FreeTube user Flatpak update command completed', receipt['completed'])
+
+    def test_a_translated_sync_label_still_counts_as_a_feed_package(self):
+        """Protects: a Version label that is not English is not a missing package."""
+        updater = update_base.updater
+        previous = self.run_command
+        seen = []
+
+        def translated(args, **kwargs):
+            if args[:2] == ['pacman', '-Si'] and 'bitwarden' in args:
+                self.machine_calls.append(args)
+                seen.append(kwargs.get('extra_env'))
+                return 'Repositorio      : omarchy\nNombre            : bitwarden\nVersión         : 2026.10.4-1\n'
+            return previous(args, **kwargs)
+
+        with patch.object(updater, 'run', side_effect=translated), redirect_stdout(io.StringIO()):
+            updater.update('all')
+        receipt = json.loads((self.state / 'update-all-last-success.json').read_text())
+        self.assertEqual(seen, [{'LC_ALL': 'C'}])
+        self.assertNotIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'],
+                         self.machine_calls)
+        self.assertNotIn('Bitwarden user Flatpak update command completed', receipt['completed'])
+        self.assertIn('FreeTube user Flatpak update command completed', receipt['completed'])
+
+    def test_a_rejected_version_is_read_in_the_c_locale(self):
+        """Protects: a translated sync database still matches bitwarden-rejected.json."""
+        updater = update_base.updater
+        page = '4096'
+        path = self.state / 'bitwarden-rejected.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({page: ['2026.10.4-1']}) + '\n')
+
+        def sync(args, **kwargs):
+            if args == ['pacman', '-Q', 'bitwarden']:
+                raise updater.UpdateError('pacman failed (exit 1).')
+            if args[:2] == ['pacman', '-Si'] and 'bitwarden' in args:
+                if (kwargs.get('extra_env') or {}).get('LC_ALL') == 'C':
+                    return 'Version         : 2026.10.4-1'
+                return 'Versión         : 2026.10.4-1'
+            raise AssertionError(args)
+
+        with patch.object(updater, 'run', side_effect=sync):
+            self.assertEqual(updater.main(['bitwarden-rejected']), 0)
 
     def test_native_package_does_not_update_a_leftover_flatpak(self):
         """Protects: a migrated host does not record a Bitwarden Flatpak update."""

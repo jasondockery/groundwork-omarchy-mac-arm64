@@ -1265,17 +1265,33 @@ def reject_t3(page, version, reason):
 
 
 
-def bitwarden_feed_version():
-    """The version `pacman -Si bitwarden` offers, or None when the feed has none."""
+def bitwarden_sync_info():
+    """(in_feed, version) from `pacman -Si bitwarden`.
+
+    The command's exit status is whether the sync database has the package,
+    the same signal setup uses. `LC_ALL=C` asks for the English `Version`
+    field. A successful command whose label is not that English word still
+    counts as in the feed: a translated label is not a missing package.
+    """
     try:
-        text = run(['pacman', '-Si', 'bitwarden'], deadline=30)
+        text = run(['pacman', '-Si', 'bitwarden'], deadline=30, extra_env={'LC_ALL': 'C'})
     except (UpdateError, OSError):
-        return None
+        return False, None
+    version = None
     for line in text.splitlines():
         key, _, value = line.partition(':')
         if key.strip() == 'Version' and value.strip():
-            return value.strip()
-    return None
+            version = value.strip()
+            break
+    return True, version
+
+
+def bitwarden_feed_version():
+    """The version `pacman -Si bitwarden` offers, or None when it cannot be read.
+
+    None does not mean the feed lacks the package. Use `bitwarden_sync_info`.
+    """
+    return bitwarden_sync_info()[1]
 
 
 def bitwarden_version():
@@ -1297,10 +1313,11 @@ def bitwarden_flatpak_maintained():
 
     A `bitwarden` command the package owns, or a feed that has the package,
     means update-all leaves that Flatpak alone. The move stays an offer.
+    Presence is `pacman -Si`'s exit status, not an English `Version` line.
     """
     if bitwarden_package_command():
         return False
-    return bitwarden_feed_version() is None
+    return not bitwarden_sync_info()[0]
 
 
 def bitwarden_package_command():

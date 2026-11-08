@@ -312,7 +312,9 @@ honeykrisp_icd_present() {
 # The user Flatpak is installed only when the feed has no bitwarden package.
 bitwarden_flatpak=com.bitwarden.desktop
 bitwarden_in_feed() {
-  command -v pacman >/dev/null && pacman -Si bitwarden >/dev/null 2>&1
+  # Exit status only. LC_ALL=C matches the updater's query; the label text is
+  # not the signal, so a translated Version line cannot hide the package.
+  command -v pacman >/dev/null && LC_ALL=C pacman -Si bitwarden >/dev/null 2>&1
 }
 bitwarden_native_available() {
   bitwarden_in_feed &&

@@ -58,7 +58,7 @@ Arch packages update through `omarchy update`. User Flatpaks have a separate upd
 flatpak --user update
 ```
 
-Rerunning this layer reuses an installed desktop app. If its installation fails, resolve that error and rerun; the installer stops before changing input settings. If its launcher is missing immediately after installing Flatpak for the first time, log out and back in to refresh desktop application discovery.
+Rerunning this layer reuses an installed desktop app. When the feed has no `bitwarden` package, a failed user Flatpak install stops setup before input settings change. When the feed has the package and that package cannot be used, setup continues: Hyprland input settings and keyd still run, and the user Flatpak is not installed in its place. If the Flatpak launcher is missing immediately after installing Flatpak for the first time, log out and back in to refresh desktop application discovery.
 
 To remove a layer-installed Bitwarden Flatpak, use `flatpak --user uninstall com.bitwarden.desktop`. Keep its local data unless you deliberately choose to remove it after checking account recovery. The shared Flathub remote and Flatpak runtime may serve other apps; leave those in place. Native apps and browser extensions are removed through their own package/browser controls.
 
