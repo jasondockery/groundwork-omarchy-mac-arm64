@@ -2,8 +2,9 @@
 # Link the personal Hyprland override into $HOME.
 # For any Apple Silicon Omarchy Mac (aarch64). Reads the core/ checkout and
 # does not write it. Does not touch SSH, groundwork-mac, or /usr/share/omarchy.
-# Its only Git config write is an includeIf in ~/.config/git/config that enables
-# the commit identity guard hooks in owned repositories (decision 0017).
+# Git config writes are an includeIf in ~/.config/git/config that enables
+# the commit identity guard hooks in owned repositories (decision 0017), and
+# one include of the Groundwork-owned grep.threads cap (decision 0001).
 set -euo pipefail
 
 usage() {
@@ -233,8 +234,8 @@ fi
 
 # Fail before installing packages or moving files when the checkout is incomplete.
 # The Bitwarden extension id and Brave policies are read from core, not a copy here.
-[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$root/scripts/groundwork-node-pin.py" && -f "$root/scripts/groundwork-commit-guard.py" && -f "$root/scripts/groundwork-tmp.py" && -f "$root/scripts/groundwork-storage.py" && -f "$root/config/plocate-updatedb.service.d.conf" && -f "$root/config/groundwork-easyeffects.service" && -f "$root/core/browser/brave.json" && ! -L "$root/core/browser/brave.json" ]] || {
-  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, Node pin helper, commit guard helper, temp storage helper, storage helper, plocate drop-in, EasyEffects unit, or Brave spec is missing." >&2
+[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$root/scripts/groundwork-node-pin.py" && -f "$root/scripts/groundwork-commit-guard.py" && -f "$root/scripts/groundwork-grep-threads.py" && -f "$root/scripts/groundwork-tmp.py" && -f "$root/scripts/groundwork-storage.py" && -f "$root/config/plocate-updatedb.service.d.conf" && -f "$root/config/groundwork-easyeffects.service" && -f "$root/core/browser/brave.json" && ! -L "$root/core/browser/brave.json" ]] || {
+  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, Node pin helper, commit guard helper, grep threads helper, temp storage helper, storage helper, plocate drop-in, EasyEffects unit, or Brave spec is missing." >&2
   exit 1
 }
 
@@ -1783,6 +1784,13 @@ install_local_inference() {
 if [[ $with_local_inference -eq 1 ]]; then
   install_local_inference
 fi
+
+# One git-default exception (decision 0001): cap git grep at 4 threads. Agents run
+# many searches, and upstream starts one worker per core. The helper writes a
+# Groundwork-owned include only when that value is missing or not exactly 4.
+# A failure here is reported but does not stop setup.
+python3 "$root/scripts/groundwork-grep-threads.py" apply ||
+  echo "grep.threads was not set. Run groundwork-update after fixing the message above." >&2
 
 # Commit identity guard (decision 0017, groundwork-core/docs/commit-identity.md). User-level
 # hooks call the pinned core script in place, are enabled only in owned repositories via includeIf,
