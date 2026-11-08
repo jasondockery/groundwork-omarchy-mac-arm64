@@ -1423,6 +1423,27 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertIn('sudo was not used', result.stdout)
         self.assertFalse(any(call[0] == 'sudo' for call in self.calls()))
 
+    def test_unsearchable_tmp_mount_dir_skips_the_mask(self):
+        # EACCES must not look like "no unit" (exit 1), which is the only status that still masks.
+        unit = self.root / 'etc/systemd/system/tmp.mount'
+        unit.parent.mkdir(parents=True)
+        unit.write_text('[Mount]\nWhat=tmpfs\nWhere=/tmp\nType=tmpfs\n')
+        unit.parent.chmod(0)
+        self.addCleanup(unit.parent.chmod, 0o755)
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertNotIn(['sudo', 'systemctl', 'mask', 'tmp.mount'], self.calls())
+        self.assertIn('/etc/systemd/system/tmp.mount could not be checked, so tmp.mount was not masked.', result.stderr)
+        self.assertIn('Permission denied', result.stderr)
+        unit.parent.chmod(0o755)
+        self.assertEqual(unit.read_text(), '[Mount]\nWhat=tmpfs\nWhere=/tmp\nType=tmpfs\n')
+        (self.root / 'calls.jsonl').unlink()
+        unit.parent.chmod(0)
+        self.env['FIXTURE_SUDO_CACHED'] = '0'
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('sudo was not used', result.stdout)
+        self.assertFalse(any(call[0] == 'sudo' for call in self.calls()))
+
     def test_tmp_mount_link_elsewhere_is_reported_and_never_asks_for_sudo(self):
         # A symlink other than the /dev/null mask is the same conflict as a unit file of its own.
         unit = self.root / 'etc/systemd/system/tmp.mount'

@@ -231,6 +231,34 @@ class TempStorageTests(unittest.TestCase):
         unit.symlink_to('/dev/null')
         self.assertEqual(self.tmp_cli('tmp-unit').returncode, 1)
 
+    def test_unsearchable_unit_dir_is_not_treated_as_absent(self):
+        # Path.exists swallows EACCES. An unreadable directory with a real unit must not look like no unit.
+        unit = self.system / 'etc/systemd/system/tmp.mount'
+        unit.unlink()
+        unit.write_text('[Mount]\nWhat=tmpfs\nWhere=/tmp\nType=tmpfs\n')
+        unit.parent.chmod(0)
+        self.addCleanup(unit.parent.chmod, 0o755)
+        result = self.tmp_cli('tmp-unit')
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('Permission denied', result.stderr)
+        problems, _ = self.report()
+        self.assertTrue(any(p.startswith('/etc/systemd/system/tmp.mount could not be checked') for p in problems), problems)
+        self.assertFalse(any('it masks tmp.mount' in p for p in problems), problems)
+        unit.parent.chmod(0o755)
+        self.assertEqual(unit.read_text(), '[Mount]\nWhat=tmpfs\nWhere=/tmp\nType=tmpfs\n')
+
+    def test_unsearchable_tmpfiles_override_is_reported(self):
+        for override in ('etc/tmpfiles.d/tmp.conf', 'run/tmpfiles.d/tmp.conf'):
+            with self.subTest(override=override):
+                path = self.system / override
+                write(path, 'D /tmp 1777 root root -\n')
+                path.parent.chmod(0)
+                self.addCleanup(path.parent.chmod, 0o755)
+                problems, _ = self.report()
+                self.assertTrue(any(f'/{override} could not be checked' in p for p in problems), problems)
+                self.assertFalse(any(f'sudo rm /{override}' in p for p in problems), problems)
+                path.parent.chmod(0o755)
+
     def test_tmp_mount_link_elsewhere_is_a_custom_unit(self):
         # systemctl mask refuses a symlink that is not the /dev/null mask, including one whose target is missing.
         unit = self.system / 'etc/systemd/system/tmp.mount'

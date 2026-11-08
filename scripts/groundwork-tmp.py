@@ -71,6 +71,19 @@ def system_path(environ, path):
     return system_root(environ) / path.lstrip('/')
 
 
+def lstat_entry(path):
+    """lstat of `path`, or None when it is absent.
+
+    Path.exists and Path.is_symlink return false on EACCES, so an unsearchable
+    directory would look like no unit and setup would mask over a file it
+    cannot see. lstat raises that error instead.
+    """
+    try:
+        return os.lstat(path)
+    except FileNotFoundError:
+        return None
+
+
 def unescape(field):
     """fstab and mountinfo write a space as \\040 and other bytes the same way."""
     return re.sub(r'\\([0-7]{3})', lambda match: chr(int(match.group(1), 8)), field)
@@ -131,11 +144,13 @@ def custom_tmp_unit(environ):
 
     systemctl mask writes a symlink to /dev/null there and refuses to replace a
     file it did not write, so this layer reports it and does not mask.
+    An unreadable path raises OSError; that is not the same as no unit.
     """
     path = system_path(environ, TMP_UNIT)
-    if not path.exists() and not path.is_symlink():
+    info = lstat_entry(path)
+    if info is None:
         return None
-    if path.is_symlink() and os.readlink(path) == '/dev/null':
+    if stat.S_ISLNK(info.st_mode) and os.readlink(path) == '/dev/null':
         return None
     return TMP_UNIT
 
@@ -145,7 +160,13 @@ def tmpfiles_problems(environ):
     problems = []
     for override in TMPFILES_OVERRIDES:
         path = system_path(environ, override)
-        if path.exists() or path.is_symlink():
+        try:
+            info = lstat_entry(path)
+        except OSError as error:
+            problems.append(f'{override} could not be checked ({error.strerror}), so /tmp ageing could not be confirmed. '
+                            f'Fix that, then rerun groundwork-doctor.')
+            continue
+        if info is not None:
             problems.append(f'{override} replaces the upstream {TMPFILES_UPSTREAM}, so /tmp may not be aged. '
                             f'Compare the two; to use upstream ageing, remove it with: sudo rm {override}')
     try:
@@ -304,17 +325,25 @@ def report(environ):
     state = mask_state(environ)
     masked = state == 'masked'
     fstab = fstab_tmp_lines(environ)
-    unit = custom_tmp_unit(environ)
+    try:
+        unit = custom_tmp_unit(environ)
+        unit_error = None
+    except OSError as error:
+        unit = None
+        unit_error = error
     problems = []
     if enabled:
         for line in fstab:
             problems.append(f'/etc/fstab mounts /tmp ("{line}"), which defeats masking tmp.mount. Setup does not edit '
                             'fstab: remove that line yourself, then run groundwork-update and reboot.')
-        if unit:
+        if unit_error is not None:
+            problems.append(f'{TMP_UNIT} could not be checked ({unit_error.strerror}), so it was not treated as absent '
+                            f'and setup will not mask tmp.mount. Fix that, then rerun groundwork-doctor.')
+        elif unit:
             problems.append(f'{unit} is a tmp.mount unit of its own (from systemctl edit --full or a copy), so '
                             'systemctl mask cannot replace it and setup did not mask tmp.mount. Review it; to drop it, '
                             'run: sudo systemctl revert tmp.mount, then groundwork-update, then reboot.')
-        if fstab or unit:
+        if fstab or unit or unit_error is not None:
             pass  # The conflict above is the finding; setup does not mask while it exists.
         elif state is None:
             problems.append('The tmp.mount mask state is unknown: systemctl is-enabled tmp.mount gave no answer. '
