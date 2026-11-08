@@ -1265,6 +1265,19 @@ def reject_t3(page, version, reason):
 
 
 
+def bitwarden_feed_version():
+    """The version `pacman -Si bitwarden` offers, or None when the feed has none."""
+    try:
+        text = run(['pacman', '-Si', 'bitwarden'], deadline=30)
+    except (UpdateError, OSError):
+        return None
+    for line in text.splitlines():
+        key, _, value = line.partition(':')
+        if key.strip() == 'Version' and value.strip():
+            return value.strip()
+    return None
+
+
 def bitwarden_version():
     """Installed bitwarden version, else the one the sync database offers, else None.
 
@@ -1276,14 +1289,18 @@ def bitwarden_version():
             return fields[1]
     except (UpdateError, OSError):
         pass
-    try:
-        for line in run(['pacman', '-Si', 'bitwarden'], deadline=30).splitlines():
-            key, _, value = line.partition(':')
-            if key.strip() == 'Version' and value.strip():
-                return value.strip()
-    except (UpdateError, OSError):
-        pass
-    return None
+    return bitwarden_feed_version()
+
+
+def bitwarden_flatpak_maintained():
+    """True only while the user Flatpak is the fallback for a feed without bitwarden.
+
+    A `bitwarden` command the package owns, or a feed that has the package,
+    means update-all leaves that Flatpak alone. The move stays an offer.
+    """
+    if bitwarden_package_command():
+        return False
+    return bitwarden_feed_version() is None
 
 
 def bitwarden_package_command():
@@ -2329,6 +2346,10 @@ def finish_update(scope, source, before, candidate, candidate_ref, completed, wa
                 ('com.bitwarden.desktop', 'Bitwarden'),
                 ('io.freetubeapp.FreeTube', 'FreeTube'),
             ):
+                # While the feed has bitwarden, or the package already owns the
+                # command, do not update the Flatpak and do not record one.
+                if app == 'com.bitwarden.desktop' and not bitwarden_flatpak_maintained():
+                    continue
                 if app not in installed:
                     # A native Bitwarden desktop is the expected state, not a skip.
                     if app != 'com.bitwarden.desktop' or not bitwarden_package_command():
@@ -2709,7 +2730,7 @@ def main(args):
         print(f'Usage: {"update-all" if scope == "all" else "groundwork-update"} [--check]')
         print('Synchronize and apply this Groundwork layer using saved setup choices.')
         if scope == 'all':
-            print('Also run omarchy update, update listed Omarchy shell plugins, check T3 Code\'s staged and installed builds on kernels with pages larger than 4 KiB, and update the installed Bitwarden and FreeTube user Flatpaks.')
+            print('Also run omarchy update, update listed Omarchy shell plugins, check T3 Code\'s staged and installed builds on kernels with pages larger than 4 KiB, and update the installed FreeTube user Flatpak. A Bitwarden user Flatpak is updated only when the feed has no bitwarden package.')
             print(f'When Blip is opted in, update {BLIP_ID} only in an interactive terminal, without --yes, so its diff can be reviewed.')
             print('Finally, report Omarchy offers for apps Groundwork installs, managed commands shadowed on PATH, free space '
                   f'under or near Omarchy\'s 10 GiB update floor, and missing host tools, /tmp and scratch-root problems, or storage defaults (groundwork-doctor --brief). These never fail the update; set {SKIP_REPORTS_ENV}=1 to skip them.')

@@ -156,46 +156,54 @@ class MigrationOfferTests(unittest.TestCase):
         self.assertIn(['flatpak', '--user', 'install', '--noninteractive', 'flathub', 'io.freetubeapp.FreeTube'], calls)
         self.assertNotIn('Migrate', result.stdout)
 
-    def test_package_without_its_command_is_dropped_for_the_flatpak(self):
+    def test_package_without_its_command_is_dropped_and_the_flatpak_stays_absent(self):
         self.feed_has_native_bitwarden()
         self.env['FIXTURE_BITWARDEN_NO_COMMAND'] = '1'
         result = self.run_install()
         calls = self.calls()
         self.assertIn(NATIVE_ADD, calls)
         self.assertIn(NATIVE_DROP, calls)
-        self.assertLess(calls.index(NATIVE_DROP), calls.index(FLATPAK_INSTALL))
+        self.assertNotIn(FLATPAK_INSTALL, calls)
         self.assertFalse((self.root / 'pacman-installed/bitwarden').exists())
-        self.assertIn('installing the Bitwarden Flatpak instead', result.stderr)
+        self.assertFalse((self.root / 'bitwarden-flatpak').exists())
+        self.assertIn('Bitwarden desktop was not installed', result.stderr)
+        self.assertIn('Bitwarden desktop was not installed.', result.stdout)
         # The package was just refused, so this run does not offer it back.
         self.assertNotIn('Bitwarden desktop is installed as', result.stdout)
         self.assertNotIn(FLATPAK_UNINSTALL, calls)
 
-    def test_package_without_elf_files_is_dropped_for_the_flatpak(self):
+    def test_package_without_elf_files_is_dropped_and_the_flatpak_stays_absent(self):
         self.feed_has_native_bitwarden()
         self.env['FIXTURE_BITWARDEN_NO_ELF'] = '1'
         result = self.run_install()
         self.assertIn(NATIVE_DROP, self.calls())
-        self.assertIn(FLATPAK_INSTALL, self.calls())
+        self.assertNotIn(FLATPAK_INSTALL, self.calls())
+        self.assertFalse((self.root / 'bitwarden-flatpak').exists())
         self.assertIn('installed no ELF file', result.stderr)
+        self.assertIn('Bitwarden desktop was not installed', result.stderr)
 
-    def test_failed_package_add_falls_back_without_a_drop(self):
+    def test_failed_package_add_leaves_the_flatpak_absent(self):
         self.feed_has_native_bitwarden()
         self.env['FIXTURE_BITWARDEN_ADD_STATUS'] = '1'
         result = self.run_install()
         self.assertIn(NATIVE_ADD, self.calls())
         self.assertNotIn(NATIVE_DROP, self.calls())
-        self.assertIn(FLATPAK_INSTALL, self.calls())
+        self.assertNotIn(FLATPAK_INSTALL, self.calls())
+        self.assertFalse((self.root / 'bitwarden-flatpak').exists())
+        self.assertIn('Bitwarden desktop was not installed', result.stderr)
         self.assertNotIn('Bitwarden desktop is installed as', result.stdout)
 
-    def test_misaligned_package_is_dropped_for_the_flatpak(self):
+    def test_misaligned_package_is_dropped_and_the_flatpak_stays_absent(self):
         self.feed_has_native_bitwarden(align='0x800')
         result = self.run_install()
         calls = self.calls()
         self.assertIn(['pacman', '-Qlq', 'bitwarden'], calls)
         self.assertIn(NATIVE_DROP, calls)
-        self.assertIn(FLATPAK_INSTALL, calls)
+        self.assertNotIn(FLATPAK_INSTALL, calls)
         self.assertIn('is not aligned for', result.stderr)
+        self.assertIn('Bitwarden desktop was not installed', result.stderr)
         self.assertFalse((self.bin / 'bitwarden').exists())
+        self.assertFalse((self.root / 'bitwarden-flatpak').exists())
 
     def test_no_native_package_keeps_the_flatpak_and_offers_nothing(self):
         (self.bin / 'pacman').symlink_to(self.bin / 'stub')
@@ -229,6 +237,7 @@ class MigrationOfferTests(unittest.TestCase):
         self.assertIn("Omarchy's preferred method is Omarchy's bitwarden package (migration bitwarden-flatpak)", notices[0])
         self.assertIn('./install.sh --migrate-to-omarchy-installers', notices[0])
         self.assertNotIn('declined_migrations', self.saved())
+        self.assertNotIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], self.calls())
 
     def test_update_in_a_terminal_only_reports_and_needs_no_sudo(self):
         self.feed_has_native_bitwarden()
@@ -242,6 +251,7 @@ class MigrationOfferTests(unittest.TestCase):
         self.assertIn('Bitwarden desktop is installed as the user Flatpak', output)
         self.assertIn('sudo was not used', output)
         self.assertFalse(any(call[0] == 'sudo' for call in self.calls()))
+        self.assertNotIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], self.calls())
         self.assert_not_migrated()
 
     def test_update_rejects_the_migration_flag(self):
@@ -275,6 +285,8 @@ class MigrationOfferTests(unittest.TestCase):
         self.reset_calls()
         update = self.run_update()
         self.assertNotIn('Bitwarden desktop', update.stdout)
+        self.assertNotIn('Flatpak update', update.stdout)
+        self.assertNotIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], self.calls())
         self.assertEqual(self.saved()['declined_migrations'], ['bitwarden-flatpak'])
         self.assertTrue(data.exists())
 
@@ -412,26 +424,29 @@ class MigrationOfferTests(unittest.TestCase):
         self.feed_has_native_bitwarden(align='0x800')
         result = self.run_install('--without-keyd', '--without-screen-sharing')
         self.assertIn('Remembered bitwarden 2026.10.1-1 as unusable here', result.stderr)
+        self.assertIn('Bitwarden desktop was not installed', result.stderr)
         self.assertEqual(self.rejected(), ['2026.10.1-1'])
-        self.assertTrue((self.root / 'bitwarden-flatpak').exists())
-        # With the Flatpak fallback in place: no notice and no package retry.
+        self.assertFalse((self.root / 'bitwarden-flatpak').exists())
+        self.assertNotIn(FLATPAK_INSTALL, self.calls())
+        # The refused version stays quiet: no notice, no package retry, no Flatpak.
         self.reset_calls()
         self.env['FIXTURE_SUDO_CACHED'] = '0'
         result = self.run_update()
         self.assertNotIn('Bitwarden desktop is installed as', result.stdout)
+        self.assertNotIn('Bitwarden desktop was not installed', result.stdout + result.stderr)
         self.assertNotIn(NATIVE_ADD, self.calls())
-        # With no Bitwarden at all: the Flatpak, without sudo, instead of the package.
-        (self.root / 'bitwarden-flatpak').unlink()
-        self.reset_calls()
-        result = self.run_update()
+        self.assertNotIn(FLATPAK_INSTALL, self.calls())
         self.assertIn('sudo was not used', result.stdout)
-        self.assertNotIn(NATIVE_ADD, self.calls())
-        self.assertIn(FLATPAK_INSTALL, self.calls())
-        # A new feed version is offered again.
+        # A new feed version is installed as the package, still without the Flatpak.
         self.env['FIXTURE_FEED_VERSION'] = '2026.11.1-1'
+        self.env['FIXTURE_LOAD_ALIGN'] = '0x10000'
+        self.env['FIXTURE_SUDO_CACHED'] = '1'
         self.reset_calls()
         result = self.run_update()
-        self.assertIn('(migration bitwarden-flatpak)', result.stdout)
+        self.assertIn(NATIVE_ADD, self.calls())
+        self.assertNotIn(FLATPAK_INSTALL, self.calls())
+        self.assertNotIn('(migration bitwarden-flatpak)', result.stdout)
+        self.assertTrue((self.bin / 'bitwarden').exists())
 
     def test_rejected_preinstalled_package_stops_the_offer(self):
         self.feed_has_native_bitwarden(align='0x800')
@@ -649,6 +664,46 @@ class UpdateAllBitwardenSummaryTests(unittest.TestCase):
         for owner in (None, 'bitwarden-launcher'):
             with self.subTest(owner=owner):
                 self.assertIn('Bitwarden user Flatpak not installed; skipped', self.update_all(owner=owner))
+
+    def test_a_feed_that_has_bitwarden_does_not_update_the_installed_flatpak(self):
+        """Protects: update-all leaves the user Flatpak alone once the feed has bitwarden."""
+        updater = update_base.updater
+        previous = self.run_command
+
+        def with_feed(args, **kwargs):
+            if args[:2] == ['pacman', '-Si'] and 'bitwarden' in args:
+                self.machine_calls.append(args)
+                return 'Repository      : omarchy\nName            : bitwarden\nVersion         : 2026.10.4-1\n'
+            return previous(args, **kwargs)
+
+        with patch.object(updater, 'run', side_effect=with_feed), redirect_stdout(io.StringIO()):
+            updater.update('all')
+        receipt = json.loads((self.state / 'update-all-last-success.json').read_text())
+        self.assertNotIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], self.machine_calls)
+        self.assertNotIn('Bitwarden user Flatpak update command completed', receipt['completed'])
+        self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'io.freetubeapp.FreeTube'], self.machine_calls)
+        self.assertIn('FreeTube user Flatpak update command completed', receipt['completed'])
+
+    def test_native_package_does_not_update_a_leftover_flatpak(self):
+        """Protects: a migrated host does not record a Bitwarden Flatpak update."""
+        updater = update_base.updater
+        previous = self.run_command
+
+        def owned(args, **kwargs):
+            if args[:2] == ['pacman', '-Qoq']:
+                self.machine_calls.append(args)
+                return 'bitwarden'
+            return previous(args, **kwargs)
+
+        which = lambda name: '/fixture/' + name
+        with patch.object(updater, 'run', side_effect=owned), \
+                patch.object(updater.shutil, 'which', side_effect=which), redirect_stdout(io.StringIO()):
+            updater.update('all')
+        receipt = json.loads((self.state / 'update-all-last-success.json').read_text())
+        self.assertNotIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], self.machine_calls)
+        self.assertNotIn('Bitwarden user Flatpak update command completed', receipt['completed'])
+        self.assertNotIn('Bitwarden user Flatpak not installed; skipped', receipt['completed'])
+        self.assertIn('FreeTube user Flatpak update command completed', receipt['completed'])
 
 
 class DeclinedMigrationSettingsTests(unittest.TestCase):

@@ -309,9 +309,13 @@ honeykrisp_icd_present() {
 # pacman -Si reads the local sync database and needs no sudo. A version that
 # already failed setup's checks on this kernel counts as unavailable, so it is
 # not retried, offered, or asked sudo for until the feed has another version.
+# The user Flatpak is installed only when the feed has no bitwarden package.
 bitwarden_flatpak=com.bitwarden.desktop
+bitwarden_in_feed() {
+  command -v pacman >/dev/null && pacman -Si bitwarden >/dev/null 2>&1
+}
 bitwarden_native_available() {
-  command -v pacman >/dev/null && pacman -Si bitwarden >/dev/null 2>&1 &&
+  bitwarden_in_feed &&
     ! python3 "$root/scripts/groundwork-update.py" bitwarden-rejected
 }
 bitwarden_flatpak_installed() {
@@ -1073,10 +1077,12 @@ if [[ $updating -eq 0 ]] || ! service_ready tailscaled; then
 fi
 
 # Omarchy owns Obsidian's package, theme, and launch shortcut. A new Bitwarden
-# desktop install uses Omarchy's bitwarden package when the feed has it, and
-# its ARM64 Flathub distribution otherwise. An existing native app or user
-# Flatpak is kept; moving the Flatpak to the package is only offered (decision
-# 0014). Sign-in remains user-owned, with no vault export in this repo.
+# desktop install uses Omarchy's bitwarden package when the feed has it and the
+# page-size and ownership checks pass. The user Flatpak is the fallback only
+# when the feed has no bitwarden package. An existing native app or user
+# Flatpak is kept, and that Flatpak is not updated while the feed has the
+# package. Moving it is only offered (decision 0014). Sign-in remains
+# user-owned, with no vault export in this repo.
 # FreeTube is the same kind of gap. Checked 2026-10-24: freetube is absent
 # from Arch Linux, Arch Linux ARM, pkgs.omarchy.org/edge/aarch64, and ALARM's
 # prebuilt aur database. AUR freetube-bin is a PKGBUILD, and omarchy pkg add
@@ -1150,17 +1156,27 @@ install_native_bitwarden() {
 install_package obsidian
 install_package bitwarden-cli bw
 # Set when the package was tried and refused here, so this run does not offer it.
+# bitwarden_ready is 1 when a desktop Bitwarden this layer accepts is already here.
 bitwarden_native_failed=0
-if ! command -v bitwarden >/dev/null && ! bitwarden_flatpak_installed; then
-  if bitwarden_native_available; then
-    if ! install_native_bitwarden; then
-      bitwarden_native_failed=1
-      echo "Omarchy's bitwarden package is not usable here; installing the Bitwarden Flatpak instead." >&2
-      ensure_user_flatpak "$bitwarden_flatpak"
-    fi
+bitwarden_ready=0
+if command -v bitwarden >/dev/null || bitwarden_flatpak_installed; then
+  bitwarden_ready=1
+elif bitwarden_native_available; then
+  if install_native_bitwarden; then
+    bitwarden_ready=1
   else
-    ensure_user_flatpak "$bitwarden_flatpak"
+    bitwarden_native_failed=1
+    echo "Omarchy's bitwarden package is not usable here. The user Flatpak is installed only when the feed has no bitwarden package, so Bitwarden desktop was not installed." >&2
   fi
+elif bitwarden_in_feed; then
+  # The feed still has a version this kernel already refused. Stay quiet and
+  # leave the Flatpak uninstalled until that version changes.
+  bitwarden_native_failed=1
+else
+  # A failing fallback install stops setup, as it did when the Flatpak was the
+  # only desktop path. set -e exits on that failure.
+  ensure_user_flatpak "$bitwarden_flatpak"
+  bitwarden_ready=1
 fi
 freetube_ready=1
 if ! ensure_user_flatpak io.freetubeapp.FreeTube; then
@@ -2253,10 +2269,17 @@ if [[ $updating -eq 1 ]]; then
   echo "Groundwork settings applied. Saved keyd, screen-sharing, Blip, local inference, EasyEffects, and vault choices were preserved."
   exit 0
 fi
-if [[ $freetube_ready -eq 1 ]]; then
+if [[ $freetube_ready -eq 1 && $bitwarden_ready -eq 1 ]]; then
   echo "Trackpad configuration, T3 Code, Herdr, Tailscale, Obsidian, Bitwarden, and FreeTube are installed."
-else
+elif [[ $freetube_ready -eq 1 ]]; then
+  echo "Trackpad configuration, T3 Code, Herdr, Tailscale, Obsidian, and FreeTube are installed."
+  echo "Bitwarden desktop was not installed."
+elif [[ $bitwarden_ready -eq 1 ]]; then
   echo "Trackpad configuration, T3 Code, Herdr, Tailscale, Obsidian, and Bitwarden are installed."
+  echo "FreeTube was not installed."
+else
+  echo "Trackpad configuration, T3 Code, Herdr, Tailscale, and Obsidian are installed."
+  echo "Bitwarden desktop was not installed."
   echo "FreeTube was not installed."
 fi
 if [[ $brave_usable -eq 1 ]]; then
