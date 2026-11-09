@@ -27,7 +27,9 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import tty
 
 MAPPER = '/dev/mapper/root'
 CRYPT_NAME = 'root'
@@ -547,6 +549,34 @@ def is_host_binary(path):
     return any(resolved == prefix[:-1] or resolved.startswith(prefix) for prefix in HOST_BIN_PREFIXES)
 
 
+def _relay_terminal(master, tty_fd, parts):
+    """Keep a copy of the command's output and show that same output on the terminal."""
+    try:
+        while True:
+            try:
+                chunk = os.read(master, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            parts.append(chunk)
+            view = memoryview(chunk)
+            while view:
+                try:
+                    written = os.write(tty_fd, view)
+                except OSError:
+                    view = b''
+                    break
+                if written <= 0:
+                    break
+                view = view[written:]
+    finally:
+        try:
+            os.close(master)
+        except OSError:
+            pass
+
+
 def run_process(command, timeout, environ, terminal, keep_session=False):
     """Run one command.
 
@@ -554,7 +584,13 @@ def run_process(command, timeout, environ, terminal, keep_session=False):
     per-terminal credential apply-layer just primed. Privileged commands stay
     in this session and use their own process group, which can still be
     signalled without signalling this process. The passphrase prompt is given
-    the terminal itself, not whatever stdin the parent inherited.
+    the terminal itself, not whatever stdin the parent inherited. The command's
+    own output is read from a separate terminal so a rejected LUKS header can
+    be recorded, and that output is copied back to the real terminal.
+
+    Restoring the foreground group runs from the background. SIGTTOU would stop
+    this process there, and the update would wait until the stage deadline.
+    The updater ignores that signal for the same handoff.
     """
     tty_fd = None
     previous = None
@@ -567,6 +603,9 @@ def run_process(command, timeout, environ, terminal, keep_session=False):
         except OSError:
             previous = None
     process = None
+    relay = None
+    held_ttou = None
+    parts = []
     try:
         try:
             if terminal:
@@ -574,8 +613,22 @@ def run_process(command, timeout, environ, terminal, keep_session=False):
                 # credential still matches, and it does not run Python between
                 # fork and exec. The command may be stopped by the terminal
                 # until this process makes that group the foreground.
-                process = subprocess.Popen(
-                    command, stdin=tty_fd, stdout=tty_fd, stderr=tty_fd, process_group=0)
+                # Ignore SIGTTOU only after the fork so the command itself does
+                # not inherit that disposition.
+                master, slave = os.openpty()
+                try:
+                    try:
+                        tty.setraw(slave)
+                        process = subprocess.Popen(
+                            command, stdin=tty_fd, stdout=slave, stderr=slave, process_group=0)
+                    finally:
+                        os.close(slave)
+                except Exception:
+                    os.close(master)
+                    raise
+                held_ttou = signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+                relay = threading.Thread(target=_relay_terminal, args=(master, tty_fd, parts), daemon=True)
+                relay.start()
                 try:
                     os.tcsetpgrp(tty_fd, process.pid)
                 except OSError:
@@ -594,7 +647,9 @@ def run_process(command, timeout, environ, terminal, keep_session=False):
                     text=True, env=environ, start_new_session=True)
             if terminal:
                 process.wait(timeout=timeout)
-                return Result(finished_code(process), '', '')
+                relay.join(timeout=2)
+                text = b''.join(parts).decode('utf-8', 'replace')
+                return Result(finished_code(process), '', text)
             stdout, stderr = process.communicate(timeout=timeout)
             return Result(finished_code(process), stdout, stderr)
         except subprocess.TimeoutExpired:
@@ -605,11 +660,15 @@ def run_process(command, timeout, environ, terminal, keep_session=False):
                 stop_child(process, group=True)
             return Result(130, '', 'Stopped.')
     finally:
+        if relay is not None:
+            relay.join(timeout=2)
         if tty_fd is not None and previous is not None:
             try:
                 os.tcsetpgrp(tty_fd, previous)
             except OSError:
                 pass
+        if held_ttou is not None:
+            signal.signal(signal.SIGTTOU, held_ttou)
         if tty_fd is not None:
             os.close(tty_fd)
 

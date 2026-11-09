@@ -2093,10 +2093,9 @@ fi
 # when discards, fstrim.timer, and the plocate drop-in are already set.
 # GROUNDWORK_STORAGE_APPLY lets the helper change a real
 # machine; without it the helper refuses.
+# $? inside `if !` is 0, so a failed apply would be reported as success.
 storage_status=0
-if ! GROUNDWORK_STORAGE_APPLY=1 python3 "$root/scripts/groundwork-storage.py" apply; then
-  storage_status=$?
-fi
+GROUNDWORK_STORAGE_APPLY=1 python3 "$root/scripts/groundwork-storage.py" apply || storage_status=$?
 if [[ $storage_status -ne 0 ]]; then
   echo "Storage defaults were not fully applied. Fix the message above, then rerun groundwork-update." >&2
   exit "$storage_status"

@@ -6,6 +6,7 @@ on the machine running the tests.
 import importlib.util
 import io
 import os
+import signal
 import stat
 import subprocess
 import sys
@@ -594,6 +595,7 @@ class StorageTests(unittest.TestCase):
 
     def test_the_passphrase_prompt_keeps_the_terminal(self):
         seen = {}
+        ignored = []
 
         class Process:
             pid = 7
@@ -605,24 +607,34 @@ class StorageTests(unittest.TestCase):
         def popen(command, **kwargs):
             seen['command'] = command
             seen['kwargs'] = kwargs
+            seen['stdout_is_tty'] = os.isatty(kwargs['stdout'])
             return Process()
 
+        def tcsetpgrp(fd, group):
+            ignored.append(signal.getsignal(signal.SIGTTOU) is signal.SIG_IGN)
+            seen.setdefault('foreground', []).append((fd, group))
+
+        terminal = os.open(os.devnull, os.O_RDWR)
         with mock.patch.object(storage.subprocess, 'Popen', popen), \
-             mock.patch.object(storage, 'terminal_stdio', return_value=12), \
+             mock.patch.object(storage, 'terminal_stdio', return_value=terminal), \
              mock.patch.object(storage.os, 'tcgetpgrp', return_value=1), \
-             mock.patch.object(storage.os, 'tcsetpgrp') as foreground, \
-             mock.patch.object(storage.os, 'kill'), \
-             mock.patch.object(storage.os, 'close'):
+             mock.patch.object(storage.os, 'tcsetpgrp', tcsetpgrp), \
+             mock.patch.object(storage.os, 'kill'):
             result = storage.run_process(
                 ['sudo', 'cryptsetup', 'refresh'], 30, {'PATH': '/bin'}, terminal=True, keep_session=True)
         self.assertEqual(result.returncode, 0)
-        self.assertIs(seen['kwargs']['stdin'], 12)
-        self.assertIs(seen['kwargs']['stdout'], 12)
-        self.assertIs(seen['kwargs']['stderr'], 12)
+        self.assertEqual(seen['kwargs']['stdin'], terminal)
+        self.assertEqual(seen['kwargs']['stdout'], seen['kwargs']['stderr'])
+        self.assertNotEqual(seen['kwargs']['stdout'], terminal)
+        self.assertTrue(seen['stdout_is_tty'])
         self.assertEqual(seen['kwargs'].get('process_group'), 0)
         self.assertNotIn('preexec_fn', seen['kwargs'])
         self.assertNotIn('start_new_session', seen['kwargs'])
-        self.assertIn(mock.call(12, 7), foreground.call_args_list)
+        self.assertIn((terminal, 7), seen['foreground'])
+        self.assertIn((terminal, 1), seen['foreground'])
+        self.assertTrue(ignored)
+        self.assertTrue(all(ignored))
+        self.assertIsNot(signal.getsignal(signal.SIGTTOU), signal.SIG_IGN)
 
     def test_sudo_keeps_the_terminal_session(self):
         seen = {}
@@ -850,6 +862,159 @@ os._exit(9)
         # Distinct value: the Popen stand-in never owns a terminal.
         code, errors = self._pty_exit("['/bin/sleep', '30']", r"b'\x03'", 2)
         self.assertEqual(code, 130, errors)
+
+    def test_terminal_text_reaches_the_helper(self):
+        # Protects: a header cryptsetup rejects is recorded from the helper's copy of the text.
+        # Distinct value: the stand-in returns that text already, so it never reads a terminal.
+        phrase = 'Option --persistent is only supported for LUKS2.'
+        argv = repr([
+            sys.executable, '-I', '-c',
+            'import sys; sys.stderr.write(%r); sys.exit(2)' % (phrase + '\n'),
+        ])
+        code, errors = self._pty_helper_text(argv, 'only supported for luks2')
+        self.assertEqual(code, 0, errors)
+        self.assertIn(phrase, errors)
+
+    def _pty_helper_text(self, argv_repr, needle):
+        script = f'''
+import importlib.util, os, pty, sys, time, fcntl
+spec = importlib.util.spec_from_file_location("groundwork_storage", {str(SCRIPT)!r})
+storage = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(storage)
+pid, fd = pty.fork()
+if pid == 0:
+    try:
+        result = storage.run_process({argv_repr}, 3, {{"PATH": "/usr/bin:/bin"}}, terminal=True, keep_session=True)
+        text = (result.stdout + "\\n" + result.stderr).lower()
+        os._exit(0 if {needle!r} in text else 7)
+    except BaseException:
+        import traceback
+        traceback.print_exc()
+        os._exit(9)
+flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+deadline = time.monotonic() + 6
+while time.monotonic() < deadline:
+    try:
+        chunk = os.read(fd, 200)
+        if chunk:
+            sys.stderr.write(chunk.decode("utf-8", "replace"))
+    except BlockingIOError:
+        pass
+    waited, status = os.waitpid(pid, os.WNOHANG)
+    if waited:
+        while True:
+            try:
+                chunk = os.read(fd, 200)
+            except BlockingIOError:
+                break
+            if not chunk:
+                break
+            sys.stderr.write(chunk.decode("utf-8", "replace"))
+        os._exit(os.waitstatus_to_exitcode(status) & 0xff)
+    time.sleep(0.05)
+os.kill(pid, 9)
+os._exit(9)
+'''
+        completed = subprocess.run([sys.executable, '-I', '-c', script], timeout=10, capture_output=True)
+        return completed.returncode, completed.stderr.decode()
+
+    def test_taking_the_terminal_back_does_not_stop_the_caller(self):
+        # Protects: after the passphrase command exits, restoring the terminal does not stop the update.
+        # Distinct value: the stand-in never calls tcsetpgrp, so it cannot be stopped by the terminal.
+        script = f'''
+import importlib.util, os, pty, signal, time
+spec = importlib.util.spec_from_file_location("groundwork_storage", {str(SCRIPT)!r})
+storage = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(storage)
+master, slave = pty.openpty()
+leader = os.fork()
+if leader == 0:
+    os.close(master)
+    try:
+        os.setsid()
+        tty_fd = os.open(os.ttyname(slave), os.O_RDWR)
+        os.dup2(tty_fd, 0)
+        os.dup2(tty_fd, 1)
+        os.dup2(tty_fd, 2)
+        if slave > 2:
+            os.close(slave)
+        if tty_fd > 2:
+            os.close(tty_fd)
+        worker = os.fork()
+        if worker == 0:
+            os.setpgid(0, 0)
+            previous = signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+            try:
+                os.tcsetpgrp(0, os.getpgrp())
+            except OSError:
+                os._exit(6)
+            finally:
+                signal.signal(signal.SIGTTOU, previous)
+            try:
+                result = storage.run_process(
+                    ["/bin/sleep", "0.3"], 5, {{"PATH": "/bin:/usr/bin"}}, terminal=True, keep_session=True)
+            except BaseException:
+                os._exit(8)
+            os._exit(0 if result.returncode == 0 else 8)
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            wpid, status = os.waitpid(worker, os.WUNTRACED | os.WNOHANG)
+            if wpid == 0:
+                time.sleep(0.05)
+                continue
+            if os.WIFSTOPPED(status):
+                os.kill(worker, signal.SIGKILL)
+                os.waitpid(worker, 0)
+                os._exit(3)
+            if os.WIFEXITED(status):
+                os._exit(os.WEXITSTATUS(status))
+            os._exit(4)
+        os.kill(worker, signal.SIGKILL)
+        os._exit(5)
+    except BaseException:
+        os._exit(9)
+os.close(slave)
+import fcntl
+flags = fcntl.fcntl(master, fcntl.F_GETFL)
+fcntl.fcntl(master, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+deadline = time.monotonic() + 6
+while time.monotonic() < deadline:
+    try:
+        os.read(master, 4096)
+    except (BlockingIOError, OSError):
+        pass
+    wpid, status = os.waitpid(leader, os.WNOHANG)
+    if wpid:
+        os._exit(os.waitstatus_to_exitcode(status) & 0xff)
+    time.sleep(0.05)
+os.kill(leader, signal.SIGKILL)
+os._exit(5)
+'''
+        completed = subprocess.run([sys.executable, '-I', '-c', script], timeout=10, capture_output=True)
+        detail = completed.stderr.decode() + completed.stdout.decode()
+        self.assertNotEqual(completed.returncode, 3, 'restoring the terminal stopped the caller\n' + detail)
+        self.assertEqual(completed.returncode, 0, detail)
+
+    def test_a_failed_storage_apply_keeps_its_status(self):
+        # Protects: apply-layer reports the helper's status. Inside `if !`, $? is 0.
+        # Distinct value: the stub exits 130 and is not the real helper.
+        layer = (REPO / 'scripts/apply-layer.sh').read_text(encoding='utf-8')
+        start = layer.index('storage_status=0\n')
+        end = layer.index('exit "$storage_status"\n', start)
+        end = layer.index('fi\n', end)
+        block = layer[start:end + len('fi\n')]
+        with tempfile.TemporaryDirectory() as directory:
+            stub = Path(directory) / 'python3'
+            stub.write_text('#!/bin/sh\nexit 130\n')
+            stub.chmod(0o755)
+            completed = subprocess.run(
+                ['bash', '-c', 'set -euo pipefail\nroot=/tmp\n' + block],
+                env={'PATH': directory + ':/usr/bin:/bin', 'TERM': 'dumb'},
+                capture_output=True, text=True, timeout=10)
+        self.assertEqual(completed.returncode, 130, completed.stderr)
+        self.assertIn('not fully applied', completed.stderr)
+        self.assertNotIn('Groundwork settings applied', completed.stdout)
 
     def test_the_prompt_reads_the_terminal(self):
         # Protects: the passphrase is read from the terminal when stdin is not that terminal.
