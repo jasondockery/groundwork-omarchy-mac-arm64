@@ -815,7 +815,7 @@ class StorageTests(unittest.TestCase):
         interpreter has none. The timeout is the bound if that child stalls.
         """
         script = f'''
-import importlib.util, os, pty, sys, time, fcntl
+import errno, importlib.util, os, pty, sys, time, fcntl
 spec = importlib.util.spec_from_file_location("groundwork_storage", {str(SCRIPT)!r})
 storage = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(storage)
@@ -844,6 +844,10 @@ while time.monotonic() < deadline:
             sys.stderr.write(repr(chunk) + "\\n")
     except BlockingIOError:
         pass
+    except OSError as error:
+        # Linux returns EIO once the other end of the terminal has closed.
+        if error.errno != errno.EIO:
+            raise
     waited, status = os.waitpid(pid, os.WNOHANG)
     if waited:
         code = os.waitstatus_to_exitcode(status)
@@ -877,10 +881,22 @@ os._exit(9)
 
     def _pty_helper_text(self, argv_repr, needle):
         script = f'''
-import importlib.util, os, pty, sys, time, fcntl
+import errno, importlib.util, os, pty, sys, time, fcntl
 spec = importlib.util.spec_from_file_location("groundwork_storage", {str(SCRIPT)!r})
 storage = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(storage)
+
+def read_terminal(fd):
+    try:
+        return os.read(fd, 200)
+    except BlockingIOError:
+        return None
+    except OSError as error:
+        # Linux returns EIO once the other end of the terminal has closed.
+        if error.errno == errno.EIO:
+            return b""
+        raise
+
 pid, fd = pty.fork()
 if pid == 0:
     try:
@@ -895,19 +911,13 @@ flags = fcntl.fcntl(fd, fcntl.F_GETFL)
 fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 deadline = time.monotonic() + 6
 while time.monotonic() < deadline:
-    try:
-        chunk = os.read(fd, 200)
-        if chunk:
-            sys.stderr.write(chunk.decode("utf-8", "replace"))
-    except BlockingIOError:
-        pass
+    chunk = read_terminal(fd)
+    if chunk:
+        sys.stderr.write(chunk.decode("utf-8", "replace"))
     waited, status = os.waitpid(pid, os.WNOHANG)
     if waited:
         while True:
-            try:
-                chunk = os.read(fd, 200)
-            except BlockingIOError:
-                break
+            chunk = read_terminal(fd)
             if not chunk:
                 break
             sys.stderr.write(chunk.decode("utf-8", "replace"))
