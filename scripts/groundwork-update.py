@@ -112,6 +112,9 @@ REPORTS = (
     ('Omarchy feed watch', 'omarchy-feed-watch.py', ('report', '--brief'), 60),
     ('PATH shadow check', 'groundwork-path-shadow.py', ('--brief',), 30),
     ('Disk report', 'groundwork-disk-report.py', ('--brief',), 15),
+    # The doctor also checks /tmp and the storage defaults. Storage probes it
+    # can signal share DOCTOR_SECONDS in groundwork-storage.py. A command that
+    # cannot be signalled is stopped with this deadline, and that report is discarded.
     ('Host tools check', 'groundwork-doctor.py', ('--brief',), 15),
 )
 # Set to anything but empty or 0 to skip all of them.
@@ -2207,7 +2210,7 @@ def run_reports(source):
             if text:
                 print(text, flush=True)
         if not spoke:
-            print('Reports: no Omarchy offers, PATH shadows, low disk space, missing host tools, or temp storage problems.', flush=True)
+            print('Reports: no Omarchy offers, PATH shadows, low disk space, missing host tools, temp storage problems, or storage defaults.', flush=True)
     except KeyboardInterrupt:
         report_note('Reports cancelled. The update itself had already finished.')
     except BrokenPipeError:
@@ -2680,7 +2683,7 @@ def main(args):
             print('Also run omarchy update, update listed Omarchy shell plugins, check T3 Code\'s staged and installed builds on kernels with pages larger than 4 KiB, and update the installed Bitwarden and FreeTube user Flatpaks.')
             print(f'When Blip is opted in, update {BLIP_ID} only in an interactive terminal, without --yes, so its diff can be reviewed.')
             print('Finally, report Omarchy offers for apps Groundwork installs, managed commands shadowed on PATH, free space '
-                  f'under or near Omarchy\'s 10 GiB update floor, and missing host tools or /tmp and scratch-root problems (groundwork-doctor --brief). These never fail the update; set {SKIP_REPORTS_ENV}=1 to skip them.')
+                  f'under or near Omarchy\'s 10 GiB update floor, and missing host tools, /tmp and scratch-root problems, or storage defaults (groundwork-doctor --brief). These never fail the update; set {SKIP_REPORTS_ENV}=1 to skip them.')
         else:
             print('Listed shell plugins are installed or retired. Existing plugin checkouts stay at their current revisions.')
         print('--check fetches and displays repository changes without advancing the checkout or applying settings.')

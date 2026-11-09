@@ -210,8 +210,8 @@ fi
 
 # Fail before installing packages or moving files when the checkout is incomplete.
 # The Bitwarden extension id and Brave policies are read from core, not a copy here.
-[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$root/scripts/groundwork-node-pin.py" && -f "$root/scripts/groundwork-commit-guard.py" && -f "$root/scripts/groundwork-tmp.py" && -f "$root/core/browser/brave.json" && ! -L "$root/core/browser/brave.json" ]] || {
-  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, Node pin helper, commit guard helper, temp storage helper, or Brave spec is missing." >&2
+[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$root/scripts/groundwork-node-pin.py" && -f "$root/scripts/groundwork-commit-guard.py" && -f "$root/scripts/groundwork-tmp.py" && -f "$root/scripts/groundwork-storage.py" && -f "$root/config/plocate-updatedb.service.d.conf" && -f "$root/core/browser/brave.json" && ! -L "$root/core/browser/brave.json" ]] || {
+  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, Node pin helper, commit guard helper, temp storage helper, storage helper, plocate drop-in, or Brave spec is missing." >&2
   exit 1
 }
 
@@ -677,6 +677,11 @@ privileged_changes_needed() {
   if [[ $with_local_inference -eq 1 ]] && ! local_inference_ready; then
     return 0
   fi
+  # TRIM, fstrim.timer, or the plocate drop-in still pending (decision 0023).
+  # Read-only. A directory zstd level is not applied.
+  if python3 "$root/scripts/groundwork-storage.py" needed; then
+    return 0
+  fi
   return 1
 }
 
@@ -690,6 +695,9 @@ if [[ "$EUID" -ne 0 && $needs_privilege -eq 1 && $updating -eq 1 ]]; then
   # Prime sudo once in the foreground terminal before the first privileged step.
   if [[ -r /dev/tty && -w /dev/tty ]] && : </dev/tty >/dev/null; then
     echo "This update changes system settings and needs administrator permission."
+    # Read-only. When discards are still off, this says the disk passphrase is
+    # a separate prompt from the administrator password.
+    python3 "$root/scripts/groundwork-storage.py" explain || true
     sudo_status=0
     # shellcheck disable=SC2024
     sudo /usr/bin/true </dev/tty >/dev/tty 2>/dev/tty || sudo_status=$?
@@ -699,6 +707,7 @@ if [[ "$EUID" -ne 0 && $needs_privilege -eq 1 && $updating -eq 1 ]]; then
     fi
   elif ! sudo -n /usr/bin/true 2>/dev/null; then
     echo "This update needs administrator permission, and no terminal is available to ask for it." >&2
+    python3 "$root/scripts/groundwork-storage.py" explain >&2 || true
     echo "Nothing was changed. Run update-all or groundwork-update from a terminal." >&2
     exit 1
   fi
@@ -2079,6 +2088,17 @@ if [[ -n $scratch_problem ]]; then
 fi
 if [[ $updating -eq 0 && -n $syncthing_pending_note ]]; then
   echo "Not finished: $syncthing_pending_note" >&2
+fi
+# Storage defaults (decision 0023). Idempotent. A second run prints nothing
+# when discards, fstrim.timer, and the plocate drop-in are already set.
+# GROUNDWORK_STORAGE_APPLY lets the helper change a real
+# machine; without it the helper refuses.
+# $? inside `if !` is 0, so a failed apply would be reported as success.
+storage_status=0
+GROUNDWORK_STORAGE_APPLY=1 python3 "$root/scripts/groundwork-storage.py" apply || storage_status=$?
+if [[ $storage_status -ne 0 ]]; then
+  echo "Storage defaults were not fully applied. Fix the message above, then rerun groundwork-update." >&2
+  exit "$storage_status"
 fi
 if [[ $updating -eq 1 ]]; then
   echo "Groundwork settings applied. Saved keyd, screen-sharing, Blip, local inference, and vault choices were preserved."

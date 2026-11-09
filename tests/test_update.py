@@ -493,8 +493,12 @@ class UpdateTests(unittest.TestCase):
         (self.seed / 'scripts/apply-layer.sh').write_text(script)
         for name in ('seed-obsidian.py', 'groundwork-screen-share.py',
                      'groundwork-syncthing.py', 'omarchy-plugins.py',
-                     'groundwork-node-pin.py', 'groundwork-commit-guard.py', 'groundwork-tmp.py'):
+                     'groundwork-node-pin.py', 'groundwork-commit-guard.py',
+                     'groundwork-tmp.py', 'groundwork-storage.py'):
             (self.seed / 'scripts' / name).write_text('# fixture\n')
+        dropin = self.seed / 'config'
+        dropin.mkdir()
+        (dropin / 'plocate-updatedb.service.d.conf').write_text('# fixture\n')
         self.commit(self.seed)
         self.command('git', '-C', str(self.seed), 'push', 'origin', 'main')
         self.assertEqual(self.git('rev-parse', 'HEAD'), pinned)
@@ -843,7 +847,7 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
             ('Host tools check', [python, str(self.source / 'scripts/groundwork-doctor.py'), '--brief']),
         ])
         self.assertTrue(all(0 < deadline <= 60 for _, _, deadline in self.report_calls))
-        self.assertIn('Reports: no Omarchy offers, PATH shadows, low disk space, missing host tools, or temp storage problems.', output.getvalue())
+        self.assertIn('Reports: no Omarchy offers, PATH shadows, low disk space, missing host tools, temp storage problems, or storage defaults.', output.getvalue())
         self.report_calls.clear()
         updater.update('layer')
         updater.update('all', check=True)
@@ -854,7 +858,7 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
             updater.update('all')
         tail = output.getvalue().split('FreeTube user Flatpak update command completed', 1)[1]
         self.assertEqual([line for line in tail.splitlines() if line.strip()],
-                         ['Reports: no Omarchy offers, PATH shadows, low disk space, missing host tools, or temp storage problems.'])
+                         ['Reports: no Omarchy offers, PATH shadows, low disk space, missing host tools, temp storage problems, or storage defaults.'])
         self.report_answers['Disk report'] = 'Disk: 9.0 GiB free on /, under the 10.0 GiB Omarchy needs to update.'
         with patch('sys.stdout', new_callable=io.StringIO) as output:
             updater.update('all')

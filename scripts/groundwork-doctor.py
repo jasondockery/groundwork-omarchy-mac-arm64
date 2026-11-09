@@ -13,7 +13,14 @@ Checks:
               /etc/fstab /tmp line or a custom /etc/systemd/system/tmp.mount
               unit (setup skips the mask for either), upstream tmpfiles ageing
               of /tmp and a masked systemd-tmpfiles-clean.timer, and the scratch roots
-              omarchy.json names (decision 0022, issue #138).
+              omarchy.json names (decision 0022, issue #138). A checkout without
+              the temp-storage helper reports that gap.
+  storage     TRIM through LUKS and the plocate prune drop-in (decision 0023).
+              Each gap is printed with the command that fixes it. A directory
+              property cannot choose a zstd level, so that check does not set
+              one. A checkout without the storage helper reports that gap.
+              Nothing here enables discards, starts a timer, or sets a property.
+              --help and bad usage do not need either helper.
 
 --brief prints only problems, one line each, and nothing when every check
 passes. update-all runs it that way, after the update, next to its other reports.
@@ -45,6 +52,20 @@ HOST_TOOLS = (
 PS_PROBE_SECONDS = 5
 
 
+def load_storage():
+    """The storage helper beside this script, or None when this checkout does not have it."""
+    path = Path(__file__).with_name('groundwork-storage.py')
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location('groundwork_storage', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+STORAGE = load_storage()
+
+
 def ps_supports_lstart(ps, environ):
     """True when this ps prints a start time for `-o lstart=` (procps-ng does; busybox does not)."""
     try:
@@ -72,13 +93,35 @@ def host_tool_problems(environ):
 
 def temp_storage(environ):
     """(problems, summary) from scripts/groundwork-tmp.py, which sits next to this file."""
-    spec = importlib.util.spec_from_file_location('groundwork_tmp', Path(__file__).resolve().parent / 'groundwork-tmp.py')
+    path = Path(__file__).resolve().parent / 'groundwork-tmp.py'
+    if not path.is_file():
+        return ['groundwork-tmp.py is missing from this checkout.'], ''
+    spec = importlib.util.spec_from_file_location('groundwork_tmp', path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     try:
         return module.report(environ)
     except (module.TmpError, OSError) as error:
         return [f'The check could not run: {error}'], ''
+
+
+def storage_report(environ, brief):
+    """(text, failed). A missing helper is a reported problem, not a traceback."""
+    if STORAGE is None:
+        line = 'groundwork-storage.py is missing from this checkout.'
+        if brief:
+            return f'Storage defaults: {line}\n', True
+        return f'Storage defaults: 1 problem\n  {line}\n', True
+    machine = STORAGE.machine_from(environ)
+    if machine is None:
+        return '', False
+    if machine is STORAGE.REFUSED:
+        line = 'GROUNDWORK_STORAGE_ROOT and INSTALL_FIXTURE are test-only. Unset them and rerun.'
+        if brief:
+            return f'Storage defaults: {line}\n', True
+        return f'Storage defaults: 1 problem\n  {line}\n', True
+    machine.deadline = STORAGE.Deadline(STORAGE.DOCTOR_SECONDS)
+    return STORAGE.format_report(STORAGE.gather(machine), brief=brief)
 
 
 def main(argv=None, environ=None):
@@ -101,6 +144,11 @@ def main(argv=None, environ=None):
                 print(f'  {line}')
         else:
             print(f'{label}: ok ({summary})')
+    storage_text, storage_failed = storage_report(environ, brief=args.brief)
+    if storage_text:
+        print(storage_text, end='')
+    if storage_failed and not args.brief:
+        status = 1
     return status
 
 
