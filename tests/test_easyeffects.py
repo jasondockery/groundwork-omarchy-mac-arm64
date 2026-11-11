@@ -86,6 +86,16 @@ class EasyEffectsHelperTests(unittest.TestCase):
         self.run_configure()
         self.assertEqual(preset.read_text(), '{"user": "preset"}\n')
 
+    def test_configure_does_not_chmod_the_shared_unit_directory(self):
+        unit_dir = self.home / '.config/systemd/user'
+        unit_dir.mkdir(parents=True)
+        unit_dir.chmod(0o755)
+        other = unit_dir / 'other.service'
+        other.write_text('[Unit]\nDescription=kept\n')
+        self.run_configure()
+        self.assertEqual(unit_dir.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(other.read_text(), '[Unit]\nDescription=kept\n')
+
     def test_unchanged_unit_is_not_backed_up(self):
         self.run_configure()
         self.calls.clear()

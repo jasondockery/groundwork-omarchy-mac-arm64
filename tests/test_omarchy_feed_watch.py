@@ -528,6 +528,7 @@ class TableTests(unittest.TestCase):
     def test_easyeffects_watches_the_omarchy_package_not_arch_extra(self):
         easyeffects = {app['id']: app for app in watch.load_table(TABLE)}['easyeffects']
         self.assertEqual(easyeffects['candidates'], [{'package': 'easyeffects'}])
+        self.assertNotIn('repo', easyeffects['candidates'][0])
         self.assertEqual(easyeffects['installer_keywords'], ['easyeffects'])
         self.assertTrue(easyeffects['self_install']['needed'])
         self.assertIn('decision 0024', easyeffects['self_install']['evidence'])

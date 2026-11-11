@@ -1783,6 +1783,24 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertIn('--with-easyeffects', result.stdout)
         self.assertIn('--without-easyeffects', result.stdout)
 
+    def test_easyeffects_opt_out_is_reused_on_a_bare_rerun_and_update(self):
+        self.run_install('--without-easyeffects')
+        (self.root / 'calls.jsonl').unlink()
+        result = self.run_install()
+        self.assertIn('Skipped EasyEffects setup', result.stdout)
+        self.assertNotIn(['omarchy', 'pkg', 'add', 'easyeffects'], self.calls())
+        self.assertNotIn(['omarchy', 'pkg', 'add', 'lsp-plugins-lv2'], self.calls())
+        self.assertFalse(any('groundwork-easyeffects.service' in call for call in self.calls()))
+        self.assertIs(json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())['easyeffects'], False)
+        (self.root / 'calls.jsonl').unlink()
+        self.env['FIXTURE_SUDO_CACHED'] = '0'
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Skipped EasyEffects setup', result.stdout)
+        self.assertNotIn(['omarchy', 'pkg', 'add', 'easyeffects'], self.calls())
+        self.assertNotIn(['omarchy', 'pkg', 'add', 'lsp-plugins-lv2'], self.calls())
+        self.assertFalse(any('groundwork-easyeffects.service' in call for call in self.calls()))
+
     def test_easyeffects_opt_out_leaves_install_unit_and_config_alone(self):
         preset = self.root / 'home/.config/easyeffects/output/keep.json'
         preset.parent.mkdir(parents=True)
@@ -1817,6 +1835,18 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertIn(['systemctl', '--user', 'enable', 'groundwork-easyeffects.service'], self.calls())
         self.assertNotIn(['systemctl', '--user', 'start', 'groundwork-easyeffects.service'], self.calls())
         self.assertIn('sudo was not used', result.stdout)
+
+    def test_easyeffects_update_adds_missing_lsp_plugins(self):
+        self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
+        (self.root / 'pacman-installed' / 'lsp-plugins-lv2.version').unlink()
+        self.env['FIXTURE_SUDO_CACHED'] = '1'
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn(['omarchy', 'pkg', 'add', 'easyeffects'], self.calls())
+        self.assertIn(['omarchy', 'pkg', 'add', 'lsp-plugins-lv2'], self.calls())
+        self.assertTrue((self.root / 'pacman-installed' / 'lsp-plugins-lv2.version').is_file())
+        self.assertIn(['systemctl', '--user', 'enable', 'groundwork-easyeffects.service'], self.calls())
+        self.assertNotIn(['systemctl', '--user', 'start', 'groundwork-easyeffects.service'], self.calls())
 
     def seed_honeykrisp_icd(self):
         icd = self.root / 'usr/share/vulkan/icd.d'

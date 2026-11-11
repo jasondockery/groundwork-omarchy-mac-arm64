@@ -57,12 +57,13 @@ def unit_text(executable):
     )
 
 
-def private_directory(path):
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+def unit_directory(path):
+    # Same as screen sharing: create ~/.config/systemd/user if needed, and do
+    # not chmod that shared directory. Other user units live here.
+    path.mkdir(parents=True, exist_ok=True)
     info = path.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
         raise RuntimeError('EasyEffects unit directory must be an owned, regular directory.')
-    path.chmod(0o700)
 
 
 def replace_file(path, content, mode):
@@ -108,7 +109,7 @@ def systemctl(*args):
 def configure():
     executable = resolved_easyeffects()
     path = unit_path()
-    private_directory(path.parent)
+    unit_directory(path.parent)
     replace_file(path, unit_text(executable), 0o644)
     systemctl('daemon-reload')
     # Enable only. A start or restart here would insert filters into a live
