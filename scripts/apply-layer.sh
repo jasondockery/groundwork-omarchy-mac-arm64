@@ -21,7 +21,7 @@ usage() {
   echo "--with-tmp-on-disk (the default) masks tmp.mount, so /tmp is on the root filesystem after the next reboot."
   echo "--without-tmp-on-disk records that preference as off and leaves an existing mask alone. See docs/decisions/0022-tmp-on-disk.md."
   echo "--with-easyeffects (the default) installs EasyEffects and lsp-plugins-lv2 and enables a user unit."
-  echo "--without-easyeffects records that preference as off and leaves an existing install alone. See docs/decisions/0024-easyeffects-equalizer.md."
+  echo "--without-easyeffects records that preference as off and leaves an existing install and user unit alone. See docs/decisions/0024-easyeffects-equalizer.md."
   echo "--migrate-to-omarchy-installers moves apps installed another way to Omarchy's own installer,"
   echo "  even after an earlier no. Without it, setup asks first and updates only report."
   echo "--keep-standalone-t3 points ~/.local/bin/t3 back at the standalone t3 CLI that setup switched"
@@ -1143,15 +1143,29 @@ install_easyeffects() {
     echo "Refusing to replace a symlink: $easyeffects_unit" >&2
     exit 1
   fi
+  # enable --now starts an inactive unit on the new ExecStart. An already-active
+  # unit keeps the old process until try-restart, so a replaced file is restarted.
+  had_easyeffects_unit=0
+  if [[ -e $easyeffects_unit ]]; then
+    had_easyeffects_unit=1
+  fi
+  unit_replaced=0
   if ! easyeffects_unit_current; then
     if [[ -e $easyeffects_unit ]]; then
       mv --backup=numbered "$easyeffects_unit" "${easyeffects_unit}.bak-omarchy-groundwork"
       echo "Backed up $easyeffects_unit as ${easyeffects_unit}.bak-omarchy-groundwork (or a numbered predecessor)."
     fi
     cp "$easyeffects_unit_src" "$easyeffects_unit"
+    unit_replaced=1
   fi
   systemctl --user daemon-reload || true
   if systemctl --user enable --now easyeffects.service; then
+    if [[ $unit_replaced -eq 1 && $had_easyeffects_unit -eq 1 ]]; then
+      if ! systemctl --user try-restart easyeffects.service; then
+        echo "EasyEffects is installed. Restart its user service from a desktop session with:"
+        echo "  systemctl --user try-restart easyeffects.service"
+      fi
+    fi
     echo "EasyEffects is installed and its user service is enabled. The default pipeline is empty, so sound stays uncolored until you add a preset. Open it from Super+Space. Per-output presets: docs/apps.md#easyeffects"
   else
     echo "EasyEffects is installed. Enable its user service from a desktop session with:"

@@ -937,6 +937,7 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertLess(calls.index(['omarchy', 'pkg', 'add', 'easyeffects']),
                         calls.index(['omarchy', 'pkg', 'add', 'lsp-plugins-lv2']))
         self.assertIn(['systemctl', '--user', 'enable', '--now', 'easyeffects.service'], calls)
+        self.assertFalse(any(call == ['systemctl', '--user', 'try-restart', 'easyeffects.service'] for call in calls))
         unit = self.root / 'home/.config/systemd/user/easyeffects.service'
         self.assertEqual(unit.read_text(), (REPO / 'config/easyeffects.service').read_text())
         self.assertFalse((self.root / 'home/.config/easyeffects').exists())
@@ -1796,6 +1797,24 @@ raise SystemExit(os.WEXITSTATUS(status))
         saved = json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())
         self.assertIs(saved['easyeffects'], False)
 
+    def test_saved_easyeffects_opt_out_survives_a_bare_rerun_and_update(self):
+        # Protects: a later ./install.sh or update-all with no flag still
+        # honours easyeffects: false and does not drop the key.
+        self.run_install('--without-easyeffects')
+        (self.root / 'calls.jsonl').unlink()
+        self.run_install()
+        self.assertFalse(any(call[:3] == ['omarchy', 'pkg', 'add'] and call[3] in ('easyeffects', 'lsp-plugins-lv2')
+                             for call in self.calls()))
+        self.assertFalse(any(call[0] == 'systemctl' and 'easyeffects.service' in call for call in self.calls()))
+        self.assertIs(json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())['easyeffects'], False)
+        (self.root / 'calls.jsonl').unlink()
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(any(call[:3] == ['omarchy', 'pkg', 'add'] and call[3] in ('easyeffects', 'lsp-plugins-lv2')
+                             for call in self.calls()))
+        self.assertFalse(any(call[0] == 'systemctl' and 'easyeffects.service' in call for call in self.calls()))
+        self.assertIs(json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())['easyeffects'], False)
+
     def test_easyeffects_opt_in_after_opt_out_installs_and_drops_the_saved_key(self):
         self.run_install('--without-easyeffects')
         (self.root / 'calls.jsonl').unlink()
@@ -1816,6 +1835,7 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertEqual(unit.read_text(), (REPO / 'config/easyeffects.service').read_text())
         self.assertEqual((unit_dir / 'easyeffects.service.bak-omarchy-groundwork').read_text(),
                          '[Unit]\nDescription=user owned\n')
+        self.assertIn(['systemctl', '--user', 'try-restart', 'easyeffects.service'], self.calls())
 
     def test_easyeffects_update_skips_packages_when_present(self):
         self.run_install()
