@@ -375,12 +375,24 @@ tmp_mask_needed() {
 easyeffects_unit_src=$root/config/easyeffects.service
 easyeffects_unit_dir=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
 easyeffects_unit=$easyeffects_unit_dir/easyeffects.service
+easyeffects_restart_marker=${XDG_STATE_HOME:-$HOME/.local/state}/groundwork/easyeffects-restart-needed
 easyeffects_plugins_present() {
   local dir="$test_root/usr/lib/lv2"
   [[ -d "$dir" ]] && compgen -G "$dir/*lsp*" >/dev/null
 }
 easyeffects_unit_current() {
   [[ -f $easyeffects_unit && ! -L $easyeffects_unit ]] && cmp -s "$easyeffects_unit_src" "$easyeffects_unit"
+}
+easyeffects_restart_pending() {
+  [[ -f $easyeffects_restart_marker && ! -L $easyeffects_restart_marker ]]
+}
+easyeffects_mark_restart_needed() {
+  python3 "$root/scripts/groundwork-update.py" marker write easyeffects-restart-needed pending || true
+}
+easyeffects_clear_restart_needed() {
+  if [[ -e $easyeffects_restart_marker || -L $easyeffects_restart_marker ]]; then
+    python3 "$root/scripts/groundwork-update.py" marker remove easyeffects-restart-needed || true
+  fi
 }
 # Brave (decision 0015). Install with Omarchy's browser installer, then keep it
 # only when its ELF files and a short launch work on this kernel. Chromium stays.
@@ -1145,6 +1157,8 @@ install_easyeffects() {
   fi
   # enable --now starts an inactive unit on the new ExecStart. An already-active
   # unit keeps the old process until try-restart, so a replaced file is restarted.
+  # A failed reload or try-restart is recorded so the next run retries after the
+  # file already matches (same hazard as the screen-sharing restart marker).
   had_easyeffects_unit=0
   if [[ -e $easyeffects_unit ]]; then
     had_easyeffects_unit=1
@@ -1158,16 +1172,34 @@ install_easyeffects() {
     cp "$easyeffects_unit_src" "$easyeffects_unit"
     unit_replaced=1
   fi
-  systemctl --user daemon-reload || true
+  need_restart=0
+  if [[ $unit_replaced -eq 1 && $had_easyeffects_unit -eq 1 ]] || easyeffects_restart_pending; then
+    need_restart=1
+  fi
+  reload_ok=1
+  if ! systemctl --user daemon-reload; then
+    reload_ok=0
+    if [[ $need_restart -eq 1 ]]; then
+      easyeffects_mark_restart_needed
+    fi
+  fi
   if systemctl --user enable --now easyeffects.service; then
-    if [[ $unit_replaced -eq 1 && $had_easyeffects_unit -eq 1 ]]; then
-      if ! systemctl --user try-restart easyeffects.service; then
+    if [[ $need_restart -eq 1 ]]; then
+      if [[ $reload_ok -eq 1 ]] && systemctl --user try-restart easyeffects.service; then
+        easyeffects_clear_restart_needed
+        echo "EasyEffects is installed and its user service is enabled. The default pipeline is empty, so sound stays uncolored until you add a preset. Open it from Super+Space. Per-output presets: docs/apps.md#easyeffects"
+      else
+        easyeffects_mark_restart_needed
         echo "EasyEffects is installed. Restart its user service from a desktop session with:"
         echo "  systemctl --user try-restart easyeffects.service"
       fi
+    else
+      echo "EasyEffects is installed and its user service is enabled. The default pipeline is empty, so sound stays uncolored until you add a preset. Open it from Super+Space. Per-output presets: docs/apps.md#easyeffects"
     fi
-    echo "EasyEffects is installed and its user service is enabled. The default pipeline is empty, so sound stays uncolored until you add a preset. Open it from Super+Space. Per-output presets: docs/apps.md#easyeffects"
   else
+    if [[ $need_restart -eq 1 ]]; then
+      easyeffects_mark_restart_needed
+    fi
     echo "EasyEffects is installed. Enable its user service from a desktop session with:"
     echo "  systemctl --user enable --now easyeffects.service"
   fi

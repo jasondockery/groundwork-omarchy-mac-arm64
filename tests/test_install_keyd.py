@@ -341,8 +341,11 @@ elif name == 'systemctl':
     if args[:1] == ['--user'] and args[-1:] == ['syncthing.service'] and 'is-active' in args:
         # Not serving yet unless a test says otherwise.
         sys.exit(0 if os.environ.get('FIXTURE_SYNCTHING_ACTIVE') == '1' else 3)
-    if os.environ.get('FIXTURE_EASYEFFECTS_SYSTEMCTL_STATUS') and args[:1] == ['--user'] and 'easyeffects.service' in args:
-        sys.exit(int(os.environ['FIXTURE_EASYEFFECTS_SYSTEMCTL_STATUS']))
+    if args[:1] == ['--user'] and 'easyeffects.service' in args:
+        if args[1:2] == ['try-restart']:
+            sys.exit(int(os.environ.get('FIXTURE_EASYEFFECTS_TRY_RESTART_STATUS',
+                                       os.environ.get('FIXTURE_EASYEFFECTS_SYSTEMCTL_STATUS', '0'))))
+        sys.exit(int(os.environ.get('FIXTURE_EASYEFFECTS_SYSTEMCTL_STATUS', '0')))
     if args == ['is-enabled', 'tmp.mount']:
         unit = root / 'etc/systemd/system/tmp.mount'
         if unit.is_symlink() and os.readlink(unit) == '/dev/null':
@@ -943,6 +946,7 @@ raise SystemExit(os.WEXITSTATUS(status))
         unit = self.root / 'home/.config/systemd/user/easyeffects.service'
         self.assertEqual(unit.read_text(), (REPO / 'config/easyeffects.service').read_text())
         self.assertTrue((self.root / 'usr/lib/lv2/lsp-plugins.lv2/manifest.ttl').exists())
+        self.assertFalse((self.root / 'home/.local/state/groundwork/easyeffects-restart-needed').exists())
         self.assertFalse((self.root / 'home/.config/easyeffects').exists())
         self.assertNotIn('easyeffects', json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text()))
         self.assertIn(['systemctl', '--user', 'enable', 'groundwork-screen-share.service'], calls)
@@ -1839,14 +1843,20 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertEqual((unit_dir / 'easyeffects.service.bak-omarchy-groundwork').read_text(),
                          '[Unit]\nDescription=user owned\n')
         self.assertIn(['systemctl', '--user', 'try-restart', 'easyeffects.service'], self.calls())
+        self.assertFalse((self.root / 'home/.local/state/groundwork/easyeffects-restart-needed').exists())
 
     def test_easyeffects_update_skips_packages_when_present(self):
+        # Protects: a matching unit is still enabled on update, and is not
+        # try-restarted when the file already matches and no restart is pending.
         self.run_install()
         (self.root / 'calls.jsonl').unlink()
         result = self.run_update()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(any(call[:3] == ['omarchy', 'pkg', 'add'] and call[3] in ('easyeffects', 'lsp-plugins-lv2')
                              for call in self.calls()))
+        self.assertIn(['systemctl', '--user', 'enable', '--now', 'easyeffects.service'], self.calls())
+        self.assertFalse(any(call == ['systemctl', '--user', 'try-restart', 'easyeffects.service'] for call in self.calls()))
+        self.assertFalse((self.root / 'home/.local/state/groundwork/easyeffects-restart-needed').exists())
 
     def test_easyeffects_refuses_a_symlink_unit(self):
         unit_dir = self.root / 'home/.config/systemd/user'
@@ -1870,6 +1880,29 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertIn(['systemctl', '--user', 'enable', 'groundwork-screen-share.service'], self.calls())
         self.assertFalse((self.root / 'home/.config/easyeffects').exists())
         self.assertNotIn('easyeffects', json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text()))
+        self.assertFalse((self.root / 'home/.local/state/groundwork/easyeffects-restart-needed').exists())
+
+    def test_easyeffects_retries_a_failed_restart_on_the_next_run(self):
+        # Protects: a replaced unit whose try-restart failed is retried even
+        # after the file already matches.
+        unit_dir = self.root / 'home/.config/systemd/user'
+        unit_dir.mkdir(parents=True)
+        (unit_dir / 'easyeffects.service').write_text('[Unit]\nDescription=user owned\n')
+        self.env['FIXTURE_EASYEFFECTS_TRY_RESTART_STATUS'] = '1'
+        result = self.run_install()
+        marker = self.root / 'home/.local/state/groundwork/easyeffects-restart-needed'
+        self.assertTrue(marker.is_file())
+        self.assertIn('Restart its user service from a desktop session', result.stdout)
+        self.assertIn('systemctl --user try-restart easyeffects.service', result.stdout)
+        (self.root / 'calls.jsonl').unlink()
+        del self.env['FIXTURE_EASYEFFECTS_TRY_RESTART_STATUS']
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(['systemctl', '--user', 'try-restart', 'easyeffects.service'], self.calls())
+        self.assertIn(['systemctl', '--user', 'enable', '--now', 'easyeffects.service'], self.calls())
+        self.assertFalse(any(call[:3] == ['omarchy', 'pkg', 'add'] and call[3] in ('easyeffects', 'lsp-plugins-lv2')
+                             for call in self.calls()))
+        self.assertFalse(marker.exists())
 
     def seed_honeykrisp_icd(self):
         icd = self.root / 'usr/share/vulkan/icd.d'

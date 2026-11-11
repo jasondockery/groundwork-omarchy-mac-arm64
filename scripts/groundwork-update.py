@@ -401,7 +401,8 @@ def register_doctor(source):
     atomic_write(command, launcher, 0o755, owned=True)
 
 
-MARKERS = {'ufw-screen-share-rule', 'syncthing-pending', 't3-cli-switched'}
+MARKERS = {'ufw-screen-share-rule', 'syncthing-pending', 't3-cli-switched',
+           'easyeffects-restart-needed'}
 STOP_SIGNALS = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
 
 
