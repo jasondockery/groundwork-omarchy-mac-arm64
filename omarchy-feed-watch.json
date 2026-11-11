@@ -197,6 +197,32 @@
         "checked": "2026-10-31",
         "recheck": "2026-11-30"
       }
+    },
+    {
+      "id": "easyeffects",
+      "name": "EasyEffects",
+      "doc": "docs/apps/easyeffects.md",
+      "groundwork_method": "omarchy pkg add easyeffects and lsp-plugins-lv2, then Groundwork's user unit (decision 0024)",
+      "probe": {
+        "command": "easyeffects"
+      },
+      "candidates": [
+        {
+          "package": "easyeffects",
+          "repo": "omarchy"
+        }
+      ],
+      "installer_keywords": [
+        "easyeffects",
+        "equalizer"
+      ],
+      "offer": "Omarchy now ships EasyEffects. Compare it with the Groundwork user unit and empty pipeline in decision 0024 before moving.",
+      "self_install": {
+        "needed": true,
+        "evidence": "No omarchy package or omarchy-install-* for EasyEffects on 2026-11-11. Arch Linux ARM extra had easyeffects 8.3.2-1 and lsp-plugins-lv2 1.2.37-1 for aarch64 (decision 0024).",
+        "checked": "2026-11-11",
+        "recheck": "2026-12-11"
+      }
     }
   ],
   "not_watched": {

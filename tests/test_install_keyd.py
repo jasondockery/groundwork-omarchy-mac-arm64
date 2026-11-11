@@ -543,6 +543,14 @@ elif name == 'omarchy':
         target = root / 'bin' / 'syncthing'
         if not target.exists():
             target.symlink_to(root / 'bin' / 'stub')
+    if args[:3] == ['pkg', 'add', 'easyeffects']:
+        target = root / 'bin' / 'easyeffects'
+        if not target.exists():
+            target.symlink_to(root / 'bin' / 'stub')
+    if args[:3] == ['pkg', 'add', 'lsp-plugins-lv2']:
+        dest = root / 'usr/lib/lv2/http_lsp-plug.in_plugins_lv2_para_equalizer_x16_stereo.lv2'
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / 'manifest.ttl').write_text('# fixture\\n')
     if args[:2] == ['pkg', 'add'] and os.environ.get('FIXTURE_MATERIALIZE_ADDED') == '1' and len(args) > 2:
         mapping = {'openssh': 'ssh', 'cursor-bin': 'cursor', 'libnotify': 'notify-send', 'wl-clipboard': 'wl-copy', 'xdg-utils': 'xdg-open'}
         executable = mapping.get(args[2], args[2])
@@ -924,6 +932,15 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertLess(package, enable)
         self.assertLess(enable, reload)
         self.assertIn(['omarchy', 'pkg', 'add', 'wayvnc'], calls)
+        self.assertIn(['omarchy', 'pkg', 'add', 'easyeffects'], calls)
+        self.assertIn(['omarchy', 'pkg', 'add', 'lsp-plugins-lv2'], calls)
+        self.assertLess(calls.index(['omarchy', 'pkg', 'add', 'easyeffects']),
+                        calls.index(['omarchy', 'pkg', 'add', 'lsp-plugins-lv2']))
+        self.assertIn(['systemctl', '--user', 'enable', '--now', 'easyeffects.service'], calls)
+        unit = self.root / 'home/.config/systemd/user/easyeffects.service'
+        self.assertEqual(unit.read_text(), (REPO / 'config/easyeffects.service').read_text())
+        self.assertFalse((self.root / 'home/.config/easyeffects').exists())
+        self.assertNotIn('easyeffects', json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text()))
         self.assertIn(['systemctl', '--user', 'enable', 'groundwork-screen-share.service'], calls)
         self.assertIn(['sudo', 'ufw', 'allow', 'in', 'on', 'tailscale0', 'to', 'any', 'port', '5900', 'proto', 'tcp', 'comment', 'Groundwork screen sharing'], calls)
 
@@ -1103,6 +1120,7 @@ raise SystemExit(os.WEXITSTATUS(status))
                               (('--with-local-inference', '--without-local-inference'), False),
                               (('--with-git-filter-repo', '--without-git-filter-repo'), False),
                               (('--with-tmp-on-disk', '--without-tmp-on-disk'), False),
+                              (('--with-easyeffects', '--without-easyeffects'), False),
                               (('--help',), True)]:
             with self.subTest(args=args):
                 self.run_install(*args, success=success)
@@ -1761,6 +1779,59 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertIn('--without-blip', result.stdout)
         self.assertIn('--with-local-inference', result.stdout)
         self.assertIn('--without-local-inference', result.stdout)
+        self.assertIn('--with-easyeffects', result.stdout)
+        self.assertIn('--without-easyeffects', result.stdout)
+
+    def test_without_easyeffects_records_off_and_leaves_an_existing_unit_alone(self):
+        unit_dir = self.root / 'home/.config/systemd/user'
+        unit_dir.mkdir(parents=True)
+        unit = unit_dir / 'easyeffects.service'
+        unit.write_text('[Unit]\nDescription=user owned\n')
+        result = self.run_install('--without-easyeffects')
+        self.assertIn('Skipped EasyEffects setup', result.stdout)
+        self.assertEqual(unit.read_text(), '[Unit]\nDescription=user owned\n')
+        self.assertFalse(any(call[:3] == ['omarchy', 'pkg', 'add'] and call[3] in ('easyeffects', 'lsp-plugins-lv2')
+                             for call in self.calls()))
+        self.assertFalse(any(call[0] == 'systemctl' and 'easyeffects.service' in call for call in self.calls()))
+        saved = json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())
+        self.assertIs(saved['easyeffects'], False)
+
+    def test_easyeffects_opt_in_after_opt_out_installs_and_drops_the_saved_key(self):
+        self.run_install('--without-easyeffects')
+        (self.root / 'calls.jsonl').unlink()
+        result = self.run_install('--with-easyeffects')
+        self.assertIn(['omarchy', 'pkg', 'add', 'easyeffects'], self.calls())
+        self.assertIn(['omarchy', 'pkg', 'add', 'lsp-plugins-lv2'], self.calls())
+        self.assertIn(['systemctl', '--user', 'enable', '--now', 'easyeffects.service'], self.calls())
+        self.assertIn('sound stays uncolored', result.stdout.lower())
+        saved = json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())
+        self.assertNotIn('easyeffects', saved)
+
+    def test_easyeffects_backs_up_a_different_existing_unit(self):
+        unit_dir = self.root / 'home/.config/systemd/user'
+        unit_dir.mkdir(parents=True)
+        unit = unit_dir / 'easyeffects.service'
+        unit.write_text('[Unit]\nDescription=user owned\n')
+        self.run_install()
+        self.assertEqual(unit.read_text(), (REPO / 'config/easyeffects.service').read_text())
+        self.assertEqual((unit_dir / 'easyeffects.service.bak-omarchy-groundwork').read_text(),
+                         '[Unit]\nDescription=user owned\n')
+
+    def test_easyeffects_update_skips_packages_when_present(self):
+        self.run_install()
+        (self.root / 'calls.jsonl').unlink()
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(any(call[:3] == ['omarchy', 'pkg', 'add'] and call[3] in ('easyeffects', 'lsp-plugins-lv2')
+                             for call in self.calls()))
+
+    def test_easyeffects_refuses_a_symlink_unit(self):
+        unit_dir = self.root / 'home/.config/systemd/user'
+        unit_dir.mkdir(parents=True)
+        (unit_dir / 'easyeffects.service').symlink_to('/tmp/private-easyeffects.service')
+        result = self.run_install(success=False)
+        self.assertIn('Refusing to replace a symlink', result.stderr)
+        self.assertTrue((unit_dir / 'easyeffects.service').is_symlink())
 
     def seed_honeykrisp_icd(self):
         icd = self.root / 'usr/share/vulkan/icd.d'

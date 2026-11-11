@@ -28,6 +28,6 @@ This is the reference machine. Nothing in `packages/` or `install.sh` depends on
 |---|---|---|
 | `scratch_dirs` | One name, kept on the machine, not in this repo | Per-user build and test scratch on disk under `~/.cache`, so large temporary trees use neither RAM nor a synced folder ([decision 0022](../decisions/0022-tmp-on-disk.md)). |
 
-`/tmp` on disk is the default, so `tmp_on_disk` is not set here.
+`/tmp` on disk is the default, so `tmp_on_disk` is not set here. EasyEffects is also the default, so `easyeffects` is not set here. Per-output presets for a Bluetooth speaker stay in `~/.config/easyeffects/` on the machine, not in this file.
 
 Add another Apple Silicon Mac as a new file in this directory. Do not put its host name, Wi-Fi name, or Tailscale address in the file.
