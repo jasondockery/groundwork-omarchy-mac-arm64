@@ -73,7 +73,9 @@ class BraveInstallTests(unittest.TestCase):
             # sandbox (test_t3_install covers that). Start with a checked app in place.
             base.InstallKeydTests.seed_checked_t3_app(self)
         for name in ('pacman', 'omarchy-install-browser', 'omarchy-remove-browser', 'omarchy-default-browser'):
-            (self.bin / name).symlink_to(self.bin / 'stub')
+            path = self.bin / name
+            if not path.exists():
+                path.symlink_to(self.bin / 'stub')
         # The launch check opens a window, so it needs this user's Wayland
         # socket. A bound, closed socket file is enough for the fixture.
         wayland_socket(self.root / 'runtime' / 'wayland-fixture')

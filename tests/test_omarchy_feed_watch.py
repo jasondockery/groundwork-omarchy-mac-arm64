@@ -525,6 +525,14 @@ class TableTests(unittest.TestCase):
         self.assertNotIn('migration_id', cursor)
         self.assertIn('manual', cursor['offer'])
 
+    def test_easyeffects_watches_the_omarchy_package_not_arch_extra(self):
+        easyeffects = {app['id']: app for app in watch.load_table(TABLE)}['easyeffects']
+        self.assertEqual(easyeffects['candidates'], [{'package': 'easyeffects'}])
+        self.assertEqual(easyeffects['installer_keywords'], ['easyeffects'])
+        self.assertTrue(easyeffects['self_install']['needed'])
+        self.assertIn('decision 0024', easyeffects['self_install']['evidence'])
+        self.assertEqual(easyeffects['doc'], 'docs/apps/easyeffects.md')
+
     def test_shellcheck_is_watched_for_a_repository_package_and_lsof_is_not(self):
         table = json.loads(TABLE.read_text())
         shellcheck = {app['id']: app for app in watch.load_table(TABLE)}['shellcheck']

@@ -18,6 +18,9 @@
 # lsof and shellcheck are not listed: setup and update-all install them as
 # default host tools (shellcheck from the AUR's shellcheck-bin, because no
 # aarch64 repo builds it). See docs/decisions/0021-default-host-tools.md.
+# EasyEffects is not listed: setup and update-all install extra/easyeffects
+# and lsp-plugins-lv2, then enable a Groundwork user unit (decision 0024).
+# See docs/apps/easyeffects.md.
 
 # Apply this repo, and Caps Lock tap/hold.
 stow

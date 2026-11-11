@@ -181,6 +181,27 @@
       }
     },
     {
+      "id": "easyeffects",
+      "name": "EasyEffects",
+      "doc": "docs/apps/easyeffects.md",
+      "groundwork_method": "omarchy pkg add easyeffects and lsp-plugins-lv2, then Groundwork's user unit for the next graphical login (decision 0024)",
+      "candidates": [
+        {
+          "package": "easyeffects"
+        }
+      ],
+      "installer_keywords": [
+        "easyeffects"
+      ],
+      "offer": "Omarchy now ships EasyEffects. Compare that path with the Groundwork user unit in docs/apps/easyeffects.md before moving. Nothing here writes ~/.config/easyeffects.",
+      "self_install": {
+        "needed": true,
+        "evidence": "No omarchy-install-easyeffects on PATH on 2026-11-11. pacman -Si easyeffects is Arch extra, not the omarchy repo. Groundwork already uses omarchy pkg add for extra/easyeffects and owns only the user unit (decision 0024). The omarchy/easyeffects candidate is the watch for an Omarchy-owned package.",
+        "checked": "2026-11-11",
+        "recheck": "2026-12-11"
+      }
+    },
+    {
       "id": "wayvnc",
       "name": "Desktop sharing (WayVNC)",
       "doc": "docs/apps/screen-sharing.md",

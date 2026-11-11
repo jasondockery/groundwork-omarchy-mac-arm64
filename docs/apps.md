@@ -1,6 +1,6 @@
 # Desktop apps and personal notes
 
-`./install.sh` ensures Obsidian, the Bitwarden CLI (`bw`), the Bitwarden desktop app, and FreeTube are available alongside T3 Code Nightly, Herdr, and Tailscale. It offers Brave through Omarchy's browser installer and registers the official Bitwarden extension for installed Chromium. Omarchy (`omacom/omarchy` `quattro`) continues to own desktop bindings and application updates, including the Qt 6.12 palette fix [omarchy#14553](https://github.com/omacom/omarchy/pull/14553) on this path. Account sign-in, extension approval, and sync enrollment stay local to each user.
+`./install.sh` ensures Obsidian, the Bitwarden CLI (`bw`), the Bitwarden desktop app, FreeTube, and EasyEffects are available alongside T3 Code Nightly, Herdr, and Tailscale. It offers Brave through Omarchy's browser installer and registers the official Bitwarden extension for installed Chromium. Omarchy (`omacom/omarchy` `quattro`) continues to own desktop bindings and application updates, including the Qt 6.12 palette fix [omarchy#14553](https://github.com/omacom/omarchy/pull/14553) on this path. Account sign-in, extension approval, and sync enrollment stay local to each user.
 
 ## Brave
 
@@ -98,6 +98,21 @@ Launch **FreeTube** from `Super+Space`, or run `flatpak run io.freetubeapp.FreeT
 That is the Flatpak path from [FreeTube's data-location guide](https://docs.freetubeapp.io/usage/data-location/). `profiles.db`, `settings.db`, `playlists.db`, and `history.db` live there. Setup leaves that directory to FreeTube. Cross-machine sync of it is a separate task.
 
 `update-all` updates this user Flatpak when it is installed. To remove the app, run `flatpak --user uninstall io.freetubeapp.FreeTube`. Leave the data directory in place unless you mean to delete subscriptions and history.
+
+## EasyEffects
+
+EasyEffects is the equalizer for PipeWire output, including Bluetooth speakers. Setup installs it by default with `omarchy pkg add easyeffects` and `omarchy pkg add lsp-plugins-lv2`. `lsp-plugins-lv2` is optional in the Arch package and required for the equalizer. A copy that is already installed stays; `omarchy pkg add` is a no-op then, and this layer becomes the source of truth.
+
+Omarchy's bar is Quickshell, not Waybar. EasyEffects 8.x (Qt) shows a tray icon only while its background service is running. Setup enables `groundwork-easyeffects.service` for the next desktop login and does not start or restart the process during apply, so a live audio session is left alone. It never writes `~/.config/easyeffects` or presets.
+
+After the next login, open **EasyEffects** from `Super+Space` to choose a preset. The window talks to the running service. `--without-easyeffects` records the preference as off and leaves an existing install, unit, and config alone. To stop a unit that was already enabled:
+
+```bash
+./install.sh --without-easyeffects
+systemctl --user disable --now groundwork-easyeffects.service
+```
+
+Leave `~/.config/easyeffects` in place unless you mean to delete presets. Package removal is `omarchy pkg drop easyeffects lsp-plugins-lv2` and is a separate choice. Agent rules: [EasyEffects](apps/easyeffects.md). Decision: [0024](decisions/0024-easyeffects-default-eq.md).
 
 ## Obsidian and the Markdown folder
 

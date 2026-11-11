@@ -494,7 +494,8 @@ class UpdateTests(unittest.TestCase):
         for name in ('seed-obsidian.py', 'groundwork-screen-share.py',
                      'groundwork-syncthing.py', 'omarchy-plugins.py',
                      'groundwork-node-pin.py', 'groundwork-commit-guard.py',
-                     'groundwork-tmp.py', 'groundwork-storage.py'):
+                     'groundwork-tmp.py', 'groundwork-storage.py',
+                     'groundwork-easyeffects.py'):
             (self.seed / 'scripts' / name).write_text('# fixture\n')
         dropin = self.seed / 'config'
         dropin.mkdir()
@@ -586,6 +587,16 @@ class UpdateTests(unittest.TestCase):
         updater.register(str(self.source), '0', '0', vault, '0', '0', '', '0', '1')
         self.assertNotIn('tmp_on_disk', json.loads(self.config.read_text()))
         self.assertTrue(updater.tmp_on_disk_enabled(updater.settings()))
+
+    def test_easyeffects_opt_out_is_saved_and_opting_back_in_removes_it(self):
+        # Decision 0024: only the opt-out is stored; on is the default.
+        vault = str(self.home / 'Notes')
+        updater.register(str(self.source), '0', '0', vault, '0', '0', '', '0', '1', '0')
+        self.assertIs(json.loads(self.config.read_text())['easyeffects'], False)
+        self.assertFalse(updater.easyeffects_enabled(updater.settings()))
+        updater.register(str(self.source), '0', '0', vault, '0', '0', '', '0', '1', '1')
+        self.assertNotIn('easyeffects', json.loads(self.config.read_text()))
+        self.assertTrue(updater.easyeffects_enabled(updater.settings()))
 
     def test_failed_keyd_copy_and_newer_candidate_keep_both_retry_boundaries_recoverable(self):
         installed = self.root / 'installed-keyd.conf'

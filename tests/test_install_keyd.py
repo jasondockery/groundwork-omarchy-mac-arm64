@@ -543,6 +543,15 @@ elif name == 'omarchy':
         target = root / 'bin' / 'syncthing'
         if not target.exists():
             target.symlink_to(root / 'bin' / 'stub')
+    if args[:3] == ['pkg', 'add', 'easyeffects']:
+        target = root / 'bin' / 'easyeffects'
+        if not target.exists():
+            target.symlink_to(root / 'bin' / 'stub')
+        (root / 'pacman-installed').mkdir(exist_ok=True)
+        (root / 'pacman-installed' / 'easyeffects.version').write_text('8.3.2-1\\n')
+    if args[:3] == ['pkg', 'add', 'lsp-plugins-lv2']:
+        (root / 'pacman-installed').mkdir(exist_ok=True)
+        (root / 'pacman-installed' / 'lsp-plugins-lv2.version').write_text('1.2.25-1\\n')
     if args[:2] == ['pkg', 'add'] and os.environ.get('FIXTURE_MATERIALIZE_ADDED') == '1' and len(args) > 2:
         mapping = {'openssh': 'ssh', 'cursor-bin': 'cursor', 'libnotify': 'notify-send', 'wl-clipboard': 'wl-copy', 'xdg-utils': 'xdg-open'}
         executable = mapping.get(args[2], args[2])
@@ -577,7 +586,7 @@ class InstallKeydTests(unittest.TestCase):
         stub = self.bin / 'stub'
         stub.write_text(STUB)
         stub.chmod(0o755)
-        for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'omarchy-install-dev-env', 'omarchy-remove-dev-env', 'stow', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw', 'getconf', 'readelf', 'syncthing', 'loginctl', 'stat', 'lsof', 'shellcheck',
+        for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'omarchy-install-dev-env', 'omarchy-remove-dev-env', 'stow', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw', 'getconf', 'readelf', 'syncthing', 'loginctl', 'stat', 'lsof', 'shellcheck', 'pacman',
                      'omarchy-install-ai-t3-code'):
             (self.bin / name).symlink_to(stub)
         (self.bin / 'git').symlink_to(host_tool('git'))
@@ -924,6 +933,15 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertLess(package, enable)
         self.assertLess(enable, reload)
         self.assertIn(['omarchy', 'pkg', 'add', 'wayvnc'], calls)
+        self.assertIn(['omarchy', 'pkg', 'add', 'easyeffects'], calls)
+        self.assertIn(['omarchy', 'pkg', 'add', 'lsp-plugins-lv2'], calls)
+        self.assertIn(['systemctl', '--user', 'enable', 'groundwork-easyeffects.service'], calls)
+        self.assertNotIn(['systemctl', '--user', 'start', 'groundwork-easyeffects.service'], calls)
+        self.assertNotIn(['systemctl', '--user', 'restart', 'groundwork-easyeffects.service'], calls)
+        unit = (self.root / 'home/.config/systemd/user/groundwork-easyeffects.service').read_text()
+        self.assertIn('--hide-window --service-mode', unit)
+        self.assertNotIn('--gapplication-service', unit)
+        self.assertNotIn('easyeffects', json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text()))
         self.assertIn(['systemctl', '--user', 'enable', 'groundwork-screen-share.service'], calls)
         self.assertIn(['sudo', 'ufw', 'allow', 'in', 'on', 'tailscale0', 'to', 'any', 'port', '5900', 'proto', 'tcp', 'comment', 'Groundwork screen sharing'], calls)
 
@@ -1103,6 +1121,7 @@ raise SystemExit(os.WEXITSTATUS(status))
                               (('--with-local-inference', '--without-local-inference'), False),
                               (('--with-git-filter-repo', '--without-git-filter-repo'), False),
                               (('--with-tmp-on-disk', '--without-tmp-on-disk'), False),
+                              (('--with-easyeffects', '--without-easyeffects'), False),
                               (('--help',), True)]:
             with self.subTest(args=args):
                 self.run_install(*args, success=success)
@@ -1761,6 +1780,43 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertIn('--without-blip', result.stdout)
         self.assertIn('--with-local-inference', result.stdout)
         self.assertIn('--without-local-inference', result.stdout)
+        self.assertIn('--with-easyeffects', result.stdout)
+        self.assertIn('--without-easyeffects', result.stdout)
+
+    def test_easyeffects_opt_out_leaves_install_unit_and_config_alone(self):
+        preset = self.root / 'home/.config/easyeffects/output/keep.json'
+        preset.parent.mkdir(parents=True)
+        preset.write_text('{"user": "preset"}\n')
+        result = self.run_install('--without-easyeffects')
+        self.assertIn('Skipped EasyEffects setup', result.stdout)
+        self.assertNotIn(['omarchy', 'pkg', 'add', 'easyeffects'], self.calls())
+        self.assertNotIn(['omarchy', 'pkg', 'add', 'lsp-plugins-lv2'], self.calls())
+        self.assertFalse(any('groundwork-easyeffects.service' in call for call in self.calls()))
+        self.assertFalse((self.root / 'home/.config/systemd/user/groundwork-easyeffects.service').exists())
+        self.assertEqual(preset.read_text(), '{"user": "preset"}\n')
+        self.assertIs(json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())['easyeffects'], False)
+
+    def test_easyeffects_already_present_still_adds_and_leaves_presets(self):
+        (self.bin / 'easyeffects').symlink_to(self.bin / 'stub')
+        preset = self.root / 'home/.config/easyeffects/irs/keep.irs'
+        preset.parent.mkdir(parents=True)
+        preset.write_text('keep\n')
+        self.run_install()
+        self.assertIn(['omarchy', 'pkg', 'add', 'easyeffects'], self.calls())
+        self.assertIn(['omarchy', 'pkg', 'add', 'lsp-plugins-lv2'], self.calls())
+        self.assertTrue((self.root / 'home/.config/systemd/user/groundwork-easyeffects.service').is_file())
+        self.assertEqual(preset.read_text(), 'keep\n')
+        self.assertNotIn('easyeffects', json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text()))
+
+    def test_easyeffects_update_skips_pkg_add_when_present(self):
+        self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn(['omarchy', 'pkg', 'add', 'easyeffects'], self.calls())
+        self.assertNotIn(['omarchy', 'pkg', 'add', 'lsp-plugins-lv2'], self.calls())
+        self.assertIn(['systemctl', '--user', 'enable', 'groundwork-easyeffects.service'], self.calls())
+        self.assertNotIn(['systemctl', '--user', 'start', 'groundwork-easyeffects.service'], self.calls())
+        self.assertIn('sudo was not used', result.stdout)
 
     def seed_honeykrisp_icd(self):
         icd = self.root / 'usr/share/vulkan/icd.d'

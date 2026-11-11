@@ -116,7 +116,8 @@ class MigrationOfferTests(unittest.TestCase):
     def feed_has_native_bitwarden(self, align='0x10000'):
         # pacman -Si bitwarden succeeds, and omarchy pkg add installs a package
         # whose ELF files report this LOAD alignment (0x10000 loads on 16 KiB pages).
-        (self.bin / 'pacman').symlink_to(self.bin / 'stub')
+        if not (self.bin / 'pacman').exists():
+            (self.bin / 'pacman').symlink_to(self.bin / 'stub')
         self.env.update(FIXTURE_FEED='bitwarden', FIXTURE_LOAD_ALIGN=align)
 
     def seed_native_bitwarden_package(self):
@@ -198,7 +199,8 @@ class MigrationOfferTests(unittest.TestCase):
         self.assertFalse((self.bin / 'bitwarden').exists())
 
     def test_no_native_package_keeps_the_flatpak_and_offers_nothing(self):
-        (self.bin / 'pacman').symlink_to(self.bin / 'stub')
+        if not (self.bin / 'pacman').exists():
+            (self.bin / 'pacman').symlink_to(self.bin / 'stub')
         data = self.seed_bitwarden_flatpak()
         result = self.run_install('--migrate-to-omarchy-installers')
         self.assert_not_migrated()
@@ -562,7 +564,8 @@ class CursorNoticeTests(unittest.TestCase):
     run_install = MigrationOfferTests.run_install
 
     def feed(self, owned):
-        (self.bin / 'pacman').symlink_to(self.bin / 'stub')
+        if not (self.bin / 'pacman').exists():
+            (self.bin / 'pacman').symlink_to(self.bin / 'stub')
         self.env['FIXTURE_FEED'] = 'cursor-bin'
         if owned:
             (self.root / 'pacman-owned').write_text(str(self.bin / 'cursor') + ' cursor-bin\n')

@@ -51,6 +51,7 @@ MANAGED = [
     ('cursor', 'pacman'),
     ('bw', 'pacman'),
     ('obsidian', 'pacman'),
+    ('easyeffects', 'pacman'),
 ]
 # Installers that source an env script instead of writing the directory.
 ENV_SCRIPTS = {'.cargo/bin': '.cargo/env'}
