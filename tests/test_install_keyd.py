@@ -341,6 +341,8 @@ elif name == 'systemctl':
     if args[:1] == ['--user'] and args[-1:] == ['syncthing.service'] and 'is-active' in args:
         # Not serving yet unless a test says otherwise.
         sys.exit(0 if os.environ.get('FIXTURE_SYNCTHING_ACTIVE') == '1' else 3)
+    if os.environ.get('FIXTURE_EASYEFFECTS_SYSTEMCTL_STATUS') and args[:1] == ['--user'] and 'easyeffects.service' in args:
+        sys.exit(int(os.environ['FIXTURE_EASYEFFECTS_SYSTEMCTL_STATUS']))
     if args == ['is-enabled', 'tmp.mount']:
         unit = root / 'etc/systemd/system/tmp.mount'
         if unit.is_symlink() and os.readlink(unit) == '/dev/null':
@@ -548,7 +550,7 @@ elif name == 'omarchy':
         if not target.exists():
             target.symlink_to(root / 'bin' / 'stub')
     if args[:3] == ['pkg', 'add', 'lsp-plugins-lv2']:
-        dest = root / 'usr/lib/lv2/http_lsp-plug.in_plugins_lv2_para_equalizer_x16_stereo.lv2'
+        dest = root / 'usr/lib/lv2/lsp-plugins.lv2'
         dest.mkdir(parents=True, exist_ok=True)
         (dest / 'manifest.ttl').write_text('# fixture\\n')
     if args[:2] == ['pkg', 'add'] and os.environ.get('FIXTURE_MATERIALIZE_ADDED') == '1' and len(args) > 2:
@@ -940,6 +942,7 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertFalse(any(call == ['systemctl', '--user', 'try-restart', 'easyeffects.service'] for call in calls))
         unit = self.root / 'home/.config/systemd/user/easyeffects.service'
         self.assertEqual(unit.read_text(), (REPO / 'config/easyeffects.service').read_text())
+        self.assertTrue((self.root / 'usr/lib/lv2/lsp-plugins.lv2/manifest.ttl').exists())
         self.assertFalse((self.root / 'home/.config/easyeffects').exists())
         self.assertNotIn('easyeffects', json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text()))
         self.assertIn(['systemctl', '--user', 'enable', 'groundwork-screen-share.service'], calls)
@@ -1852,6 +1855,21 @@ raise SystemExit(os.WEXITSTATUS(status))
         result = self.run_install(success=False)
         self.assertIn('Refusing to replace a symlink', result.stderr)
         self.assertTrue((unit_dir / 'easyeffects.service').is_symlink())
+
+    def test_easyeffects_continues_when_the_user_bus_is_missing(self):
+        # Protects: SSH without a desktop still copies the unit and packages,
+        # then prints the enable command instead of failing setup.
+        self.env['FIXTURE_EASYEFFECTS_SYSTEMCTL_STATUS'] = '1'
+        result = self.run_install()
+        self.assertIn(['omarchy', 'pkg', 'add', 'easyeffects'], self.calls())
+        self.assertIn(['omarchy', 'pkg', 'add', 'lsp-plugins-lv2'], self.calls())
+        unit = self.root / 'home/.config/systemd/user/easyeffects.service'
+        self.assertEqual(unit.read_text(), (REPO / 'config/easyeffects.service').read_text())
+        self.assertIn('Enable its user service from a desktop session', result.stdout)
+        self.assertIn('systemctl --user enable --now easyeffects.service', result.stdout)
+        self.assertIn(['systemctl', '--user', 'enable', 'groundwork-screen-share.service'], self.calls())
+        self.assertFalse((self.root / 'home/.config/easyeffects').exists())
+        self.assertNotIn('easyeffects', json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text()))
 
     def seed_honeykrisp_icd(self):
         icd = self.root / 'usr/share/vulkan/icd.d'
