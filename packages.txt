@@ -1,6 +1,6 @@
 # Optional aarch64 packages. Not part of the Omarchy Mac install, and no script
 # installs from this list. The normal
-# ./install.sh setup installs Herdr, Tailscale, keyd, Obsidian, Bitwarden, and FreeTube;
+# ./install.sh setup installs Herdr, Tailscale, keyd, Obsidian, Bitwarden, FreeTube, and EasyEffects;
 # its desktop uses Flathub on ARM when a native app is absent. See docs/apps.md.
 # Brave is not listed here. setup runs `omarchy-install-browser brave` (AUR
 # brave-bin) when that installer exists. Chromium stays an Omarchy base package.
@@ -37,6 +37,12 @@ bitwarden-cli
 
 # Desktop sharing is installed by default. See docs/remote-access.md.
 wayvnc
+
+# EasyEffects is installed by default, with lsp-plugins-lv2 for the equalizer.
+# See docs/decisions/0024-easyeffects-equalizer.md.
+#   ./install.sh --without-easyeffects
+easyeffects
+lsp-plugins-lv2
 
 # Local inference is not installed by a normal setup. Both packages are required
 # together; the base ollama package strips its Vulkan libraries. See docs/local-inference.md.

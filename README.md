@@ -24,7 +24,7 @@ less install.sh
 
 For an existing checkout, use `git status` and review local edits before updating it; do not clone over it or reset it. Public HTTPS clones need no GitHub login. For a private copy, use an authorized account or your chosen SSH host alias/key instead. The installer does not configure GitHub credentials. `./install.sh` checks out the pinned `core` submodule; a separate recursive clone is unnecessary.
 
-The default installs T3 Code Nightly (through Omarchy's own installer), Herdr, Tailscale, keyd, Obsidian, Bitwarden (desktop and CLI), and FreeTube, starts `tailscaled` and keyd, applies the trackpad preferences, and makes Caps Lock Escape on tap and Control while held. Different existing input/keyd files are backed up. `--without-keyd` skips keyd setup. Omarchy continues to own the desktop shortcuts, tmux, shell, editor, and terminal configuration. T3 Code and agent providers still need your local authentication. Follow the [desktop apps guide](docs/apps.md) for Bitwarden sign-in, the local Obsidian vault, previous plugin choices, and free cross-platform sync. Existing notes are never moved automatically.
+The default installs T3 Code Nightly (through Omarchy's own installer), Herdr, Tailscale, keyd, Obsidian, Bitwarden (desktop and CLI), FreeTube, and EasyEffects (with `lsp-plugins-lv2` for the equalizer), starts `tailscaled` and keyd, applies the trackpad preferences, and makes Caps Lock Escape on tap and Control while held. Different existing input/keyd files are backed up. `--without-keyd` skips keyd setup. `--without-easyeffects` skips EasyEffects and leaves an existing install and user unit alone. EasyEffects starts with an empty pipeline, so sound stays uncolored until you add a preset. Omarchy continues to own the desktop shortcuts, tmux, shell, editor, and terminal configuration. T3 Code and agent providers still need your local authentication. Follow the [desktop apps guide](docs/apps.md) for Bitwarden sign-in, the local Obsidian vault, previous plugin choices, EasyEffects per-output presets, and free cross-platform sync. Existing notes are never moved automatically.
 
 WayVNC screen sharing is also configured automatically. It starts with the logged-in desktop and listens only on the current online Tailscale address. Show its generated password locally with `groundwork-screen-share password`, then connect from the Mac's Screen Sharing app using `vnc://MACHINE`. On that virtual keyboard, Command follows Omarchy's Super bindings and Option follows the Alt bindings. Follow [desktop-sharing setup](docs/remote-access.md#automatic-desktop-sharing) for the port grant, modifier check, acceptance, and recovery. `--without-screen-sharing` skips it without disabling an existing service. Tailscale sign-in and OS login remain local steps.
 
@@ -64,6 +64,7 @@ Only enable SSH after reviewing that guide and your effective tailnet policy. No
 - Launch Bitwarden from the app menu and finish sign-in/MFA. Restart Chromium to load the registered official extension, approve/enable it if prompted in each profile, and test autofill. `bw --version` checks CLI availability; it does not prove vault sign-in. A new install uses Omarchy's `bitwarden` package when the feed has it and it passes setup's checks, and otherwise the user Flatpak. User Flatpak updates use `flatpak --user update` separately from Omarchy updates.
 - When setup installed Brave and its launch check passed, setup made it the default (it opens a Brave window with a throwaway profile for a few seconds to check), and `omarchy default browser` prints `brave`. Open one page, then `brave://policy`, and confirm the groundwork-core rows. Approve Bitwarden if Brave offers it. Open one web app with `omarchy-launch-webapp` and confirm it opens in Brave; a sign-in that exists only in Chromium stays in Chromium. Chromium itself stays installed. If Brave failed the page-size or launch check, Chromium remains the default and setup says so. See the [apps guide](docs/apps.md#brave).
 - Launch FreeTube from the app menu. It opens with upstream defaults. Subscriptions and history stay in `~/.var/app/io.freetubeapp.FreeTube/config/FreeTube`. See the [apps guide](docs/apps.md).
+- Launch Easy Effects from `Super+Space`. Playback should match the output device with no coloring until you add a plugin. Setup enables the user unit `groundwork-easyeffects.service` for the next desktop login and does not start it during apply. Do not also enable the in-app autostart. For a Bluetooth speaker, save a preset and bind it on the Autoload page. See the [apps guide](docs/apps.md#easyeffects).
 - From another approved computer in the same tailnet, run `ssh LOCAL_USER@MACHINE` using this machine's local login and MagicDNS name. Confirm the hostname and attach to tmux or Herdr. Test the reverse direction too using the destination's supported SSH setup.
 - From a Mac, connect to `vnc://MACHINE` with the generated local VNC password. Verify the screen and input, including after logout/login or reboot. Command+1 selects a workspace, and Option+1 selects a multiplexer window. Tailscale visibility alone does not prove a desktop server is running or permitted by policy.
 - If you passed `--with-blip`, finish on the desktop with the printed `blip-setup` command and the checks in [iMessage setup](docs/imessage.md). Send the first test message only to your own number.
@@ -171,14 +172,15 @@ An installed updater that cannot take over (one from before this hand-off) is
 left for the next run, and this run finishes with the code it started with.
 
 For only repository configuration, run `groundwork-update`. It preserves saved
-keyd, screen-sharing, Blip, and Obsidian vault choices and does not request routine
+keyd, screen-sharing, Blip, EasyEffects, and Obsidian vault choices and does not request routine
 system or app upgrades. It installs and retires listed shell plugins and leaves
 existing plugin checkouts at their current revisions. It can install a newly declared missing tool needed by
 the settings. Use `./install.sh` with explicit `--with-keyd`, `--without-keyd`,
 `--with-screen-sharing`, `--without-screen-sharing`, `--with-blip`,
 `--without-blip`, `--with-local-inference`, `--without-local-inference`,
 `--with-git-filter-repo`, `--without-git-filter-repo`, `--with-tmp-on-disk`,
-or `--without-tmp-on-disk` when changing those preferences. Skipping an existing feature
+`--without-tmp-on-disk`, `--with-easyeffects`, or `--without-easyeffects` when changing those
+preferences. Skipping an existing feature
 does not disable its service or remove Blip.
 
 When an app this layer manages was installed another way than Omarchy's own
@@ -335,7 +337,7 @@ omarchy pkg add stow
 ./install.sh
 ```
 
-`./install.sh` links the trackpad override, reloads and checks a detected Hyprland session, installs Herdr, Tailscale, keyd, Obsidian, Bitwarden, and FreeTube, enables the Tailscale and keyd services, and installs T3 Code Nightly with `omarchy-install-ai-t3-code`. It seeds Vim mode only for an Obsidian vault without app settings. Caps Lock sends Escape when tapped and Control while held by default, matching the Karabiner habit on macOS. Reboot or log out if it asks, then complete the first-run acceptance above. Use `--without-keyd` to skip keyboard remapping.
+`./install.sh` links the trackpad override, reloads and checks a detected Hyprland session, installs Herdr, Tailscale, keyd, Obsidian, Bitwarden, FreeTube, and EasyEffects, enables the Tailscale and keyd services, and installs T3 Code Nightly with `omarchy-install-ai-t3-code`. It seeds Vim mode only for an Obsidian vault without app settings. Caps Lock sends Escape when tapped and Control while held by default, matching the Karabiner habit on macOS. Reboot or log out if it asks, then complete the first-run acceptance above. Use `--without-keyd` to skip keyboard remapping. Use `--without-easyeffects` to skip the equalizer.
 
 Still in an Omarchy terminal, complete the [private remote-access setup](docs/remote-access.md). This repo stores neither tailnet credentials nor your GitHub SSH key.
 
@@ -375,6 +377,7 @@ Omarchy keeps its own desktop, tmux file, shell, and Super keybindings. Practice
 | `scripts/groundwork-tmp.py` | `/tmp` on disk and scratch roots: reads `/etc/fstab`, a custom `tmp.mount` unit or an unreadable unit path (`tmp-unit`, which makes setup skip the mask), and `/tmp`'s mount, creates the `scratch_dirs` roots, and holds the doctor's temp-storage check. Setup masks `tmp.mount` itself ([decision 0022](docs/decisions/0022-tmp-on-disk.md)) |
 | `scripts/groundwork-storage.py` | Applies TRIM through LUKS and the plocate prune drop-in on setup and update. Idempotent. Refuses a real machine unless `GROUNDWORK_STORAGE_APPLY=1`, which the apply script sets ([decision 0023](docs/decisions/0023-storage-defaults.md)) |
 | `config/plocate-updatedb.service.d.conf` | The only plocate override: extra prune names and paths, each with a one-line reason. `@HOME@` becomes the setup account's home when it is installed |
+| `config/groundwork-easyeffects.service` | User unit so EasyEffects joins the PipeWire graph at the next desktop login. Setup enables it and does not start it. Skip with `--without-easyeffects`. No EasyEffects pipeline or preset is written ([decision 0024](docs/decisions/0024-easyeffects-equalizer.md)) |
 | `scripts/groundwork-path-shadow.py` | Read-only report of PATH entries that shadow a managed command (pacman or Omarchy package, mise, Groundwork-installed `t3`), with the shell file that sets the winning entry. Run it from the checkout; `--json`, `--brief`, and `--strict` are available. `update-all` runs `--brief`, and setup's `t3` check prints its report when another `t3` wins. It never deletes or edits anything. |
 
 ## Syncthing shared folders
@@ -433,7 +436,7 @@ omarchy pkg add stow
 ./install.sh
 ```
 
-That links the trackpad override, installs Herdr, Tailscale, keyd, Obsidian, Bitwarden, and FreeTube, enables `tailscaled` and `keyd`, and installs the T3 Code app through Omarchy's installer. Pass `--with-blip` only when you want the iMessage client; the default leaves it off. Pass `--with-local-inference` only when you want the Ollama packages; the default leaves them off and downloads no model. See [local inference](docs/local-inference.md). If `~/.config/hypr/input.lua` already exists, the script moves it to `input.lua.bak-omarchy-groundwork`, preserving numbered predecessors if necessary, and then links the copy from this repo. It does not configure Git/SSH accounts. Complete the [Tailscale setup](docs/remote-access.md) and [desktop apps setup](docs/apps.md) after install.
+That links the trackpad override, installs Herdr, Tailscale, keyd, Obsidian, Bitwarden, FreeTube, and EasyEffects, enables `tailscaled` and `keyd`, and installs the T3 Code app through Omarchy's installer. Pass `--with-blip` only when you want the iMessage client; the default leaves it off. Pass `--with-local-inference` only when you want the Ollama packages; the default leaves them off and downloads no model. See [local inference](docs/local-inference.md). Pass `--without-easyeffects` to skip the equalizer; the default installs it with an empty pipeline. If `~/.config/hypr/input.lua` already exists, the script moves it to `input.lua.bak-omarchy-groundwork`, preserving numbered predecessors if necessary, and then links the copy from this repo. It does not configure Git/SSH accounts. Complete the [Tailscale setup](docs/remote-access.md) and [desktop apps setup](docs/apps.md) after install.
 
 ### Caps Lock: Escape on tap, Control while held
 

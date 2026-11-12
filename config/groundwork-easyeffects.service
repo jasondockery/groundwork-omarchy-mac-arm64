@@ -1,0 +1,21 @@
+# Groundwork EasyEffects (decision 0024)
+[Unit]
+Description=EasyEffects
+# PipeWire must be up before the filter graph can attach.
+After=pipewire.service
+Wants=pipewire.service
+# Stop with the desktop so a leftover filter is not left on a headless user bus.
+PartOf=graphical-session.target
+
+[Service]
+# EasyEffects 8: hide the window and stay as the PipeWire processor (not the GTK --gapplication-service flag).
+ExecStart=easyeffects --hide-window --service-mode
+# Quit when the session stops the unit, so the process does not outlive the desktop.
+ExecStop=easyeffects --quit
+# Bring the processor back after a crash without a hot loop.
+Restart=on-failure
+RestartSec=2
+
+[Install]
+# Login to the graphical session, not default.target, so this follows the desktop and PipeWire.
+WantedBy=graphical-session.target

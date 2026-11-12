@@ -20,7 +20,8 @@ Setup stores source path, keyd/screen-sharing/Blip/local-inference choices, sele
 applied keyd digest locally. Bare reruns preserve them; explicit setup options
 change choices. A setup saved before the Blip choice existed stays off until
 `--with-blip`. A setup saved before the local-inference choice existed stays off until
-`--with-local-inference`. Older installations repeat exclusions once during transition.
+`--with-local-inference`. A setup saved before the EasyEffects choice existed stays on
+(decision 0024); `--without-easyeffects` is the opt-out. Older installations repeat exclusions once during transition.
 The optional Core reference remains pinned and is never a setup prerequisite.
 When screen sharing's unit, helper, or WayVNC config changed and `WAYLAND_DISPLAY`
 is unset (SSH or cron), an inactive unit stays stopped and the restart record is

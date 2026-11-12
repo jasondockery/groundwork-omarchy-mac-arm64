@@ -7,7 +7,7 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip] [--with-local-inference|--without-local-inference] [--with-git-filter-repo|--without-git-filter-repo] [--with-tmp-on-disk|--without-tmp-on-disk] [--migrate-to-omarchy-installers] [--keep-standalone-t3]"
+  echo "Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip] [--with-local-inference|--without-local-inference] [--with-git-filter-repo|--without-git-filter-repo] [--with-tmp-on-disk|--without-tmp-on-disk] [--with-easyeffects|--without-easyeffects] [--migrate-to-omarchy-installers] [--keep-standalone-t3]"
   echo "Caps Lock defaults to Escape on tap and Control while held."
   echo "Saved setup choices are reused; explicit options change those choices."
   echo "--without-keyd leaves any existing keyd configuration and service unchanged."
@@ -20,6 +20,8 @@ usage() {
   echo "--without-git-filter-repo records that preference as off and leaves an installed copy alone. See docs/git-filter-repo.md."
   echo "--with-tmp-on-disk (the default) masks tmp.mount, so /tmp is on the root filesystem after the next reboot."
   echo "--without-tmp-on-disk records that preference as off and leaves an existing mask alone. See docs/decisions/0022-tmp-on-disk.md."
+  echo "--with-easyeffects (the default) installs EasyEffects and lsp-plugins-lv2 and enables the user unit groundwork-easyeffects.service for the next desktop login. It does not start EasyEffects during setup."
+  echo "--without-easyeffects records that preference as off and leaves an existing install and user unit alone. See docs/decisions/0024-easyeffects-equalizer.md."
   echo "--migrate-to-omarchy-installers moves apps installed another way to Omarchy's own installer,"
   echo "  even after an earlier no. Without it, setup asks first and updates only report."
   echo "--keep-standalone-t3 points ~/.local/bin/t3 back at the standalone t3 CLI that setup switched"
@@ -32,12 +34,14 @@ with_blip=0
 with_local_inference=0
 with_git_filter_repo=0
 with_tmp_on_disk=1
+with_easyeffects=1
 keyd_choice=""
 sharing_choice=""
 blip_choice=""
 local_inference_choice=""
 git_filter_repo_choice=""
 tmp_on_disk_choice=""
+easyeffects_choice=""
 updating=0
 update_plugins=0
 migrate_requested=0
@@ -95,6 +99,14 @@ for arg in "$@"; do
       fi
       tmp_on_disk_choice=$arg
       [[ $arg == --with-tmp-on-disk ]] && with_tmp_on_disk=1 || with_tmp_on_disk=0
+      ;;
+    --with-easyeffects | --without-easyeffects)
+      if [[ -n $easyeffects_choice && $easyeffects_choice != "$arg" ]]; then
+        echo "Choose only one of --with-easyeffects and --without-easyeffects." >&2
+        exit 64
+      fi
+      easyeffects_choice=$arg
+      [[ $arg == --with-easyeffects ]] && with_easyeffects=1 || with_easyeffects=0
       ;;
     --update) updating=1 ;;
     --update-plugins) update_plugins=1 ;;
@@ -199,6 +211,17 @@ if [[ -n $stored ]]; then
         ;;
     esac
   fi
+  # Only an opt-out is saved; no line means on (decision 0024).
+  if [[ -z $easyeffects_choice ]]; then
+    case ${preferences[8]-} in
+      '') ;;
+      0) with_easyeffects=0 ;;
+      *)
+        echo "Saved EasyEffects choice is invalid. Preserve ~/.config/groundwork/omarchy.json and repair it before rerunning." >&2
+        exit 1
+        ;;
+    esac
+  fi
 fi
 
 # An updater installed before the Brave spec fast-forwards and then runs this
@@ -210,8 +233,8 @@ fi
 
 # Fail before installing packages or moving files when the checkout is incomplete.
 # The Bitwarden extension id and Brave policies are read from core, not a copy here.
-[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$root/scripts/groundwork-node-pin.py" && -f "$root/scripts/groundwork-commit-guard.py" && -f "$root/scripts/groundwork-tmp.py" && -f "$root/scripts/groundwork-storage.py" && -f "$root/config/plocate-updatedb.service.d.conf" && -f "$root/core/browser/brave.json" && ! -L "$root/core/browser/brave.json" ]] || {
-  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, Node pin helper, commit guard helper, temp storage helper, storage helper, plocate drop-in, or Brave spec is missing." >&2
+[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$root/scripts/groundwork-node-pin.py" && -f "$root/scripts/groundwork-commit-guard.py" && -f "$root/scripts/groundwork-tmp.py" && -f "$root/scripts/groundwork-storage.py" && -f "$root/config/plocate-updatedb.service.d.conf" && -f "$root/config/groundwork-easyeffects.service" && -f "$root/core/browser/brave.json" && ! -L "$root/core/browser/brave.json" ]] || {
+  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, Node pin helper, commit guard helper, temp storage helper, storage helper, plocate drop-in, EasyEffects unit, or Brave spec is missing." >&2
   exit 1
 }
 
@@ -346,6 +369,61 @@ tmp_unit_conflict() {
 }
 tmp_mask_needed() {
   [[ $with_tmp_on_disk -eq 1 ]] && ! tmp_mount_masked && ! tmp_fstab_conflict && ! tmp_unit_conflict
+}
+# EasyEffects (decision 0024). lsp-plugins-lv2 has no command; the equalizer
+# lives as LV2 bundles under /usr/lib/lv2 whose names contain "lsp".
+# The installed unit name is ours. easyeffects.service is never read or written.
+easyeffects_unit_name=groundwork-easyeffects.service
+easyeffects_unit_src=$root/config/groundwork-easyeffects.service
+easyeffects_unit_dir=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
+easyeffects_unit=$easyeffects_unit_dir/$easyeffects_unit_name
+easyeffects_ownership_marker='# Groundwork EasyEffects (decision 0024)'
+easyeffects_enable_marker=${XDG_STATE_HOME:-$HOME/.local/state}/groundwork/easyeffects-enable-needed
+# Previous revisions recorded a failed restart under this name. Clear it once
+# enable succeeds so a pending restart still finishes as an enable.
+easyeffects_legacy_restart_marker=${XDG_STATE_HOME:-$HOME/.local/state}/groundwork/easyeffects-restart-needed
+easyeffects_plugins_present() {
+  local dir="$test_root/usr/lib/lv2"
+  [[ -d "$dir" ]] && compgen -G "$dir/*lsp*" >/dev/null
+}
+easyeffects_unit_current() {
+  [[ -f $easyeffects_unit && ! -L $easyeffects_unit ]] && cmp -s "$easyeffects_unit_src" "$easyeffects_unit"
+}
+easyeffects_unit_owned() {
+  local line
+  [[ -f $easyeffects_unit && ! -L $easyeffects_unit ]] || return 1
+  while IFS= read -r line || [[ -n ${line-} ]]; do
+    if [[ $line == "$easyeffects_ownership_marker" ]]; then
+      return 0
+    fi
+  done < "$easyeffects_unit"
+  return 1
+}
+easyeffects_refuse_whitespace_path() {
+  local found
+  found=$(command -v easyeffects || true)
+  if [[ -z $found ]]; then
+    echo "easyeffects is not on PATH. Install it with: omarchy pkg add easyeffects" >&2
+    exit 1
+  fi
+  # Fail closed before writing or enabling the unit. The command that would
+  # run is this path, and a path with whitespace is not accepted.
+  if [[ $found == *[[:space:]]* ]]; then
+    echo "Refusing to enable EasyEffects: the executable path contains whitespace: $found" >&2
+    echo "Put easyeffects on PATH at a path without spaces, then rerun ./install.sh." >&2
+    exit 1
+  fi
+}
+easyeffects_mark_enable_needed() {
+  python3 "$root/scripts/groundwork-update.py" marker write easyeffects-enable-needed pending || true
+}
+easyeffects_clear_enable_needed() {
+  if [[ -e $easyeffects_enable_marker || -L $easyeffects_enable_marker ]]; then
+    python3 "$root/scripts/groundwork-update.py" marker remove easyeffects-enable-needed || true
+  fi
+  if [[ -e $easyeffects_legacy_restart_marker || -L $easyeffects_legacy_restart_marker ]]; then
+    python3 "$root/scripts/groundwork-update.py" marker remove easyeffects-restart-needed || true
+  fi
 }
 # Brave (decision 0015). Install with Omarchy's browser installer, then keep it
 # only when its ELF files and a short launch work on this kernel. Chromium stays.
@@ -676,6 +754,10 @@ privileged_changes_needed() {
   fi
   if [[ $with_local_inference -eq 1 ]] && ! local_inference_ready; then
     return 0
+  fi
+  if [[ $with_easyeffects -eq 1 ]]; then
+    command -v easyeffects >/dev/null || return 0
+    easyeffects_plugins_present || return 0
   fi
   # TRIM, fstrim.timer, or the plocate drop-in still pending (decision 0023).
   # Read-only. A directory zstd level is not applied.
@@ -1084,6 +1166,73 @@ freetube_ready=1
 if ! ensure_user_flatpak io.freetubeapp.FreeTube; then
   freetube_ready=0
   echo "FreeTube could not be installed. Setup continues. Resolve the Flatpak error and rerun ./install.sh." >&2
+fi
+
+# EasyEffects equalizer (decision 0024). On by default. No ~/.config/easyeffects
+# files are written: the empty upstream pipeline stays flat. The user unit is
+# enabled for the next graphical login and is not started during apply.
+install_easyeffects() {
+  local reload_ok=0 enable_ok=0
+  install_package easyeffects
+  if [[ $updating -eq 0 ]] || ! easyeffects_plugins_present; then
+    omarchy pkg add lsp-plugins-lv2
+    if ! easyeffects_plugins_present; then
+      echo "lsp-plugins-lv2 is still unavailable after omarchy pkg add. The helper may skip packages absent from the current feed." >&2
+      echo "Update Omarchy and its package feed, resolve the package error, then rerun ./install.sh." >&2
+      exit 1
+    fi
+  fi
+  easyeffects_refuse_whitespace_path
+  mkdir -p -- "$easyeffects_unit_dir"
+  if [[ -L $easyeffects_unit ]]; then
+    echo "Refusing to replace a symlink: $easyeffects_unit" >&2
+    echo "Move that symlink aside, then rerun ./install.sh." >&2
+    exit 1
+  fi
+  if [[ -e $easyeffects_unit && ! -f $easyeffects_unit ]]; then
+    echo "Refusing to replace $easyeffects_unit because it is not a regular file." >&2
+    echo "Move it aside, then rerun ./install.sh." >&2
+    exit 1
+  fi
+  # A file at our unit name that this layer did not write stays put. Enabling
+  # it could start something else at the next login.
+  if [[ -f $easyeffects_unit ]] && ! easyeffects_unit_current && ! easyeffects_unit_owned; then
+    echo "Leaving $easyeffects_unit alone because Groundwork did not write it." >&2
+    echo "Move that file aside if you want Groundwork to enable EasyEffects, then rerun ./install.sh." >&2
+    exit 1
+  fi
+  if ! easyeffects_unit_current; then
+    if [[ -e $easyeffects_unit ]]; then
+      mv --backup=numbered -- "$easyeffects_unit" "${easyeffects_unit}.bak-omarchy-groundwork"
+      echo "Backed up $easyeffects_unit as ${easyeffects_unit}.bak-omarchy-groundwork (or a numbered predecessor)."
+    fi
+    cp -- "$easyeffects_unit_src" "$easyeffects_unit"
+  fi
+  # Enable only. start, --now, and try-restart would insert filters into a live
+  # session, or launch a process with no display. The unit starts at the next
+  # graphical login. A failed reload or enable is recorded so the next run
+  # finishes the enable after the file already matches.
+  if systemctl --user daemon-reload; then
+    reload_ok=1
+  fi
+  if systemctl --user enable "$easyeffects_unit_name"; then
+    enable_ok=1
+  fi
+  if [[ $reload_ok -eq 1 && $enable_ok -eq 1 ]]; then
+    easyeffects_clear_enable_needed
+    echo "EasyEffects is installed. Its user service $easyeffects_unit_name is enabled and starts at the next desktop login. The default pipeline is empty, so sound stays uncolored until you add a preset. Open it from Super+Space. Per-output presets: docs/apps.md#easyeffects"
+  else
+    easyeffects_mark_enable_needed
+    echo "EasyEffects is installed. Its user service is not enabled yet. From a desktop login, run:" >&2
+    echo "  systemctl --user daemon-reload" >&2
+    echo "  systemctl --user enable $easyeffects_unit_name" >&2
+    echo "The next ./install.sh or update-all retries this enable." >&2
+  fi
+}
+if [[ $with_easyeffects -eq 1 ]]; then
+  install_easyeffects
+else
+  echo "Skipped EasyEffects setup; any existing EasyEffects install and service were left alone."
 fi
 
 # Brave's release channel, through Omarchy. Brave Origin is a different browser
@@ -1666,7 +1815,7 @@ install_syncthing
 register_choices() {
   python3 "$root/scripts/groundwork-update.py" register "$root" "$with_keyd" "$with_screen_sharing" \
     "${GROUNDWORK_OBSIDIAN_VAULT:-$HOME/Documents/Obsidian/my_obsidian_vault}" "$with_blip" "$with_local_inference" \
-    "$declined_migrations" "$with_git_filter_repo" "$with_tmp_on_disk"
+    "$declined_migrations" "$with_git_filter_repo" "$with_tmp_on_disk" "$with_easyeffects"
 }
 register_choices
 saved_declines=$declined_migrations
@@ -2101,7 +2250,7 @@ if [[ $storage_status -ne 0 ]]; then
   exit "$storage_status"
 fi
 if [[ $updating -eq 1 ]]; then
-  echo "Groundwork settings applied. Saved keyd, screen-sharing, Blip, local inference, and vault choices were preserved."
+  echo "Groundwork settings applied. Saved keyd, screen-sharing, Blip, local inference, EasyEffects, and vault choices were preserved."
   exit 0
 fi
 if [[ $freetube_ready -eq 1 ]]; then
@@ -2115,6 +2264,9 @@ if [[ $brave_usable -eq 1 ]]; then
 fi
 echo "Next time, run update-all for maintenance or groundwork-update for configuration only."
 echo "Open Obsidian with Super+Shift+O; finish vault, sync, and Bitwarden sign-in using docs/apps.md."
+if [[ $with_easyeffects -eq 1 ]]; then
+  echo "Open Easy Effects from Super+Space. Sound stays uncolored until you add a preset; per-output presets are in docs/apps.md#easyeffects."
+fi
 echo "Remote access still requires your sign-in and tailnet policy; see docs/remote-access.md."
 echo "Complete tailnet sign-in with: sudo tailscale up --timeout=5m"
 echo "After reviewing the tailnet policy, enable private SSH with: sudo tailscale set --ssh"
