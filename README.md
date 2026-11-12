@@ -55,7 +55,7 @@ Only enable SSH after reviewing that guide and your effective tailnet policy. No
 ### First-run acceptance
 
 - `hyprctl configerrors` prints no errors. The installer reloads and checks a detected Hyprland session; from SSH or a console, finish that check on the desktop with `hyprctl reload` and `hyprctl configerrors`.
-- Trackpad traditional scrolling, tapping, two-finger right-click, and three-finger drag behave as expected. Cursor speed on a large display and browser page scrolling should feel usable; tune `input.sensitivity` and `input.touchpad.scroll_factor` with `hyprctl reload` if not.
+- Trackpad traditional scrolling, tapping, two-finger right-click, and three-finger drag behave as expected. A three-finger drag, including selecting text, stays on the current workspace. Four fingers left or right focus the previous or next workspace. Cursor speed on a large display and browser page scrolling should feel usable; tune `input.sensitivity` and `input.touchpad.scroll_factor` with `hyprctl reload` if not.
 - Tap Caps Lock to leave Neovim insert mode; hold Caps Lock with `L` to send `Ctrl+L`, and with Space to send the multiplexer prefix. Physical Escape and Control still work.
 - `systemctl is-active tailscaled keyd` reports both services active for the default setup. `tailscale status` shows the device connected after sign-in and approval. Use the separate keyd recovery instructions below if needed.
 - `Super+Space` opens the Omarchy menu; `Super+K` shows desktop bindings. Launch tmux with `Super+Alt+Return` and Herdr with `Super+Ctrl+Return`. In either, use `Ctrl+Space`, then `?` for live help, and practice the [same pane keys](docs/keybindings.md).
@@ -363,7 +363,7 @@ Omarchy keeps its own desktop, tmux file, shell, and Super keybindings. Practice
 
 | Path | Why it is not already in Omarchy |
 |---|---|
-| `packages/hypr/.config/hypr/input.lua` | Trackpad choices that differ from Omarchy's defaults: tap-to-click, three-finger drag, faster pointer, slower page scrolling |
+| `packages/hypr/.config/hypr/input.lua` | Trackpad choices that differ from Omarchy's defaults: tap-to-click, three-finger drag, faster pointer, slower page scrolling, and four-finger left and right to focus the previous and next workspace |
 | `keyd/default.conf` | Default Caps Lock behavior: tap = Escape, hold = Control, via keyd |
 | `packages.txt` | Optional aarch64 packages that are not part of the Omarchy install |
 | `git/config.local.example` | Placeholder for a name and email. Not applied |
@@ -436,7 +436,7 @@ omarchy pkg add stow
 ./install.sh
 ```
 
-That links the trackpad override, installs Herdr, Tailscale, keyd, Obsidian, Bitwarden, FreeTube, and EasyEffects, enables `tailscaled` and `keyd`, and installs the T3 Code app through Omarchy's installer. Pass `--with-blip` only when you want the iMessage client; the default leaves it off. Pass `--with-local-inference` only when you want the Ollama packages; the default leaves them off and downloads no model. See [local inference](docs/local-inference.md). Pass `--without-easyeffects` to skip the equalizer; the default installs it with an empty pipeline. If `~/.config/hypr/input.lua` already exists, the script moves it to `input.lua.bak-omarchy-groundwork`, preserving numbered predecessors if necessary, and then links the copy from this repo. It does not configure Git/SSH accounts. Complete the [Tailscale setup](docs/remote-access.md) and [desktop apps setup](docs/apps.md) after install.
+That links the trackpad override, installs Herdr, Tailscale, keyd, Obsidian, Bitwarden, FreeTube, and EasyEffects, enables `tailscaled` and `keyd`, and installs the T3 Code app through Omarchy's installer. Pass `--with-blip` only when you want the iMessage client; the default leaves it off. Pass `--with-local-inference` only when you want the Ollama packages; the default leaves them off and downloads no model. See [local inference](docs/local-inference.md). Pass `--without-easyeffects` to skip the equalizer; the default installs it with an empty pipeline. If `~/.config/hypr/input.lua` already exists and differs from this repo's file, the script moves it to `input.lua.bak-omarchy-groundwork`, preserving numbered predecessors if necessary, and then links the copy from this repo. A file that already matches is linked without a backup. It does not configure Git/SSH accounts. Complete the [Tailscale setup](docs/remote-access.md) and [desktop apps setup](docs/apps.md) after install.
 
 ### Caps Lock: Escape on tap, Control while held
 

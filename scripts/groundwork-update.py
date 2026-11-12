@@ -2125,10 +2125,26 @@ def preflight(source):
     return git(source, 'rev-parse', 'HEAD'), branch, remote, merge
 
 
+def input_override_matches_template(target, expected):
+    """True when the installed file is the checkout link or the same bytes.
+
+    A copy that already matches the template is this layer's file. A different
+    file stays a local override.
+    """
+    try:
+        if target.is_symlink() and target.resolve() == expected.resolve():
+            return True
+        if target.is_file() and expected.is_file():
+            return target.read_bytes() == expected.read_bytes()
+    except OSError:
+        return False
+    return False
+
+
 def managed_files(value, source):
     target = Path.home() / '.config/hypr/input.lua'
     expected = source / 'packages/hypr/.config/hypr/input.lua'
-    if not target.is_symlink() or target.resolve() != expected.resolve():
+    if not input_override_matches_template(target, expected):
         raise UpdateError('The Hyprland input override no longer links to this checkout. Preserve your local override and reconcile it before updating.')
     if value['keyd'] and value.get('keyd_sha256'):
         installed = KEYD_CONFIG

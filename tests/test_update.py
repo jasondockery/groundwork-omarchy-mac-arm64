@@ -788,6 +788,14 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
         with self.assertRaisesRegex(updater.UpdateError, 'regular'):
             updater.settings()
 
+    def test_matching_input_file_is_not_a_local_override(self):
+        template = self.source / 'packages/hypr/.config/hypr/input.lua'
+        self.input.unlink()
+        self.input.write_bytes(template.read_bytes())
+        updater.managed_files(json.loads(self.config.read_text()), self.source)
+        self.assertFalse(self.input.is_symlink())
+        self.assertEqual(self.input.read_bytes(), template.read_bytes())
+
     def test_help_and_invalid_arguments_run_no_commands_or_writes(self):
         before = self.config.read_bytes()
         with patch.object(updater, 'run', side_effect=AssertionError('unexpected command')):
