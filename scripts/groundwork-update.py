@@ -1265,6 +1265,41 @@ def reject_t3(page, version, reason):
 
 
 
+def bitwarden_sync_info():
+    """(present, version) from `pacman -Si bitwarden`.
+
+    present is True when the command succeeds, False when pacman reports the
+    package absent, and None when the query is unknown. Absence is the same
+    split as `pacman_si` in omarchy-feed-watch.py: the failure text contains
+    "was not found" and does not contain "does not exist". `run` appends
+    pacman's stderr to UpdateError. `LC_ALL=C` asks for the English `Version`
+    field. A successful command whose label is not that English word still
+    counts as present: a translated label is not a missing package.
+    """
+    try:
+        text = run(['pacman', '-Si', 'bitwarden'], deadline=30, extra_env={'LC_ALL': 'C'})
+    except (UpdateError, OSError) as error:
+        detail = str(error)
+        if 'was not found' in detail and 'does not exist' not in detail:
+            return False, None
+        return None, None
+    version = None
+    for line in text.splitlines():
+        key, _, value = line.partition(':')
+        if key.strip() == 'Version' and value.strip():
+            version = value.strip()
+            break
+    return True, version
+
+
+def bitwarden_feed_version():
+    """The version `pacman -Si bitwarden` offers, or None when it cannot be read.
+
+    None does not mean the feed lacks the package. Use `bitwarden_sync_info`.
+    """
+    return bitwarden_sync_info()[1]
+
+
 def bitwarden_version():
     """Installed bitwarden version, else the one the sync database offers, else None.
 
@@ -1276,14 +1311,21 @@ def bitwarden_version():
             return fields[1]
     except (UpdateError, OSError):
         pass
-    try:
-        for line in run(['pacman', '-Si', 'bitwarden'], deadline=30).splitlines():
-            key, _, value = line.partition(':')
-            if key.strip() == 'Version' and value.strip():
-                return value.strip()
-    except (UpdateError, OSError):
-        pass
-    return None
+    return bitwarden_feed_version()
+
+
+def bitwarden_flatpak_maintained():
+    """True only while the user Flatpak is the fallback for a proven absence.
+
+    A `bitwarden` command the package owns, a feed that has the package, or a
+    query that did not prove the package absent means update-all leaves that
+    Flatpak alone. The move stays an offer. Absence is `pacman -Si`'s
+    "was not found" result, not every failed query and not an English
+    `Version` line.
+    """
+    if bitwarden_package_command():
+        return False
+    return bitwarden_sync_info()[0] is False
 
 
 def bitwarden_package_command():
@@ -2329,6 +2371,11 @@ def finish_update(scope, source, before, candidate, candidate_ref, completed, wa
                 ('com.bitwarden.desktop', 'Bitwarden'),
                 ('io.freetubeapp.FreeTube', 'FreeTube'),
             ):
+                # While the package owns the command, the feed has bitwarden, or
+                # the query did not prove the package absent, do not update the
+                # Flatpak and do not record one.
+                if app == 'com.bitwarden.desktop' and not bitwarden_flatpak_maintained():
+                    continue
                 if app not in installed:
                     # A native Bitwarden desktop is the expected state, not a skip.
                     if app != 'com.bitwarden.desktop' or not bitwarden_package_command():
@@ -2709,7 +2756,7 @@ def main(args):
         print(f'Usage: {"update-all" if scope == "all" else "groundwork-update"} [--check]')
         print('Synchronize and apply this Groundwork layer using saved setup choices.')
         if scope == 'all':
-            print('Also run omarchy update, update listed Omarchy shell plugins, check T3 Code\'s staged and installed builds on kernels with pages larger than 4 KiB, and update the installed Bitwarden and FreeTube user Flatpaks.')
+            print('Also run omarchy update, update listed Omarchy shell plugins, check T3 Code\'s staged and installed builds on kernels with pages larger than 4 KiB, and update the installed FreeTube user Flatpak. A Bitwarden user Flatpak is updated only when the feed has no bitwarden package.')
             print(f'When Blip is opted in, update {BLIP_ID} only in an interactive terminal, without --yes, so its diff can be reviewed.')
             print('Finally, report Omarchy offers for apps Groundwork installs, managed commands shadowed on PATH, free space '
                   f'under or near Omarchy\'s 10 GiB update floor, and missing host tools, /tmp and scratch-root problems, or storage defaults (groundwork-doctor --brief). These never fail the update; set {SKIP_REPORTS_ENV}=1 to skip them.')

@@ -303,6 +303,39 @@ class ReportTests(FeedWatchFixture):
         self.assertNotIn('T3', result.stdout)
 
 
+class BitwardenProbeTests(FeedWatchFixture):
+    def setUp(self):
+        super().setUp()
+        self.table = TABLE
+        write_db(self.sync / 'omarchy.db', {'bitwarden': '2026.10.4-1'})
+
+    def own_bitwarden(self):
+        executable(self.bin / 'bitwarden')
+        command = str(self.bin / 'bitwarden')
+        executable(self.bin / 'pacman',
+                   '#!/bin/sh\n[ "$1" = -Qoq ] || exit 9\n'
+                   f'[ "$2" = {command!r} ] || exit 1\n'
+                   'echo bitwarden\n')
+
+    def test_native_package_is_not_offered_when_the_flatpak_dir_remains(self):
+        self.own_bitwarden()
+        self.install_flatpak('com.bitwarden.desktop')
+        result = self.run_watch('report', '--brief')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('Bitwarden', result.stdout)
+        self.assertNotIn('bitwarden-desktop', result.stdout)
+        apps, _ = self.report()
+        self.assertTrue(apps['bitwarden-desktop']['aligned'])
+        self.assertIsNone(apps['bitwarden-desktop']['offer'])
+
+    def test_user_flatpak_is_still_offered_until_the_package_owns_the_command(self):
+        self.install_flatpak('com.bitwarden.desktop')
+        result = self.run_watch('report', '--brief')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Bitwarden desktop (bitwarden-desktop)', result.stdout)
+        self.assertIn('Groundwork no longer needs its own install', result.stdout)
+
+
 class OwnedCommandTests(FeedWatchFixture):
     def setUp(self):
         super().setUp()
@@ -516,6 +549,8 @@ class TableTests(unittest.TestCase):
         bitwarden = {app['id']: app for app in watch.load_table(TABLE)}['bitwarden-desktop']
         self.assertEqual([c.get('package') for c in bitwarden['candidates']], ['bitwarden'])
         self.assertEqual(bitwarden['candidates'][0]['menu'], 'Install > Service > Bitwarden')
+        self.assertEqual(bitwarden['probe'], {
+            'flatpak': 'com.bitwarden.desktop', 'command': 'bitwarden', 'owner': 'bitwarden'})
 
     def test_cursor_is_the_cursor_bin_package_and_only_an_unowned_command_is_reported(self):
         cursor = {app['id']: app for app in watch.load_table(TABLE)}['cursor']

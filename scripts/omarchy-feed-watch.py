@@ -293,10 +293,28 @@ def probe_install(probe, pacman='pacman'):
     present: True or False when the probe can tell whether the install to move
     is here, else None. aligned: the app is already installed Omarchy's way,
     so nothing is offered. A command probe with an owner (Cursor) counts only
-    a command that package does not own, and never offers on a guess.
+    a command that package does not own, and never offers on a guess. A probe
+    with both a Flatpak and a command/owner (Bitwarden) is aligned when that
+    package owns the command, and otherwise present only when the Flatpak is
+    installed.
     """
     found = {'present': None, 'aligned': False, 'path': None}
     if not probe:
+        return found
+    if 'flatpak' in probe and 'command' in probe and probe.get('owner'):
+        path = shutil.which(probe['command'])
+        found['path'] = path
+        if path:
+            owner = pacman_owner(path, pacman)
+            if owner == probe['owner']:
+                found.update(present=False, aligned=True)
+                return found
+            if owner is None:
+                found['present'] = False
+                return found
+            if owner:
+                found['owner'] = owner
+        found['present'] = (Path.home() / '.local/share/flatpak/app' / probe['flatpak']).is_dir()
         return found
     if 'flatpak' in probe:
         found['present'] = (Path.home() / '.local/share/flatpak/app' / probe['flatpak']).is_dir()
