@@ -20,7 +20,7 @@ usage() {
   echo "--without-git-filter-repo records that preference as off and leaves an installed copy alone. See docs/git-filter-repo.md."
   echo "--with-tmp-on-disk (the default) masks tmp.mount, so /tmp is on the root filesystem after the next reboot."
   echo "--without-tmp-on-disk records that preference as off and leaves an existing mask alone. See docs/decisions/0022-tmp-on-disk.md."
-  echo "--with-easyeffects (the default) installs EasyEffects and lsp-plugins-lv2 and enables a user unit."
+  echo "--with-easyeffects (the default) installs EasyEffects and lsp-plugins-lv2 and enables the user unit groundwork-easyeffects.service for the next desktop login. It does not start EasyEffects during setup."
   echo "--without-easyeffects records that preference as off and leaves an existing install and user unit alone. See docs/decisions/0024-easyeffects-equalizer.md."
   echo "--migrate-to-omarchy-installers moves apps installed another way to Omarchy's own installer,"
   echo "  even after an earlier no. Without it, setup asks first and updates only report."
@@ -233,7 +233,7 @@ fi
 
 # Fail before installing packages or moving files when the checkout is incomplete.
 # The Bitwarden extension id and Brave policies are read from core, not a copy here.
-[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$root/scripts/groundwork-node-pin.py" && -f "$root/scripts/groundwork-commit-guard.py" && -f "$root/scripts/groundwork-tmp.py" && -f "$root/scripts/groundwork-storage.py" && -f "$root/config/plocate-updatedb.service.d.conf" && -f "$root/config/easyeffects.service" && -f "$root/core/browser/brave.json" && ! -L "$root/core/browser/brave.json" ]] || {
+[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$root/scripts/groundwork-node-pin.py" && -f "$root/scripts/groundwork-commit-guard.py" && -f "$root/scripts/groundwork-tmp.py" && -f "$root/scripts/groundwork-storage.py" && -f "$root/config/plocate-updatedb.service.d.conf" && -f "$root/config/groundwork-easyeffects.service" && -f "$root/core/browser/brave.json" && ! -L "$root/core/browser/brave.json" ]] || {
   echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, Node pin helper, commit guard helper, temp storage helper, storage helper, plocate drop-in, EasyEffects unit, or Brave spec is missing." >&2
   exit 1
 }
@@ -372,10 +372,16 @@ tmp_mask_needed() {
 }
 # EasyEffects (decision 0024). lsp-plugins-lv2 has no command; the equalizer
 # lives as LV2 bundles under /usr/lib/lv2 whose names contain "lsp".
-easyeffects_unit_src=$root/config/easyeffects.service
+# The installed unit name is ours. easyeffects.service is never read or written.
+easyeffects_unit_name=groundwork-easyeffects.service
+easyeffects_unit_src=$root/config/groundwork-easyeffects.service
 easyeffects_unit_dir=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
-easyeffects_unit=$easyeffects_unit_dir/easyeffects.service
-easyeffects_restart_marker=${XDG_STATE_HOME:-$HOME/.local/state}/groundwork/easyeffects-restart-needed
+easyeffects_unit=$easyeffects_unit_dir/$easyeffects_unit_name
+easyeffects_ownership_marker='# Groundwork EasyEffects (decision 0024)'
+easyeffects_enable_marker=${XDG_STATE_HOME:-$HOME/.local/state}/groundwork/easyeffects-enable-needed
+# Previous revisions recorded a failed restart under this name. Clear it once
+# enable succeeds so a pending restart still finishes as an enable.
+easyeffects_legacy_restart_marker=${XDG_STATE_HOME:-$HOME/.local/state}/groundwork/easyeffects-restart-needed
 easyeffects_plugins_present() {
   local dir="$test_root/usr/lib/lv2"
   [[ -d "$dir" ]] && compgen -G "$dir/*lsp*" >/dev/null
@@ -383,14 +389,39 @@ easyeffects_plugins_present() {
 easyeffects_unit_current() {
   [[ -f $easyeffects_unit && ! -L $easyeffects_unit ]] && cmp -s "$easyeffects_unit_src" "$easyeffects_unit"
 }
-easyeffects_restart_pending() {
-  [[ -f $easyeffects_restart_marker && ! -L $easyeffects_restart_marker ]]
+easyeffects_unit_owned() {
+  local line
+  [[ -f $easyeffects_unit && ! -L $easyeffects_unit ]] || return 1
+  while IFS= read -r line || [[ -n ${line-} ]]; do
+    if [[ $line == "$easyeffects_ownership_marker" ]]; then
+      return 0
+    fi
+  done < "$easyeffects_unit"
+  return 1
 }
-easyeffects_mark_restart_needed() {
-  python3 "$root/scripts/groundwork-update.py" marker write easyeffects-restart-needed pending || true
+easyeffects_refuse_whitespace_path() {
+  local found
+  found=$(command -v easyeffects || true)
+  if [[ -z $found ]]; then
+    echo "easyeffects is not on PATH. Install it with: omarchy pkg add easyeffects" >&2
+    exit 1
+  fi
+  # Fail closed before writing or enabling the unit. The command that would
+  # run is this path, and a path with whitespace is not accepted.
+  if [[ $found == *[[:space:]]* ]]; then
+    echo "Refusing to enable EasyEffects: the executable path contains whitespace: $found" >&2
+    echo "Put easyeffects on PATH at a path without spaces, then rerun ./install.sh." >&2
+    exit 1
+  fi
 }
-easyeffects_clear_restart_needed() {
-  if [[ -e $easyeffects_restart_marker || -L $easyeffects_restart_marker ]]; then
+easyeffects_mark_enable_needed() {
+  python3 "$root/scripts/groundwork-update.py" marker write easyeffects-enable-needed pending || true
+}
+easyeffects_clear_enable_needed() {
+  if [[ -e $easyeffects_enable_marker || -L $easyeffects_enable_marker ]]; then
+    python3 "$root/scripts/groundwork-update.py" marker remove easyeffects-enable-needed || true
+  fi
+  if [[ -e $easyeffects_legacy_restart_marker || -L $easyeffects_legacy_restart_marker ]]; then
     python3 "$root/scripts/groundwork-update.py" marker remove easyeffects-restart-needed || true
   fi
 }
@@ -1139,8 +1170,9 @@ fi
 
 # EasyEffects equalizer (decision 0024). On by default. No ~/.config/easyeffects
 # files are written: the empty upstream pipeline stays flat. The user unit is
-# the only override, so the processor is in the PipeWire graph at login.
+# enabled for the next graphical login and is not started during apply.
 install_easyeffects() {
+  local reload_ok=0 enable_ok=0
   install_package easyeffects
   if [[ $updating -eq 0 ]] || ! easyeffects_plugins_present; then
     omarchy pkg add lsp-plugins-lv2
@@ -1150,58 +1182,51 @@ install_easyeffects() {
       exit 1
     fi
   fi
-  mkdir -p "$easyeffects_unit_dir"
+  easyeffects_refuse_whitespace_path
+  mkdir -p -- "$easyeffects_unit_dir"
   if [[ -L $easyeffects_unit ]]; then
     echo "Refusing to replace a symlink: $easyeffects_unit" >&2
+    echo "Move that symlink aside, then rerun ./install.sh." >&2
     exit 1
   fi
-  # enable --now starts an inactive unit on the new ExecStart. An already-active
-  # unit keeps the old process until try-restart, so a replaced file is restarted.
-  # A failed reload or try-restart is recorded so the next run retries after the
-  # file already matches (same hazard as the screen-sharing restart marker).
-  had_easyeffects_unit=0
-  if [[ -e $easyeffects_unit ]]; then
-    had_easyeffects_unit=1
+  if [[ -e $easyeffects_unit && ! -f $easyeffects_unit ]]; then
+    echo "Refusing to replace $easyeffects_unit because it is not a regular file." >&2
+    echo "Move it aside, then rerun ./install.sh." >&2
+    exit 1
   fi
-  unit_replaced=0
+  # A file at our unit name that this layer did not write stays put. Enabling
+  # it could start something else at the next login.
+  if [[ -f $easyeffects_unit ]] && ! easyeffects_unit_current && ! easyeffects_unit_owned; then
+    echo "Leaving $easyeffects_unit alone because Groundwork did not write it." >&2
+    echo "Move that file aside if you want Groundwork to enable EasyEffects, then rerun ./install.sh." >&2
+    exit 1
+  fi
   if ! easyeffects_unit_current; then
     if [[ -e $easyeffects_unit ]]; then
-      mv --backup=numbered "$easyeffects_unit" "${easyeffects_unit}.bak-omarchy-groundwork"
+      mv --backup=numbered -- "$easyeffects_unit" "${easyeffects_unit}.bak-omarchy-groundwork"
       echo "Backed up $easyeffects_unit as ${easyeffects_unit}.bak-omarchy-groundwork (or a numbered predecessor)."
     fi
-    cp "$easyeffects_unit_src" "$easyeffects_unit"
-    unit_replaced=1
+    cp -- "$easyeffects_unit_src" "$easyeffects_unit"
   fi
-  need_restart=0
-  if [[ $unit_replaced -eq 1 && $had_easyeffects_unit -eq 1 ]] || easyeffects_restart_pending; then
-    need_restart=1
+  # Enable only. start, --now, and try-restart would insert filters into a live
+  # session, or launch a process with no display. The unit starts at the next
+  # graphical login. A failed reload or enable is recorded so the next run
+  # finishes the enable after the file already matches.
+  if systemctl --user daemon-reload; then
+    reload_ok=1
   fi
-  reload_ok=1
-  if ! systemctl --user daemon-reload; then
-    reload_ok=0
-    if [[ $need_restart -eq 1 ]]; then
-      easyeffects_mark_restart_needed
-    fi
+  if systemctl --user enable "$easyeffects_unit_name"; then
+    enable_ok=1
   fi
-  if systemctl --user enable --now easyeffects.service; then
-    if [[ $need_restart -eq 1 ]]; then
-      if [[ $reload_ok -eq 1 ]] && systemctl --user try-restart easyeffects.service; then
-        easyeffects_clear_restart_needed
-        echo "EasyEffects is installed and its user service is enabled. The default pipeline is empty, so sound stays uncolored until you add a preset. Open it from Super+Space. Per-output presets: docs/apps.md#easyeffects"
-      else
-        easyeffects_mark_restart_needed
-        echo "EasyEffects is installed. Restart its user service from a desktop session with:"
-        echo "  systemctl --user try-restart easyeffects.service"
-      fi
-    else
-      echo "EasyEffects is installed and its user service is enabled. The default pipeline is empty, so sound stays uncolored until you add a preset. Open it from Super+Space. Per-output presets: docs/apps.md#easyeffects"
-    fi
+  if [[ $reload_ok -eq 1 && $enable_ok -eq 1 ]]; then
+    easyeffects_clear_enable_needed
+    echo "EasyEffects is installed. Its user service $easyeffects_unit_name is enabled and starts at the next desktop login. The default pipeline is empty, so sound stays uncolored until you add a preset. Open it from Super+Space. Per-output presets: docs/apps.md#easyeffects"
   else
-    if [[ $need_restart -eq 1 ]]; then
-      easyeffects_mark_restart_needed
-    fi
-    echo "EasyEffects is installed. Enable its user service from a desktop session with:"
-    echo "  systemctl --user enable --now easyeffects.service"
+    easyeffects_mark_enable_needed
+    echo "EasyEffects is installed. Its user service is not enabled yet. From a desktop login, run:" >&2
+    echo "  systemctl --user daemon-reload" >&2
+    echo "  systemctl --user enable $easyeffects_unit_name" >&2
+    echo "The next ./install.sh or update-all retries this enable." >&2
   fi
 }
 if [[ $with_easyeffects -eq 1 ]]; then

@@ -499,7 +499,7 @@ class UpdateTests(unittest.TestCase):
         dropin = self.seed / 'config'
         dropin.mkdir()
         (dropin / 'plocate-updatedb.service.d.conf').write_text('# fixture\n')
-        (dropin / 'easyeffects.service').write_text('# fixture\n')
+        (dropin / 'groundwork-easyeffects.service').write_text('# fixture\n')
         self.commit(self.seed)
         self.command('git', '-C', str(self.seed), 'push', 'origin', 'main')
         self.assertEqual(self.git('rev-parse', 'HEAD'), pinned)

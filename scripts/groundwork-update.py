@@ -402,7 +402,7 @@ def register_doctor(source):
 
 
 MARKERS = {'ufw-screen-share-rule', 'syncthing-pending', 't3-cli-switched',
-           'easyeffects-restart-needed'}
+           'easyeffects-enable-needed', 'easyeffects-restart-needed'}
 STOP_SIGNALS = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
 
 
@@ -2633,7 +2633,7 @@ def main(args):
             print('Local inference is off unless --with-local-inference is set. --without-local-inference records that preference as off. See docs/local-inference.md for package and model removal.')
             print('git-filter-repo is off unless --with-git-filter-repo is set. It installs per user with mise, never with sudo. --without-git-filter-repo records that preference as off and leaves an installed copy alone. See docs/git-filter-repo.md.')
             print('/tmp on disk is on unless --without-tmp-on-disk is set: setup masks tmp.mount, and the next reboot puts /tmp on the root filesystem. --without-tmp-on-disk records that preference as off and leaves an existing mask alone. See docs/decisions/0022-tmp-on-disk.md.')
-            print('EasyEffects is on unless --without-easyeffects is set: setup installs easyeffects and lsp-plugins-lv2 and enables a user unit. --without-easyeffects records that preference as off and leaves an existing install and user unit alone. See docs/decisions/0024-easyeffects-equalizer.md.')
+            print('EasyEffects is on unless --without-easyeffects is set: setup installs easyeffects and lsp-plugins-lv2 and enables the user unit groundwork-easyeffects.service for the next desktop login. It does not start EasyEffects during setup. --without-easyeffects records that preference as off and leaves an existing install and user unit alone. See docs/decisions/0024-easyeffects-equalizer.md.')
             return 0
         if run(['uname', '-s']) != 'Linux' or run(['uname', '-m']) != 'aarch64' or not shutil.which('omarchy'):
             raise UpdateError('This layer requires Apple Silicon Omarchy.')

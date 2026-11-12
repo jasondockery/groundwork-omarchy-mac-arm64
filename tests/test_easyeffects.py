@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 
 REPO = Path(__file__).resolve().parents[1]
-UNIT = REPO / 'config/easyeffects.service'
+UNIT = REPO / 'config/groundwork-easyeffects.service'
 spec = importlib.util.spec_from_file_location('groundwork_easyeffects_updater', REPO / 'scripts/groundwork-update.py')
 updater = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(updater)
@@ -62,6 +62,10 @@ class UnitFileTests(unittest.TestCase):
         # into the only EasyEffects override this layer ships.
         text = UNIT.read_text()
         self.assertNotIn('DISPLAY', text)
+        marker = '# Groundwork EasyEffects (decision 0024)'
+        self.assertIn(marker, text.splitlines())
+        self.assertIn("easyeffects_ownership_marker='%s'" % marker,
+                      (REPO / 'scripts/apply-layer.sh').read_text())
         parser = configparser.ConfigParser(interpolation=None)
         parser.read_string(text)
         self.assertEqual(set(parser.sections()), {'Unit', 'Service', 'Install'})
@@ -73,6 +77,7 @@ class UnitFileTests(unittest.TestCase):
         })
         self.assertEqual(dict(parser['Service']), {
             'execstart': 'easyeffects --hide-window --service-mode',
+            'execstop': 'easyeffects --quit',
             'restart': 'on-failure',
             'restartsec': '2',
         })

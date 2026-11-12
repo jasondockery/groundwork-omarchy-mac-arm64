@@ -101,15 +101,15 @@ That is the Flatpak path from [FreeTube's data-location guide](https://docs.free
 
 ## EasyEffects
 
-Omarchy's PipeWire/WirePlumber desktop has volume and output selection only. Setup installs [EasyEffects](https://github.com/wwmm/easyeffects) from Arch `extra` (`easyeffects`) and the equalizer plugins (`lsp-plugins-lv2`) by default, and enables a Groundwork-owned user unit so the processor starts with the graphical session. The EasyEffects pipeline is left at upstream defaults: empty, so playback is uncolored until you add a plugin. `--without-easyeffects` records that preference as off and leaves an existing install and unit alone. Decision: [0024](decisions/0024-easyeffects-equalizer.md).
+Omarchy's PipeWire/WirePlumber desktop has volume and output selection only. Setup installs [EasyEffects](https://github.com/wwmm/easyeffects) from Arch `extra` (`easyeffects`) and the equalizer plugins (`lsp-plugins-lv2`) by default, and enables the user unit `groundwork-easyeffects.service` for the next desktop login. Setup does not start EasyEffects. The EasyEffects pipeline is left at upstream defaults: empty, so playback is uncolored until you add a plugin. `--without-easyeffects` records that preference as off and leaves an existing install and unit alone. A unit named `easyeffects.service` is left as it is. Decision: [0024](decisions/0024-easyeffects-equalizer.md).
 
 Launch **Easy Effects** from `Super+Space`. There is no extra desktop shortcut; Omarchy already owns the launcher. In the app:
 
 1. Confirm playback is unchanged with no plugins enabled.
-2. Optionally turn on **Launch Service at System Startup** only if you have disabled the Groundwork unit. Do not enable both, or two processors will sit in the PipeWire graph.
+2. Optionally turn on **Launch Service at System Startup** only if you have disabled `groundwork-easyeffects.service`. Do not enable both, or two processors will sit in the PipeWire graph.
 3. For a Bluetooth speaker, add an Equalizer plugin, save a preset, then bind it on the Autoload page to that output. Presets and Autoload mappings stay in `~/.config/easyeffects/` on this machine. Do not copy a device name or address into this repo.
 
-`omarchy update` updates the packages. This layer does not. To stop setup from installing it, run `./install.sh --without-easyeffects`. That does not uninstall the packages or disable the unit. To remove them later: `systemctl --user disable --now easyeffects.service`, then `omarchy pkg drop easyeffects lsp-plugins-lv2`. Keep `~/.config/easyeffects` unless you mean to delete presets.
+`omarchy update` updates the packages. This layer does not. To stop setup from installing it, run `./install.sh --without-easyeffects`. That does not uninstall the packages or disable the unit. To remove them later: `systemctl --user disable --now groundwork-easyeffects.service`, then `omarchy pkg drop easyeffects lsp-plugins-lv2`. If an earlier revision enabled `easyeffects.service`, disable that unit too so two processors are not in the graph: `systemctl --user disable --now easyeffects.service`. Keep `~/.config/easyeffects` unless you mean to delete presets.
 
 ## Obsidian and the Markdown folder
 

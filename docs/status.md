@@ -23,6 +23,6 @@ Reference machine: Apple Mac mini (M1, 2020). Details are in `docs/machines/mac-
 | Live setup findings | [Chromium registration directory permissions](https://github.com/jasondockery/groundwork-omarchy-mac-arm64/issues/4) and [missing provider behind a mise shim](https://github.com/jasondockery/groundwork-omarchy-mac-arm64/issues/5). Package/configuration checks do not prove authenticated app use. |
 | git-filter-repo | Opt-in only (`./install.sh --with-git-filter-repo`), per user through mise. See `docs/git-filter-repo.md`. |
 | Local inference | Opt-in only (`./install.sh --with-local-inference`). No M1 GPU run is recorded. See `docs/local-inference.md` and decision 0012. |
-| EasyEffects | Default on from decision 0024. Not recorded as applied on this machine until the owner runs setup or `update-all` and checks playback. `lsp-plugins-lv2` was already present on the mini; package presence is not that proof. |
+| EasyEffects | Default on from decision 0024. Setup enables the user unit for the next desktop login and does not start it during apply. Not recorded as applied on this machine until the owner runs setup or `update-all` and checks playback. `lsp-plugins-lv2` was already present on the mini; package presence is not that proof. |
 
 Last observed locally: 2026-10-23 (read-only OS, channel, boot, disk, shell, and unit checks). Trackpad, Caps Lock, Tailscale, WayVNC, and app-acceptance rows are earlier setup notes, not a 2026-10-23 recheck. Package presence is not live desktop or cross-machine acceptance.
