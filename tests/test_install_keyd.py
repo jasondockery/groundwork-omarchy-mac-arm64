@@ -1224,6 +1224,23 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.run_install()
         self.assertFalse(backup.with_name(backup.name + '.~2~').exists())
 
+    def test_matching_input_is_linked_without_a_backup(self):
+        target = self.root / 'home/.config/hypr/input.lua'
+        target.parent.mkdir(parents=True)
+        template = REPO / 'packages/hypr/.config/hypr/input.lua'
+        target.write_bytes(template.read_bytes())
+        preexisting = target.with_name('input.lua.bak-omarchy-groundwork')
+        preexisting.write_text('-- keep this backup\n')
+        result = self.run_install()
+        self.assertNotIn('Backed up', result.stdout)
+        self.assertTrue(target.is_symlink())
+        self.assertEqual(target.resolve(), template.resolve())
+        self.assertEqual(preexisting.read_text(), '-- keep this backup\n')
+        self.assertFalse(list(target.parent.glob('input.lua.bak-omarchy-groundwork.~*~')))
+        self.run_install()
+        self.assertEqual(preexisting.read_text(), '-- keep this backup\n')
+        self.assertFalse(list(target.parent.glob('input.lua.bak-omarchy-groundwork.~*~')))
+
     def test_desktop_reload_is_checked_before_keyd(self):
         self.env['HYPRLAND_INSTANCE_SIGNATURE'] = 'fixture-only'
         self.run_install()

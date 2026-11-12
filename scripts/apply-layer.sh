@@ -1619,6 +1619,12 @@ while IFS= read -r -d '' file; do
       continue
     fi
   fi
+  # Same bytes as the template are this layer's file, not a foreign override.
+  # Remove the copy so stow can link the template. Do not back it up.
+  if cmp -s -- "$file" "$target"; then
+    rm -f -- "$target"
+    continue
+  fi
   # Numbered backups preserve every previous override, even on rapid reruns.
   mv --backup=numbered "$target" "${target}.bak-omarchy-groundwork"
   echo "Backed up $target as ${target}.bak-omarchy-groundwork (or a numbered predecessor)."
