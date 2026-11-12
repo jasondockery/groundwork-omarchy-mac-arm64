@@ -306,15 +306,37 @@ honeykrisp_icd_present() {
 }
 # Omarchy's Install > Service > Bitwarden adds the bitwarden package. The
 # aarch64 feed first had it on 2026-10-28; before that only the Flatpak worked.
-# pacman -Si reads the local sync database and needs no sudo. A version that
-# already failed setup's checks on this kernel counts as unavailable, so it is
-# not retried, offered, or asked sudo for until the feed has another version.
-# The user Flatpak is installed only when the feed has no bitwarden package.
+# pacman -Si reads the local sync database and needs no sudo. Present is exit
+# 0. Absent is stderr "was not found" without "does not exist", the same split
+# as pacman_si in omarchy-feed-watch.py. Any other failure is unknown, and an
+# unknown query does not install the user Flatpak. A version that already
+# failed setup's checks on this kernel counts as unavailable, so it is not
+# retried, offered, or asked sudo for until the feed has another version.
+# The user Flatpak is installed only when the query proves the feed has no
+# bitwarden package. LC_ALL=C matches the updater. A translated Version label
+# is not the signal, so it cannot hide a package.
 bitwarden_flatpak=com.bitwarden.desktop
+bitwarden_feed_state() {
+  local status stderr
+  if ! command -v pacman >/dev/null 2>&1; then
+    printf '%s\n' unknown
+    return 0
+  fi
+  status=0
+  stderr=$(LC_ALL=C pacman -Si bitwarden 2>&1 >/dev/null) || status=$?
+  if [[ $status -eq 0 ]]; then
+    printf '%s\n' present
+  elif [[ $stderr == *'was not found'* && $stderr != *'does not exist'* ]]; then
+    printf '%s\n' absent
+  else
+    printf '%s\n' unknown
+  fi
+}
 bitwarden_in_feed() {
-  # Exit status only. LC_ALL=C matches the updater's query; the label text is
-  # not the signal, so a translated Version line cannot hide the package.
-  command -v pacman >/dev/null && LC_ALL=C pacman -Si bitwarden >/dev/null 2>&1
+  [[ $(bitwarden_feed_state) == present ]]
+}
+bitwarden_feed_absent() {
+  [[ $(bitwarden_feed_state) == absent ]]
 }
 bitwarden_native_available() {
   bitwarden_in_feed &&
@@ -1174,11 +1196,14 @@ elif bitwarden_in_feed; then
   # The feed still has a version this kernel already refused. Stay quiet and
   # leave the Flatpak uninstalled until that version changes.
   bitwarden_native_failed=1
-else
+elif bitwarden_feed_absent; then
   # A failing fallback install stops setup, as it did when the Flatpak was the
   # only desktop path. set -e exits on that failure.
   ensure_user_flatpak "$bitwarden_flatpak"
   bitwarden_ready=1
+else
+  bitwarden_native_failed=1
+  echo "pacman -Si bitwarden could not be read, so the user Flatpak was not installed. Rerun ./install.sh once that query succeeds." >&2
 fi
 freetube_ready=1
 if ! ensure_user_flatpak io.freetubeapp.FreeTube; then

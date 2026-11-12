@@ -267,7 +267,7 @@ class UpdateTests(unittest.TestCase):
             raise updater.UpdateError('FreeTube user Flatpak update failed')
         if args[:3] == ['flatpak', '--user', 'list']:
             return 'com.bitwarden.desktop\nio.freetubeapp.FreeTube\norg.example.Unowned'
-        # Absence is pacman's exit status. Empty success is not "no package".
+        # A failure without pacman's absence phrase is unknown, not a missing package.
         if args[:2] == ['pacman', '-Si'] and 'bitwarden' in args:
             raise updater.UpdateError('pacman failed (exit 1).')
         if args == ['omarchy', 'plugin', 'list', '--json']:
@@ -333,7 +333,8 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(self.machine_calls[0], ['omarchy', 'update'])
         # T3 Code updates itself (decision 0020); update-all runs no t3 command.
         self.assertFalse(any(call[0] == 't3' for call in self.machine_calls))
-        self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], self.machine_calls)
+        # The fixture's pacman -Si failure has no absence phrase, so the installed Flatpak stays put.
+        self.assertNotIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], self.machine_calls)
         self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'io.freetubeapp.FreeTube'], self.machine_calls)
         self.assertNotIn('org.example.Unowned', str(self.machine_calls))
         self.assertFalse(any(call[:2] == ['omarchy', 'plugin'] for call in self.machine_calls))
@@ -717,13 +718,13 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
         self.assertIn('Omarchy update command completed', receipt['completed'])
         self.assertIn('Groundwork configuration applied', receipt['completed'])
         self.assertIn('T3 Code updates itself; no page-size check on 4 KiB pages', receipt['completed'])
-        self.assertIn('Bitwarden user Flatpak update command completed', receipt['completed'])
+        self.assertNotIn('Bitwarden user Flatpak update command completed', receipt['completed'])
         self.assertIn('FreeTube user Flatpak update failed', receipt['completed'])
         self.assertNotIn('FreeTube user Flatpak update command completed', receipt['completed'])
         self.assertEqual(len(receipt['warnings']), 1)
         self.assertIn('FreeTube user Flatpak update failed', receipt['warnings'][0])
         self.assertIn('Warning: FreeTube user Flatpak update failed', errors.getvalue())
-        self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], self.machine_calls)
+        self.assertNotIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], self.machine_calls)
         self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'io.freetubeapp.FreeTube'], self.machine_calls)
 
     def update_all(self, result='completed'):
@@ -731,7 +732,8 @@ python3 "{self.source}/scripts/groundwork-update.py" register "{self.source}" 1 
             self.assertEqual(updater.update('all'), result)
         receipt = json.loads((self.state / 'update-all-last-success.json').read_text())
         self.assertEqual(receipt['result'], result)
-        self.assertIn('Bitwarden user Flatpak update command completed', receipt['completed'])
+        self.assertNotIn('Bitwarden user Flatpak update command completed', receipt['completed'])
+        self.assertNotIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], self.machine_calls)
         self.assertIn('FreeTube user Flatpak update command completed', receipt['completed'])
         return output.getvalue() + errors.getvalue(), receipt
 
@@ -1023,7 +1025,7 @@ def run(args, **kwargs):
         log.write(json.dumps(args) + '\\n')
     if args[:3] == ['flatpak', '--user', 'list']:
         return 'com.bitwarden.desktop\\nio.freetubeapp.FreeTube'
-    # Absence is pacman's exit status. Empty success is not "no package".
+    # A failure without pacman's absence phrase is unknown, not a missing package.
     if args[:2] == ['pacman', '-Si'] and 'bitwarden' in args:
         raise UpdateError('pacman failed (exit 1).')
     return ''
@@ -1094,6 +1096,7 @@ def run_report(label, argv, deadline):
         self.assertFalse(any(call[0] == 'flatpak' for call in self.machine_calls))
         self.assertFalse(any('groundwork-t3-launcher.py' in ' '.join(call) for call in self.machine_calls))
         calls = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertNotIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], calls)
         self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'io.freetubeapp.FreeTube'], calls)
         self.assertTrue(any(call[-1] == 'reconcile' for call in calls))
         # The closing reports ran in the new code, once each, and not in the old.

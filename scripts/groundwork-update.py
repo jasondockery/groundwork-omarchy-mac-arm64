@@ -1266,17 +1266,23 @@ def reject_t3(page, version, reason):
 
 
 def bitwarden_sync_info():
-    """(in_feed, version) from `pacman -Si bitwarden`.
+    """(present, version) from `pacman -Si bitwarden`.
 
-    The command's exit status is whether the sync database has the package,
-    the same signal setup uses. `LC_ALL=C` asks for the English `Version`
+    present is True when the command succeeds, False when pacman reports the
+    package absent, and None when the query is unknown. Absence is the same
+    split as `pacman_si` in omarchy-feed-watch.py: the failure text contains
+    "was not found" and does not contain "does not exist". `run` appends
+    pacman's stderr to UpdateError. `LC_ALL=C` asks for the English `Version`
     field. A successful command whose label is not that English word still
-    counts as in the feed: a translated label is not a missing package.
+    counts as present: a translated label is not a missing package.
     """
     try:
         text = run(['pacman', '-Si', 'bitwarden'], deadline=30, extra_env={'LC_ALL': 'C'})
-    except (UpdateError, OSError):
-        return False, None
+    except (UpdateError, OSError) as error:
+        detail = str(error)
+        if 'was not found' in detail and 'does not exist' not in detail:
+            return False, None
+        return None, None
     version = None
     for line in text.splitlines():
         key, _, value = line.partition(':')
@@ -1309,15 +1315,17 @@ def bitwarden_version():
 
 
 def bitwarden_flatpak_maintained():
-    """True only while the user Flatpak is the fallback for a feed without bitwarden.
+    """True only while the user Flatpak is the fallback for a proven absence.
 
-    A `bitwarden` command the package owns, or a feed that has the package,
-    means update-all leaves that Flatpak alone. The move stays an offer.
-    Presence is `pacman -Si`'s exit status, not an English `Version` line.
+    A `bitwarden` command the package owns, a feed that has the package, or a
+    query that did not prove the package absent means update-all leaves that
+    Flatpak alone. The move stays an offer. Absence is `pacman -Si`'s
+    "was not found" result, not every failed query and not an English
+    `Version` line.
     """
     if bitwarden_package_command():
         return False
-    return not bitwarden_sync_info()[0]
+    return bitwarden_sync_info()[0] is False
 
 
 def bitwarden_package_command():
@@ -2363,8 +2371,9 @@ def finish_update(scope, source, before, candidate, candidate_ref, completed, wa
                 ('com.bitwarden.desktop', 'Bitwarden'),
                 ('io.freetubeapp.FreeTube', 'FreeTube'),
             ):
-                # While the feed has bitwarden, or the package already owns the
-                # command, do not update the Flatpak and do not record one.
+                # While the package owns the command, the feed has bitwarden, or
+                # the query did not prove the package absent, do not update the
+                # Flatpak and do not record one.
                 if app == 'com.bitwarden.desktop' and not bitwarden_flatpak_maintained():
                     continue
                 if app not in installed:

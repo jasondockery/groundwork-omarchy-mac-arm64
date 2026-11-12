@@ -310,7 +310,18 @@ elif name == 'pacman':
     owned_file = root / 'pacman-owned'
     owners = dict(line.split(' ', 1) for line in owned_file.read_text().splitlines() if ' ' in line) if owned_file.exists() else {}
     if args[:1] == ['-Si'] and len(args) == 2:
+        # Proven absence is pacman's "was not found" without "does not exist".
+        # FIXTURE_PACMAN_SI=unknown is any other failure. missing-repo prints both.
+        query = os.environ.get('FIXTURE_PACMAN_SI', '')
+        if query == 'unknown':
+            print('error: failed to synchronize databases', file=sys.stderr)
+            sys.exit(1)
+        if query == 'missing-repo':
+            print("error: repository 'omarchy' does not exist", file=sys.stderr)
+            print("error: package '%s' was not found" % args[1], file=sys.stderr)
+            sys.exit(1)
         if args[1] not in os.environ.get('FIXTURE_FEED', '').split():
+            print("error: package '%s' was not found" % args[1], file=sys.stderr)
             sys.exit(1)
         print('Repository      : omarchy')
         print('Name            : ' + args[1])
@@ -918,6 +929,8 @@ raise SystemExit(os.WEXITSTATUS(status))
         return self.config.read_bytes()
 
     def test_default_installs_enables_and_reloads(self):
+        # The feed has no bitwarden package: pacman says it was not found.
+        (self.bin / 'pacman').symlink_to(self.bin / 'stub')
         self.run_install()
         self.assertEqual(self.config.read_bytes(), (REPO / 'keyd/default.conf').read_bytes())
         calls = self.calls()
@@ -1041,6 +1054,7 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertNotIn(['omarchy', 'pkg', 'add', 'flatpak'], self.calls())
 
     def test_failed_bitwarden_install_stops_before_configuration(self):
+        (self.bin / 'pacman').symlink_to(self.bin / 'stub')
         self.env['FIXTURE_FLATPAK_STATUS'] = '1'
         result = self.run_install(success=False)
         self.assertNotIn('are installed.', result.stdout)

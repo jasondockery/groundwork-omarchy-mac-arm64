@@ -145,6 +145,38 @@ class MigrationOfferTests(unittest.TestCase):
 
     # New installs.
 
+    def test_proven_absence_installs_the_flatpak(self):
+        (self.bin / 'pacman').symlink_to(self.bin / 'stub')
+        result = self.run_install()
+        self.assertIn(FLATPAK_INSTALL, self.calls())
+        self.assertTrue((self.root / 'bitwarden-flatpak').exists())
+        self.assertNotIn('could not be read', result.stderr)
+
+    def test_unknown_feed_query_does_not_install_the_flatpak(self):
+        (self.bin / 'pacman').symlink_to(self.bin / 'stub')
+        self.env['FIXTURE_PACMAN_SI'] = 'unknown'
+        result = self.run_install()
+        self.assertNotIn(FLATPAK_INSTALL, self.calls())
+        self.assertFalse((self.root / 'bitwarden-flatpak').exists())
+        self.assertIn('pacman -Si bitwarden could not be read', result.stderr)
+        self.assertIn('Bitwarden desktop was not installed.', result.stdout)
+        self.assertIn(['flatpak', '--user', 'install', '--noninteractive', 'flathub', 'io.freetubeapp.FreeTube'], self.calls())
+
+    def test_missing_repository_is_not_a_missing_package(self):
+        (self.bin / 'pacman').symlink_to(self.bin / 'stub')
+        self.env['FIXTURE_PACMAN_SI'] = 'missing-repo'
+        result = self.run_install()
+        self.assertNotIn(FLATPAK_INSTALL, self.calls())
+        self.assertFalse((self.root / 'bitwarden-flatpak').exists())
+        self.assertIn('pacman -Si bitwarden could not be read', result.stderr)
+
+    def test_missing_pacman_does_not_install_the_flatpak(self):
+        result = self.run_install()
+        self.assertNotIn(FLATPAK_INSTALL, self.calls())
+        self.assertFalse((self.root / 'bitwarden-flatpak').exists())
+        self.assertIn('pacman -Si bitwarden could not be read', result.stderr)
+        self.assertTrue((self.root / 'freetube-flatpak').exists())
+
     def test_new_install_uses_omarchy_package_when_the_feed_has_it(self):
         self.feed_has_native_bitwarden()
         result = self.run_install()
@@ -635,8 +667,8 @@ class UpdateAllBitwardenSummaryTests(unittest.TestCase):
     def update_all(self, owner):
         """update-all without a Bitwarden Flatpak. owner: who pacman says owns bitwarden, or None.
 
-        The feed has no bitwarden package. The shared fixture makes `pacman -Si`
-        fail, which is the absence signal.
+        The feed has no bitwarden package: pacman -Si fails with "was not found"
+        and without "does not exist". A generic pacman failure is not absence.
         """
         updater = update_base.updater
         previous = self.run_command
@@ -650,6 +682,9 @@ class UpdateAllBitwardenSummaryTests(unittest.TestCase):
                 if owner is None:
                     raise updater.UpdateError('pacman failed (exit 1).')
                 return owner
+            if args[:2] == ['pacman', '-Si'] and 'bitwarden' in args:
+                self.machine_calls.append(args)
+                raise updater.UpdateError("pacman failed (exit 1).\nerror: package 'bitwarden' was not found")
             return previous(args, **kwargs)
 
         which = lambda name: '/fixture/' + name
@@ -747,9 +782,49 @@ class UpdateAllBitwardenSummaryTests(unittest.TestCase):
             updater.update('all')
         receipt = json.loads((self.state / 'update-all-last-success.json').read_text())
         self.assertNotIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], self.machine_calls)
+        self.assertNotIn(['pacman', '-Si', 'bitwarden'], self.machine_calls)
         self.assertNotIn('Bitwarden user Flatpak update command completed', receipt['completed'])
         self.assertNotIn('Bitwarden user Flatpak not installed; skipped', receipt['completed'])
         self.assertIn('FreeTube user Flatpak update command completed', receipt['completed'])
+
+    def test_proven_absence_updates_the_installed_flatpak(self):
+        """Protects: update-all still updates the user Flatpak when pacman says bitwarden is absent."""
+        updater = update_base.updater
+        previous = self.run_command
+
+        def absent(args, **kwargs):
+            if args[:2] == ['pacman', '-Si'] and 'bitwarden' in args:
+                self.machine_calls.append(args)
+                raise updater.UpdateError("pacman failed (exit 1).\nerror: package 'bitwarden' was not found")
+            return previous(args, **kwargs)
+
+        with patch.object(updater, 'run', side_effect=absent), redirect_stdout(io.StringIO()):
+            updater.update('all')
+        receipt = json.loads((self.state / 'update-all-last-success.json').read_text())
+        self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], self.machine_calls)
+        self.assertIn('Bitwarden user Flatpak update command completed', receipt['completed'])
+        self.assertIn('FreeTube user Flatpak update command completed', receipt['completed'])
+
+    def test_an_unknown_repo_does_not_update_the_installed_flatpak(self):
+        """Protects: "was not found" plus "does not exist" is unknown, not absence."""
+        updater = update_base.updater
+        previous = self.run_command
+
+        def missing_repo(args, **kwargs):
+            if args[:2] == ['pacman', '-Si'] and 'bitwarden' in args:
+                self.machine_calls.append(args)
+                raise updater.UpdateError(
+                    "pacman failed (exit 1).\nerror: repository 'omarchy' does not exist\n"
+                    "error: package 'bitwarden' was not found")
+            return previous(args, **kwargs)
+
+        with patch.object(updater, 'run', side_effect=missing_repo), redirect_stdout(io.StringIO()):
+            updater.update('all')
+        receipt = json.loads((self.state / 'update-all-last-success.json').read_text())
+        self.assertNotIn(['flatpak', '--user', 'update', '--noninteractive', 'com.bitwarden.desktop'], self.machine_calls)
+        self.assertNotIn('Bitwarden user Flatpak update command completed', receipt['completed'])
+        self.assertNotIn('Bitwarden user Flatpak not installed; skipped', receipt['completed'])
+        self.assertIn(['flatpak', '--user', 'update', '--noninteractive', 'io.freetubeapp.FreeTube'], self.machine_calls)
 
 
 class DeclinedMigrationSettingsTests(unittest.TestCase):
