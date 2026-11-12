@@ -86,32 +86,6 @@
       }
     },
     {
-      "id": "tailscale",
-      "name": "Tailscale",
-      "doc": "docs/decisions/0004-remote-access.md",
-      "groundwork_method": "omarchy pkg add tailscale, then systemctl enable --now tailscaled; sign-in left to you",
-      "probe": {
-        "path": "/usr/bin/tailscale"
-      },
-      "candidates": [
-        {
-          "installer": "omarchy-install-service-tailscale",
-          "command": "omarchy-install-service-tailscale",
-          "menu": "Install > Service > Tailscale"
-        }
-      ],
-      "installer_keywords": [
-        "tailscale"
-      ],
-      "offer": "Omarchy's installer also runs tailscale up, sets you as operator, receives Taildrop files in ~/Downloads, and adds the bar plugin and an admin web app. It asks for tailnet sign-in while it runs.",
-      "self_install": {
-        "needed": true,
-        "evidence": "omarchy-install-service-tailscale runs sudo tailscale up --accept-routes during install. Tailnet sign-in stays interactive and local, so setup and update-all do not run it (issue #18 scope).",
-        "checked": "2026-10-31",
-        "recheck": "2026-11-30"
-      }
-    },
-    {
       "id": "git-filter-repo",
       "name": "git-filter-repo",
       "doc": "docs/git-filter-repo.md",
@@ -237,6 +211,7 @@
     "local-inference": "omarchy pkg add ollama ollama-vulkan (decision 0012).",
     "ai-providers": "Omarchy's declared mise tools.",
     "lsof": "omarchy pkg add lsof, a default host tool (decision 0021).",
+    "tailscale": "Omarchy's omarchy-install-service-tailscale helpers (decision 0025). Setup calls those helpers and leaves tailscale up for you.",
     "packages.txt": "An optional list; each entry is added by hand with omarchy pkg add."
   }
 }

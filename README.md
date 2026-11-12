@@ -24,7 +24,7 @@ less install.sh
 
 For an existing checkout, use `git status` and review local edits before updating it; do not clone over it or reset it. Public HTTPS clones need no GitHub login. For a private copy, use an authorized account or your chosen SSH host alias/key instead. The installer does not configure GitHub credentials. `./install.sh` checks out the pinned `core` submodule; a separate recursive clone is unnecessary.
 
-The default installs T3 Code Nightly (through Omarchy's own installer), Herdr, Tailscale, keyd, Obsidian, Bitwarden (desktop and CLI), FreeTube, and EasyEffects (with `lsp-plugins-lv2` for the equalizer), starts `tailscaled` and keyd, applies the trackpad preferences, and makes Caps Lock Escape on tap and Control while held. Different existing input/keyd files are backed up. `--without-keyd` skips keyd setup. `--without-easyeffects` skips EasyEffects and leaves an existing install and user unit alone. EasyEffects starts with an empty pipeline, so sound stays uncolored until you add a preset. Omarchy continues to own the desktop shortcuts, tmux, shell, editor, and terminal configuration. T3 Code and agent providers still need your local authentication. Follow the [desktop apps guide](docs/apps.md) for Bitwarden sign-in, the local Obsidian vault, previous plugin choices, EasyEffects per-output presets, and free cross-platform sync. Existing notes are never moved automatically.
+The default installs T3 Code Nightly (through Omarchy's own installer), Herdr, Tailscale, keyd, Obsidian, Bitwarden (desktop and CLI), FreeTube, and EasyEffects (with `lsp-plugins-lv2` for the equalizer), finishes Tailscale through Omarchy's helpers, starts keyd, applies the trackpad preferences, and makes Caps Lock Escape on tap and Control while held. Different existing input/keyd files are backed up. `--without-keyd` skips keyd setup. `--without-easyeffects` skips EasyEffects and leaves an existing install and user unit alone. `--without-tailscale` leaves an existing Tailscale install alone. EasyEffects starts with an empty pipeline, so sound stays uncolored until you add a preset. Omarchy continues to own the desktop shortcuts, tmux, shell, editor, and terminal configuration. T3 Code and agent providers still need your local authentication. Follow the [desktop apps guide](docs/apps.md) for Bitwarden sign-in, the local Obsidian vault, previous plugin choices, EasyEffects per-output presets, and free cross-platform sync. Existing notes are never moved automatically.
 
 WayVNC screen sharing is also configured automatically. It starts with the logged-in desktop and listens only on the current online Tailscale address. Show its generated password locally with `groundwork-screen-share password`, then connect from the Mac's Screen Sharing app using `vnc://MACHINE`. On that virtual keyboard, Command follows Omarchy's Super bindings and Option follows the Alt bindings. Follow [desktop-sharing setup](docs/remote-access.md#automatic-desktop-sharing) for the port grant, modifier check, acceptance, and recovery. `--without-screen-sharing` skips it without disabling an existing service. Tailscale sign-in and OS login remain local steps.
 
@@ -45,7 +45,7 @@ git-filter-repo stays off unless you pass `--with-git-filter-repo`. It installs 
 Finish [Tailscale setup](docs/remote-access.md), including the tailnet policy review, interactive sign-in, and device approval. The local commands are:
 
 ```bash
-sudo tailscale up --timeout=5m
+sudo tailscale up --accept-routes --timeout=5m
 sudo tailscale set --ssh
 tailscale status
 ```
@@ -337,7 +337,7 @@ omarchy pkg add stow
 ./install.sh
 ```
 
-`./install.sh` links the trackpad override, reloads and checks a detected Hyprland session, installs Herdr, Tailscale, keyd, Obsidian, Bitwarden, FreeTube, and EasyEffects, enables the Tailscale and keyd services, and installs T3 Code Nightly with `omarchy-install-ai-t3-code`. It seeds Vim mode only for an Obsidian vault without app settings. Caps Lock sends Escape when tapped and Control while held by default, matching the Karabiner habit on macOS. Reboot or log out if it asks, then complete the first-run acceptance above. Use `--without-keyd` to skip keyboard remapping. Use `--without-easyeffects` to skip the equalizer.
+`./install.sh` links the trackpad override, reloads and checks a detected Hyprland session, installs Herdr, Tailscale, keyd, Obsidian, Bitwarden, FreeTube, and EasyEffects, finishes Tailscale through Omarchy's helpers, enables keyd, and installs T3 Code Nightly with `omarchy-install-ai-t3-code`. It seeds Vim mode only for an Obsidian vault without app settings. Caps Lock sends Escape when tapped and Control while held by default, matching the Karabiner habit on macOS. Reboot or log out if it asks, then complete the first-run acceptance above. Use `--without-keyd` to skip keyboard remapping. Use `--without-easyeffects` to skip the equalizer.
 
 Still in an Omarchy terminal, complete the [private remote-access setup](docs/remote-access.md). This repo stores neither tailnet credentials nor your GitHub SSH key.
 
@@ -389,7 +389,7 @@ groundwork syncthing-pair show
 groundwork syncthing-pair add --device-id DEVICE_ID --name NAME --magicdns MAGICDNS
 ```
 
-If Tailscale is not signed in yet, setup says Syncthing is waiting; rerun `groundwork-update` after `sudo tailscale up`. Until then `groundwork-update` and `update-all` finish with a warning and exit 1. The contract is in [groundwork-core](https://github.com/jasondockery/groundwork-core/blob/main/docs/syncthing.md); the choices here and what is not done yet are in `docs/decisions/0013-syncthing-shared-folders.md`.
+If Tailscale is not signed in yet, setup says Syncthing is waiting; rerun `groundwork-update` after `sudo tailscale up --accept-routes --timeout=5m`. Until then `groundwork-update` and `update-all` finish with a warning and exit 1. The contract is in [groundwork-core](https://github.com/jasondockery/groundwork-core/blob/main/docs/syncthing.md); the choices here and what is not done yet are in `docs/decisions/0013-syncthing-shared-folders.md`.
 
 ## Learn Omarchy's defaults
 
@@ -436,7 +436,7 @@ omarchy pkg add stow
 ./install.sh
 ```
 
-That links the trackpad override, installs Herdr, Tailscale, keyd, Obsidian, Bitwarden, FreeTube, and EasyEffects, enables `tailscaled` and `keyd`, and installs the T3 Code app through Omarchy's installer. Pass `--with-blip` only when you want the iMessage client; the default leaves it off. Pass `--with-local-inference` only when you want the Ollama packages; the default leaves them off and downloads no model. See [local inference](docs/local-inference.md). Pass `--without-easyeffects` to skip the equalizer; the default installs it with an empty pipeline. If `~/.config/hypr/input.lua` already exists and differs from this repo's file, the script moves it to `input.lua.bak-omarchy-groundwork`, preserving numbered predecessors if necessary, and then links the copy from this repo. A file that already matches is linked without a backup. It does not configure Git/SSH accounts. Complete the [Tailscale setup](docs/remote-access.md) and [desktop apps setup](docs/apps.md) after install.
+That links the trackpad override, installs Herdr, Tailscale, keyd, Obsidian, Bitwarden, FreeTube, and EasyEffects, finishes Tailscale through Omarchy's helpers, enables `keyd`, and installs the T3 Code app through Omarchy's installer. Pass `--with-blip` only when you want the iMessage client; the default leaves it off. Pass `--with-local-inference` only when you want the Ollama packages; the default leaves them off and downloads no model. See [local inference](docs/local-inference.md). Pass `--without-easyeffects` to skip the equalizer; the default installs it with an empty pipeline. Pass `--without-tailscale` to leave Tailscale alone; the default finishes Omarchy's service setup and leaves sign-in for you. If `~/.config/hypr/input.lua` already exists and differs from this repo's file, the script moves it to `input.lua.bak-omarchy-groundwork`, preserving numbered predecessors if necessary, and then links the copy from this repo. A file that already matches is linked without a backup. It does not configure Git/SSH accounts. Complete the [Tailscale setup](docs/remote-access.md) and [desktop apps setup](docs/apps.md) after install.
 
 ### Caps Lock: Escape on tap, Control while held
 

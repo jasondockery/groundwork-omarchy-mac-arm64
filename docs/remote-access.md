@@ -4,13 +4,19 @@ The [shared Tailscale guide in groundwork-core](https://github.com/jasondockery/
 
 ## Install and sign in
 
-`./install.sh` installs Tailscale from the Arch package feed and enables `tailscaled`. Complete interactive sign-in on the Omarchy machine:
+`./install.sh` finishes Tailscale the way Omarchy does. It asks `omarchy-installed-service-tailscale` whether the service is already there. When that check says the service is missing, setup adds the package with `omarchy-pkg-add tailscale` and enables `tailscaled`. Sign-in stays a command you run yourself, so setup can finish when nobody is at the keyboard.
+
+When this machine still needs a tailnet login, setup prints this command and exits successfully:
 
 ```bash
-sudo tailscale up --timeout=5m
+sudo tailscale up --accept-routes --timeout=5m
 ```
 
 Open the URL it prints and approve the device in your tailnet if required. If it times out waiting for approval, finish approval and retry. On an already configured device, preserve its current options if `tailscale up` asks for them; do not add `--reset` to silence that message.
+
+After that login, run `groundwork-update`. Setup then sets your user as the Tailscale operator, enables Taildrop so received files land in `~/Downloads`, enables the `omarchy.tailscale` bar plugin, and installs the Tailscale Admin Console app. A machine that is already signed in gets those four steps during setup. A later run leaves them alone when they are already in place.
+
+`--without-tailscale` saves `"tailscale": false` in `~/.config/groundwork/omarchy.json` and leaves an existing Tailscale install alone. `--with-tailscale` is the default and removes that saved opt-out. See [decision 0025](decisions/0025-tailscale-omarchy-setup.md).
 
 Review the shared guide's owner-scoped network grant and SSH check-mode policy before enabling inbound Tailscale SSH:
 

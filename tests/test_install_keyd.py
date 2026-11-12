@@ -84,6 +84,8 @@ elif name == 'sudo':
         sys.exit(0)
     if args[0] in ('systemctl', 'ufw'):
         sys.exit(0)
+    if args[:2] == ['tailscale', 'set'] and len(args) == 3 and args[2].startswith('--operator=') and ' ' not in args[2]:
+        sys.exit(0)
     if args[:2] == ['loginctl', 'enable-linger']:
         if os.environ.get('FIXTURE_LINGER_STATUS', '0') == '0':
             linger = root / 'var/lib/systemd/linger' / args[2]
@@ -357,6 +359,11 @@ elif name == 'systemctl':
         sys.exit(0 if os.environ.get('FIXTURE_SYNCTHING_ACTIVE') == '1' else 3)
     if args[:1] == ['--user'] and 'groundwork-easyeffects.service' in args:
         sys.exit(int(os.environ.get('FIXTURE_EASYEFFECTS_SYSTEMCTL_STATUS', '0')))
+    if 'omarchy-tailscale-receive.service' in args:
+        enabled = os.environ.get('FIXTURE_TAILSCALE_RECEIVE') == '1'
+        if 'is-enabled' in args or 'is-active' in args:
+            sys.exit(0 if enabled else 1)
+        sys.exit(int(os.environ.get('FIXTURE_TAILSCALE_RECEIVE_ENABLE_STATUS', '0')))
     if args == ['is-enabled', 'tmp.mount']:
         unit = root / 'etc/systemd/system/tmp.mount'
         if unit.is_symlink() and os.readlink(unit) == '/dev/null':
@@ -578,6 +585,48 @@ elif name == 'omarchy':
         if status:
             sys.exit(status)
         print(os.environ.get('FIXTURE_PLUGIN_LIST', '[]'))
+elif name == 'omarchy-installed-service-tailscale':
+    forced = os.environ.get('FIXTURE_TAILSCALE_INSTALLED', '')
+    if forced == '1':
+        sys.exit(0)
+    if forced == '0':
+        sys.exit(1)
+    if forced == 'timeout':
+        sys.exit(124)
+    down = os.environ.get('FIXTURE_SERVICES_DOWN', '').split()
+    if 'tailscaled' in down or 'tailscaled.service' in down:
+        sys.exit(1)
+    sys.exit(0)
+elif name == 'omarchy-pkg-add':
+    if args != ['tailscale']:
+        sys.exit(1)
+    if os.environ.get('FIXTURE_TAILSCALE_PKG_STATUS') == 'skip':
+        sys.exit(0)
+    target = root / 'bin' / 'tailscale'
+    if not target.exists():
+        target.symlink_to(root / 'bin' / 'stub')
+elif name == 'omarchy-plugin-list':
+    if args == ['--json']:
+        status = int(os.environ.get('FIXTURE_PLUGIN_LIST_STATUS', '0'))
+        if status:
+            sys.exit(status)
+        print(os.environ.get('FIXTURE_PLUGIN_LIST', '[]'))
+        sys.exit(0)
+    sys.exit(1)
+elif name == 'omarchy-plugin-enable':
+    sys.exit(0 if args == ['omarchy.tailscale'] else 1)
+elif name == 'omarchy-webapp-install':
+    sys.exit(0)
+elif name == 'tailscale':
+    if args == ['status', '--json']:
+        state = os.environ.get('FIXTURE_TAILSCALE_STATE', '')
+        if not state or state == 'fail':
+            sys.exit(1)
+        print(json.dumps({'BackendState': state}))
+        sys.exit(0)
+    if args == ['debug', 'prefs']:
+        print(json.dumps({'OperatorUser': os.environ.get('FIXTURE_TAILSCALE_OPERATOR', '')}))
+        sys.exit(0)
 '''
 
 
@@ -602,7 +651,8 @@ class InstallKeydTests(unittest.TestCase):
         stub.write_text(STUB)
         stub.chmod(0o755)
         for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'omarchy-install-dev-env', 'omarchy-remove-dev-env', 'stow', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw', 'getconf', 'readelf', 'syncthing', 'loginctl', 'stat', 'lsof', 'shellcheck',
-                     'omarchy-install-ai-t3-code'):
+                     'omarchy-install-ai-t3-code', 'omarchy-installed-service-tailscale', 'omarchy-pkg-add',
+                     'omarchy-plugin-enable', 'omarchy-plugin-list', 'omarchy-webapp-install'):
             (self.bin / name).symlink_to(stub)
         (self.bin / 'git').symlink_to(host_tool('git'))
         (self.root / 'home').mkdir()
@@ -766,7 +816,7 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         privileged = [call for call in self.calls() if call[0] == 'sudo']
         self.assertEqual(privileged[0], ['sudo', '-n', '/usr/bin/true'])
-        self.assertIn(['sudo', 'systemctl', 'enable', '--now', 'tailscaled'], privileged)
+        self.assertIn(['sudo', 'systemctl', 'enable', '--now', 'tailscaled.service'], privileged)
         self.assertNotIn(['sudo', '-v'], privileged)
 
     def test_update_without_terminal_or_cached_sudo_stops_before_changes(self):
@@ -776,7 +826,7 @@ raise SystemExit(os.WEXITSTATUS(status))
                                 env=self.env, capture_output=True, text=True, timeout=30, start_new_session=True)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('no terminal is available', result.stderr)
-        self.assertNotIn(['sudo', 'systemctl', 'enable', '--now', 'tailscaled'], self.calls())
+        self.assertNotIn(['sudo', 'systemctl', 'enable', '--now', 'tailscaled.service'], self.calls())
 
     def test_update_primes_sudo_at_the_foreground_terminal(self):
         self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
@@ -787,7 +837,7 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertIn(b'Fixture password:', result.stdout)
         privileged = [call for call in self.calls() if call[0] == 'sudo']
         self.assertEqual(privileged[0], ['sudo', '/usr/bin/true'])
-        self.assertIn(['sudo', 'systemctl', 'enable', '--now', 'tailscaled'], privileged)
+        self.assertIn(['sudo', 'systemctl', 'enable', '--now', 'tailscaled.service'], privileged)
 
     def test_screen_sharing_firewall_rule_is_added_once(self):
         self.prepare_routine_update('--without-keyd')
@@ -931,11 +981,13 @@ raise SystemExit(os.WEXITSTATUS(status))
     def test_default_installs_enables_and_reloads(self):
         # The feed has no bitwarden package: pacman says it was not found.
         (self.bin / 'pacman').symlink_to(self.bin / 'stub')
-        self.run_install()
+        result = self.run_install()
         self.assertEqual(self.config.read_bytes(), (REPO / 'keyd/default.conf').read_bytes())
         calls = self.calls()
         self.assertIn(['omarchy', 'pkg', 'add', 'herdr'], calls)
-        self.assertIn(['omarchy', 'pkg', 'add', 'tailscale'], calls)
+        self.assertNotIn(['omarchy', 'pkg', 'add', 'tailscale'], calls)
+        self.assertNotIn(['omarchy-pkg-add', 'tailscale'], calls)
+        self.assertIn('sudo tailscale up --accept-routes --timeout=5m', result.stdout)
         self.assertIn(['omarchy', 'pkg', 'add', 'obsidian'], calls)
         self.assertIn(['omarchy', 'pkg', 'add', 'bitwarden-cli'], calls)
         self.assertTrue((self.root / 'bitwarden-flatpak').exists())
@@ -943,7 +995,8 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertIn(['flatpak', '--user', 'install', '--noninteractive', 'flathub', 'io.freetubeapp.FreeTube'], calls)
         settings = self.root / 'home/Documents/Obsidian/my_obsidian_vault/.obsidian/app.json'
         self.assertEqual(json.loads(settings.read_text()), {'vimMode': True})
-        self.assertIn(['sudo', 'systemctl', 'enable', '--now', 'tailscaled'], calls)
+        self.assertNotIn(['sudo', 'systemctl', 'enable', '--now', 'tailscaled'], calls)
+        self.assertNotIn(['sudo', 'systemctl', 'enable', '--now', 'tailscaled.service'], calls)
         package = calls.index(['omarchy', 'pkg', 'add', 'keyd'])
         enable = calls.index(['sudo', 'systemctl', 'enable', '--now', 'keyd'])
         reload = calls.index(['sudo', 'keyd', 'reload'])
@@ -1144,6 +1197,7 @@ raise SystemExit(os.WEXITSTATUS(status))
                               (('--with-git-filter-repo', '--without-git-filter-repo'), False),
                               (('--with-tmp-on-disk', '--without-tmp-on-disk'), False),
                               (('--with-easyeffects', '--without-easyeffects'), False),
+                              (('--with-tailscale', '--without-tailscale'), False),
                               (('--help',), True)]:
             with self.subTest(args=args):
                 self.run_install(*args, success=success)
@@ -1374,7 +1428,7 @@ raise SystemExit(os.WEXITSTATUS(status))
         calls = self.calls()
         self.assertLess(
             calls.index(['sudo', '-v']),
-            calls.index(['sudo', 'systemctl', 'enable', '--now', 'tailscaled']))
+            calls.index(['sudo', 'systemctl', 'enable', '--now', 'keyd']))
         self.assertIn(['omarchy', 'pkg', 'add', 'herdr'], calls)
 
     def test_readelf_comes_from_binutils(self):
@@ -1572,7 +1626,7 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertFalse(any(call[:3] == ['omarchy', 'pkg', 'aur'] for call in calls))
 
     def test_package_helper_successful_skip_fails_before_configuration(self):
-        for package, executable in (('herdr', 'herdr'), ('tailscale', 'tailscale'),
+        for package, executable in (('herdr', 'herdr'),
                                     ('obsidian', 'obsidian'), ('bitwarden-cli', 'bw'),
                                     ('flatpak', 'flatpak')):
             with self.subTest(package=package):
@@ -1582,6 +1636,13 @@ raise SystemExit(os.WEXITSTATUS(status))
                 self.assertNotIn('are installed.', result.stdout)
                 self.assertFalse(any(call[0] in ('curl', 'stow', 'hyprctl') for call in self.calls()))
                 (self.bin / executable).symlink_to(self.bin / 'stub')
+        (self.bin / 'tailscale').unlink()
+        self.env.update(FIXTURE_TAILSCALE_INSTALLED='0', FIXTURE_TAILSCALE_PKG_STATUS='skip')
+        result = self.run_install(success=False)
+        self.assertIn('tailscale is still unavailable', result.stderr)
+        self.assertNotIn('are installed.', result.stdout)
+        self.assertFalse(any(call[0] in ('curl', 'stow', 'hyprctl') for call in self.calls()))
+        (self.bin / 'tailscale').symlink_to(self.bin / 'stub')
 
     def seed_blip_commands(self, *, socat=True, bun=False):
         for name in ('jq', 'ssh', 'notify-send', 'wl-copy', 'xdg-open'):
@@ -1833,6 +1894,7 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertIn('--without-local-inference', result.stdout)
         self.assertIn('--with-easyeffects', result.stdout)
         self.assertIn('--without-easyeffects', result.stdout)
+        self.assertIn('--without-tailscale', result.stdout)
         self.assertIn('groundwork-easyeffects.service', result.stdout)
         self.assertIn('next desktop login', result.stdout)
 
@@ -2196,6 +2258,145 @@ raise SystemExit(os.WEXITSTATUS(status))
         # The update commands exist so the retry is possible.
         self.assertTrue((self.root / 'home/.local/bin/groundwork-update').exists())
         self.assertIn('could not be applied', result.stderr)
+
+    def assert_no_tailscale_up(self, calls):
+        self.assertFalse(any(arg == 'up' for call in calls for arg in call), calls)
+        self.assertFalse(any('--ssh' in arg for call in calls for arg in call), calls)
+
+    def tailscale_followup_calls(self, calls):
+        return [call for call in calls if call[:1] in (['omarchy-pkg-add'], ['omarchy-plugin-enable'], ['omarchy-webapp-install'])
+                or call[:3] == ['sudo', 'tailscale', 'set']
+                or (call[:4] == ['sudo', 'systemctl', 'enable', '--now'] and call[-1:] == ['tailscaled.service'])
+                or (call[:3] == ['systemctl', '--user', 'enable'] and 'omarchy-tailscale-receive.service' in call)]
+
+    def test_tailscale_installed_rerun_changes_nothing(self):
+        # Protects: a second run leaves a finished Omarchy Tailscale setup alone.
+        self.env['USER'] = 'fixture-user'
+        self.env.update(FIXTURE_TAILSCALE_INSTALLED='1', FIXTURE_TAILSCALE_STATE='Running',
+                        FIXTURE_TAILSCALE_OPERATOR='fixture-user', FIXTURE_TAILSCALE_RECEIVE='1',
+                        FIXTURE_PLUGIN_LIST='[{"id": "omarchy.tailscale", "enabled": true}]')
+        desktop = self.root / 'home/.local/share/applications/Tailscale.desktop'
+        desktop.parent.mkdir(parents=True)
+        desktop.write_text('[Desktop Entry]\nExec=https://login.tailscale.com/admin/machines\n')
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertEqual(self.tailscale_followup_calls(self.calls()), [])
+        self.assert_no_tailscale_up(self.calls())
+        self.assertNotIn('sudo tailscale up --accept-routes --timeout=5m', result.stdout)
+        saved = json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())
+        self.assertNotIn('tailscale', saved)
+        (self.root / 'calls.jsonl').unlink()
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertEqual(self.tailscale_followup_calls(self.calls()), [])
+        self.assert_no_tailscale_up(self.calls())
+        self.assertNotIn('tailscale', json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text()))
+        self.assertEqual(desktop.read_text(), '[Desktop Entry]\nExec=https://login.tailscale.com/admin/machines\n')
+
+    def test_tailscale_already_installed_and_signed_in_finishes_followups(self):
+        # Protects: a daemon Omarchy already reports still gets the four follow-up steps.
+        self.env['USER'] = 'fixture-user'
+        self.env.update(FIXTURE_TAILSCALE_INSTALLED='1', FIXTURE_TAILSCALE_STATE='Running')
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        calls = self.calls()
+        self.assertNotIn(['omarchy-pkg-add', 'tailscale'], calls)
+        self.assertNotIn(['sudo', 'systemctl', 'enable', '--now', 'tailscaled.service'], calls)
+        self.assertIn(['sudo', 'tailscale', 'set', '--operator=fixture-user'], calls)
+        self.assertIn(['systemctl', '--user', 'enable', '--now', 'omarchy-tailscale-receive.service'], calls)
+        self.assertIn(['omarchy-plugin-enable', 'omarchy.tailscale'], calls)
+        self.assertIn(['omarchy-webapp-install', 'Tailscale', 'https://login.tailscale.com/admin/machines',
+                       'https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/tailscale-light.png'], calls)
+        self.assert_no_tailscale_up(calls)
+        self.assertNotIn('sudo tailscale up --accept-routes --timeout=5m', result.stdout)
+
+    def test_tailscale_missing_and_signed_in_uses_omarchy_helpers(self):
+        # Protects: a signed-in machine gets Omarchy's follow-up steps without tailscale up.
+        self.env['USER'] = 'fixture-user'
+        self.env.update(FIXTURE_TAILSCALE_INSTALLED='0', FIXTURE_TAILSCALE_STATE='Running')
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        calls = self.calls()
+        self.assertLess(calls.index(['omarchy-pkg-add', 'tailscale']),
+                        calls.index(['sudo', 'systemctl', 'enable', '--now', 'tailscaled.service']))
+        self.assertIn(['sudo', 'tailscale', 'set', '--operator=fixture-user'], calls)
+        self.assertIn(['systemctl', '--user', 'enable', '--now', 'omarchy-tailscale-receive.service'], calls)
+        self.assertIn(['omarchy-plugin-enable', 'omarchy.tailscale'], calls)
+        self.assertIn(['omarchy-webapp-install', 'Tailscale', 'https://login.tailscale.com/admin/machines',
+                       'https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/tailscale-light.png'], calls)
+        self.assert_no_tailscale_up(calls)
+        self.assertNotIn('sudo tailscale up --accept-routes --timeout=5m', result.stdout)
+        self.assertNotIn('tailscale', json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text()))
+
+    def test_tailscale_opt_out_records_off_and_leaves_an_existing_install_alone(self):
+        # Protects: the saved opt-out does not remove or reinstall Tailscale.
+        self.env['FIXTURE_TAILSCALE_INSTALLED'] = '0'
+        desktop = self.root / 'home/.local/share/applications/Tailscale.desktop'
+        desktop.parent.mkdir(parents=True)
+        desktop.write_text('user owned tailscale app\n')
+        result = self.run_install('--without-tailscale', '--without-keyd', '--without-screen-sharing')
+        self.assertIn('Skipped Tailscale setup', result.stdout)
+        self.assertEqual(desktop.read_text(), 'user owned tailscale app\n')
+        self.assertEqual(self.tailscale_followup_calls(self.calls()), [])
+        self.assert_no_tailscale_up(self.calls())
+        saved = json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())
+        self.assertIs(saved['tailscale'], False)
+        (self.root / 'calls.jsonl').unlink()
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertIn('Skipped Tailscale setup', result.stdout)
+        self.assertEqual(desktop.read_text(), 'user owned tailscale app\n')
+        self.assertEqual(self.tailscale_followup_calls(self.calls()), [])
+        self.assertIs(json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())['tailscale'], False)
+
+    def test_tailscale_unattended_login_does_not_run_tailscale_up(self):
+        # Protects: a machine that still needs login exits 0 with the next command.
+        self.env.update(FIXTURE_TAILSCALE_INSTALLED='0', FIXTURE_TAILSCALE_STATE='NeedsLogin')
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        calls = self.calls()
+        self.assertIn(['omarchy-pkg-add', 'tailscale'], calls)
+        self.assertIn(['sudo', 'systemctl', 'enable', '--now', 'tailscaled.service'], calls)
+        self.assertNotIn(['sudo', 'tailscale', 'set', '--operator=fixture-user'], calls)
+        self.assertNotIn(['omarchy-plugin-enable', 'omarchy.tailscale'], calls)
+        self.assertNotIn(['omarchy-webapp-install', 'Tailscale', 'https://login.tailscale.com/admin/machines',
+                          'https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/tailscale-light.png'], calls)
+        self.assertFalse(any('omarchy-tailscale-receive.service' in call and 'enable' in call for call in calls))
+        self.assert_no_tailscale_up(calls)
+        self.assertIn('Complete tailnet sign-in with: sudo tailscale up --accept-routes --timeout=5m', result.stdout)
+        self.env['FIXTURE_TAILSCALE_INSTALLED'] = '1'
+        (self.root / 'calls.jsonl').unlink()
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertEqual(self.tailscale_followup_calls(self.calls()), [])
+        self.assert_no_tailscale_up(self.calls())
+        self.assertIn('Complete tailnet sign-in with: sudo tailscale up --accept-routes --timeout=5m', result.stdout)
+
+    def test_tailscale_timeout_on_unattended_update_leaves_tailscale_unchanged(self):
+        # Protects: a 15-second Tailscale check that does not finish is not a privileged change.
+        self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
+        self.env['FIXTURE_TAILSCALE_INSTALLED'] = 'timeout'
+        result = subprocess.run(['python3', str(REPO / 'scripts/groundwork-update.py'), 'setup', str(REPO), '--update'],
+                                env=self.env, capture_output=True, text=True, timeout=30, start_new_session=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Omarchy's Tailscale check did not finish within 15 seconds, so setup left Tailscale unchanged.", result.stderr)
+        self.assertIn('sudo tailscale up --accept-routes --timeout=5m', result.stdout)
+        self.assertNotIn('no terminal is available', result.stderr)
+        self.assertNotIn(['sudo', 'systemctl', 'enable', '--now', 'tailscaled.service'], self.calls())
+        self.assert_no_tailscale_up(self.calls())
+
+    def test_tailscale_timeout_on_direct_install_leaves_tailscale_unchanged(self):
+        # Protects: a direct install also leaves Tailscale unchanged when the check does not finish.
+        self.env['FIXTURE_TAILSCALE_INSTALLED'] = 'timeout'
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertIn("Omarchy's Tailscale check did not finish within 15 seconds, so setup left Tailscale unchanged.", result.stderr)
+        self.assertIn('sudo tailscale up --accept-routes --timeout=5m', result.stdout)
+        self.assertNotIn(['omarchy-pkg-add', 'tailscale'], self.calls())
+        self.assertNotIn(['sudo', 'systemctl', 'enable', '--now', 'tailscaled.service'], self.calls())
+        self.assert_no_tailscale_up(self.calls())
+
+    def test_tailscale_timeout_on_terminal_update_does_not_prompt(self):
+        # Protects: a terminal update does not ask for a password when only the Tailscale check timed out.
+        self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
+        self.env.update(FIXTURE_REQUIRE_TTY='1', FIXTURE_TAILSCALE_INSTALLED='timeout')
+        result = self.run_with_controlling_terminal(command=[
+            'python3', str(REPO / 'scripts/groundwork-update.py'), 'setup', str(REPO), '--update'])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn(b'Fixture password:', result.stdout)
+        self.assertNotIn(['sudo', 'systemctl', 'enable', '--now', 'tailscaled.service'], self.calls())
 
 
 if __name__ == '__main__':
