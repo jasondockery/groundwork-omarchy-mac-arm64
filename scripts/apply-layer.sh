@@ -8,7 +8,7 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip] [--with-local-inference|--without-local-inference] [--with-git-filter-repo|--without-git-filter-repo] [--with-tmp-on-disk|--without-tmp-on-disk] [--with-easyeffects|--without-easyeffects] [--migrate-to-omarchy-installers] [--keep-standalone-t3]"
+  echo "Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip] [--with-local-inference|--without-local-inference] [--with-git-filter-repo|--without-git-filter-repo] [--with-tmp-on-disk|--without-tmp-on-disk] [--with-easyeffects|--without-easyeffects] [--with-tailscale|--without-tailscale] [--migrate-to-omarchy-installers] [--keep-standalone-t3]"
   echo "Caps Lock defaults to Escape on tap and Control while held."
   echo "Saved setup choices are reused; explicit options change those choices."
   echo "--without-keyd leaves any existing keyd configuration and service unchanged."
@@ -23,6 +23,8 @@ usage() {
   echo "--without-tmp-on-disk records that preference as off and leaves an existing mask alone. See docs/decisions/0022-tmp-on-disk.md."
   echo "--with-easyeffects (the default) installs EasyEffects and lsp-plugins-lv2 and enables the user unit groundwork-easyeffects.service for the next desktop login. It does not start EasyEffects during setup."
   echo "--without-easyeffects records that preference as off and leaves an existing install and user unit alone. See docs/decisions/0024-easyeffects-equalizer.md."
+  echo "--with-tailscale (the default) finishes Tailscale with Omarchy's service helpers. Once this machine is signed in, that includes the operator, Taildrop receive service, bar plugin, and Admin Console app. Sign-in stays a command you run yourself."
+  echo "--without-tailscale records that preference as off and leaves an existing Tailscale install alone. See docs/decisions/0025-tailscale-omarchy-setup.md."
   echo "--migrate-to-omarchy-installers moves apps installed another way to Omarchy's own installer,"
   echo "  even after an earlier no. Without it, setup asks first and updates only report."
   echo "--keep-standalone-t3 points ~/.local/bin/t3 back at the standalone t3 CLI that setup switched"
@@ -36,6 +38,7 @@ with_local_inference=0
 with_git_filter_repo=0
 with_tmp_on_disk=1
 with_easyeffects=1
+with_tailscale=1
 keyd_choice=""
 sharing_choice=""
 blip_choice=""
@@ -43,6 +46,7 @@ local_inference_choice=""
 git_filter_repo_choice=""
 tmp_on_disk_choice=""
 easyeffects_choice=""
+tailscale_choice=""
 updating=0
 update_plugins=0
 migrate_requested=0
@@ -108,6 +112,14 @@ for arg in "$@"; do
       fi
       easyeffects_choice=$arg
       [[ $arg == --with-easyeffects ]] && with_easyeffects=1 || with_easyeffects=0
+      ;;
+    --with-tailscale | --without-tailscale)
+      if [[ -n $tailscale_choice && $tailscale_choice != "$arg" ]]; then
+        echo "Choose only one of --with-tailscale and --without-tailscale." >&2
+        exit 64
+      fi
+      tailscale_choice=$arg
+      [[ $arg == --with-tailscale ]] && with_tailscale=1 || with_tailscale=0
       ;;
     --update) updating=1 ;;
     --update-plugins) update_plugins=1 ;;
@@ -223,6 +235,17 @@ if [[ -n $stored ]]; then
         ;;
     esac
   fi
+  # Only an opt-out is saved; no line means on (decision 0025).
+  if [[ -z $tailscale_choice ]]; then
+    case ${preferences[9]-} in
+      '') ;;
+      0) with_tailscale=0 ;;
+      *)
+        echo "Saved Tailscale choice is invalid. Preserve ~/.config/groundwork/omarchy.json and repair it before rerunning." >&2
+        exit 1
+        ;;
+    esac
+  fi
 fi
 
 # An updater installed before the Brave spec fast-forwards and then runs this
@@ -282,6 +305,126 @@ screen_share_rule=(allow in on tailscale0 to any port 5900 proto tcp comment 'Gr
 screen_share_rule_marker="${XDG_STATE_HOME:-$HOME/.local/state}/groundwork/ufw-screen-share-rule"
 service_ready() {
   systemctl is-enabled --quiet "$1" 2>/dev/null && systemctl is-active --quiet "$1" 2>/dev/null
+}
+# Tailscale (decision 0025). Omarchy's installed-helper reports the daemon.
+# The operator, Taildrop receive service, bar plugin, and Admin Console app
+# are the rest of omarchy-install-service-tailscale. Setup never runs
+# `tailscale up`. Status and prefs are read only to choose the next step;
+# nothing from them is stored.
+tailscale_login_command='sudo tailscale up --accept-routes --timeout=5m'
+tailscale_admin_url='https://login.tailscale.com/admin/machines'
+tailscale_admin_icon='https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/tailscale-light.png'
+tailscale_signed_in() {
+  local status_json
+  status_json=$(timeout 15 tailscale status --json 2>/dev/null) || return 1
+  printf '%s' "$status_json" | python3 -c 'import json,sys
+try:
+    data=json.loads(sys.stdin.read())
+except json.JSONDecodeError:
+    raise SystemExit(1)
+raise SystemExit(0 if isinstance(data, dict) and data.get("BackendState")=="Running" else 1)'
+}
+tailscale_operator_current() {
+  local prefs
+  [[ -n ${USER:-} ]] || return 1
+  prefs=$(timeout 15 tailscale debug prefs 2>/dev/null) || return 1
+  printf '%s' "$prefs" | python3 -c 'import json,os,sys
+try:
+    data=json.loads(sys.stdin.read())
+except json.JSONDecodeError:
+    raise SystemExit(1)
+operator=data.get("OperatorUser") if isinstance(data, dict) else None
+raise SystemExit(0 if isinstance(operator, str) and operator==os.environ.get("USER") else 1)'
+}
+tailscale_receive_current() {
+  systemctl --user is-enabled --quiet omarchy-tailscale-receive.service &&
+    systemctl --user is-active --quiet omarchy-tailscale-receive.service
+}
+tailscale_plugin_enabled() {
+  local listed
+  listed=$(omarchy-plugin-list --json 2>/dev/null) || return 1
+  printf '%s' "$listed" | python3 -c 'import json,sys
+try:
+    data=json.loads(sys.stdin.read())
+except json.JSONDecodeError:
+    raise SystemExit(1)
+ok=isinstance(data, list) and any(isinstance(item, dict) and item.get("id")=="omarchy.tailscale" and item.get("enabled") is True for item in data)
+raise SystemExit(0 if ok else 1)'
+}
+tailscale_admin_desktop() {
+  printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/applications/Tailscale.desktop"
+}
+tailscale_admin_app_current() {
+  local desktop
+  desktop=$(tailscale_admin_desktop)
+  if [[ -L $desktop || ! -f $desktop ]]; then
+    return 1
+  fi
+  python3 -c 'import pathlib,sys
+text=pathlib.Path(sys.argv[1]).read_text(errors="replace")
+raise SystemExit(0 if sys.argv[2] in text else 1)' "$desktop" "$tailscale_admin_url"
+}
+tailscale_login_needed() {
+  echo "Complete tailnet sign-in with: $tailscale_login_command"
+  echo "Run that command on this machine when you can sign in. Then rerun groundwork-update to set the operator and enable Taildrop, the bar plugin, and the Admin Console app."
+}
+install_tailscale() {
+  local helper_status=0 installed=0 desktop
+  if ! command -v omarchy-installed-service-tailscale >/dev/null; then
+    echo "omarchy-installed-service-tailscale is not on PATH. Update Omarchy, then rerun ./install.sh. Tailscale was left unchanged." >&2
+    exit 1
+  fi
+  timeout 15 omarchy-installed-service-tailscale >/dev/null 2>&1 || helper_status=$?
+  if [[ $helper_status -eq 124 ]]; then
+    echo "Omarchy's Tailscale check did not finish within 15 seconds, so setup left Tailscale unchanged." >&2
+    tailscale_login_needed
+    return 0
+  fi
+  if [[ $helper_status -eq 0 ]]; then
+    installed=1
+  fi
+  if [[ $installed -eq 0 ]]; then
+    omarchy-pkg-add tailscale
+    if ! command -v tailscale >/dev/null; then
+      echo "tailscale is still unavailable after omarchy-pkg-add. Update Omarchy and its package feed, resolve the package error, then rerun ./install.sh." >&2
+      exit 1
+    fi
+    sudo systemctl enable --now tailscaled.service
+  fi
+  if ! tailscale_signed_in; then
+    tailscale_login_needed
+    return 0
+  fi
+  if [[ -z ${USER:-} ]]; then
+    echo "USER is unset, so the Tailscale operator was left unchanged. Rerun from a login session." >&2
+  elif ! tailscale_operator_current; then
+    sudo tailscale set --operator="$USER"
+    echo "Tailscale operator is the current user."
+  fi
+  if ! tailscale_receive_current; then
+    if systemctl --user enable --now omarchy-tailscale-receive.service; then
+      echo "Taildrop receive is enabled. Files land in ~/Downloads."
+    else
+      echo "Taildrop receive was not enabled. When the user service manager is available, run: systemctl --user enable --now omarchy-tailscale-receive.service" >&2
+    fi
+  fi
+  if ! tailscale_plugin_enabled; then
+    if omarchy-plugin-enable omarchy.tailscale; then
+      echo "The Tailscale bar plugin is enabled."
+    else
+      echo "The Tailscale bar plugin was not enabled. Run: omarchy-plugin-enable omarchy.tailscale" >&2
+    fi
+  fi
+  desktop=$(tailscale_admin_desktop)
+  if [[ -L $desktop ]]; then
+    echo "Leaving $desktop alone because it is a symlink. The Tailscale Admin Console app was not replaced." >&2
+  elif ! tailscale_admin_app_current; then
+    if omarchy-webapp-install "Tailscale" "$tailscale_admin_url" "$tailscale_admin_icon"; then
+      echo "The Tailscale Admin Console app is installed."
+    else
+      echo "The Tailscale Admin Console app was not installed. Run: omarchy-webapp-install \"Tailscale\" \"$tailscale_admin_url\" \"$tailscale_admin_icon\"" >&2
+    fi
+  fi
 }
 chromium_extension_current() {
   [[ $(stat -c %a "$chromium_dir" 2>/dev/null) == 755 && $(stat -c %a "$extension_dir" 2>/dev/null) == 755 ]] &&
@@ -741,7 +884,7 @@ privileged_changes_needed() {
   # readelf (binutils) is what update-all uses to check T3 Code builds.
   # lsof is a default host tool (decision 0021). shellcheck is not listed: it is
   # optional and never the reason for a sudo prompt (install_shellcheck).
-  for executable in cursor herdr tailscale syncthing obsidian bw readelf lsof; do
+  for executable in cursor herdr syncthing obsidian bw readelf lsof; do
     command -v "$executable" >/dev/null || return 0
   done
   tmp_mask_needed && return 0
@@ -760,7 +903,14 @@ privileged_changes_needed() {
   # A missing Brave install or a policy that is not root:root and current needs
   # administrator permission. Retrying a launch of an installed brave-bin does not.
   brave_changes_needed && return 0
-  service_ready tailscaled || return 0
+  if [[ $with_tailscale -eq 1 ]] && command -v omarchy-installed-service-tailscale >/dev/null; then
+    if ! timeout 15 omarchy-installed-service-tailscale >/dev/null 2>&1; then
+      return 0
+    fi
+    if tailscale_signed_in && ! tailscale_operator_current; then
+      return 0
+    fi
+  fi
   ! syncthing_linger_needed || return 0
   if command -v chromium >/dev/null; then
     chromium_extension_current || return 0
@@ -1096,9 +1246,10 @@ if ! python3 "$root/scripts/groundwork-tmp.py" apply-scratch; then
   scratch_problem="A scratch root in omarchy.json was refused. Fix the message above and rerun."
 fi
 install_package herdr
-install_package tailscale
-if [[ $updating -eq 0 ]] || ! service_ready tailscaled; then
-  sudo systemctl enable --now tailscaled
+if [[ $with_tailscale -eq 1 ]]; then
+  install_tailscale
+else
+  echo "Skipped Tailscale setup; any existing Tailscale install was left alone."
 fi
 
 # Omarchy owns Obsidian's package, theme, and launch shortcut. A new Bitwarden
@@ -1866,7 +2017,7 @@ install_syncthing
 register_choices() {
   python3 "$root/scripts/groundwork-update.py" register "$root" "$with_keyd" "$with_screen_sharing" \
     "${GROUNDWORK_OBSIDIAN_VAULT:-$HOME/Documents/Obsidian/my_obsidian_vault}" "$with_blip" "$with_local_inference" \
-    "$declined_migrations" "$with_git_filter_repo" "$with_tmp_on_disk" "$with_easyeffects"
+    "$declined_migrations" "$with_git_filter_repo" "$with_tmp_on_disk" "$with_easyeffects" "$with_tailscale"
 }
 register_choices
 saved_declines=$declined_migrations
@@ -2301,19 +2452,23 @@ if [[ $storage_status -ne 0 ]]; then
   exit "$storage_status"
 fi
 if [[ $updating -eq 1 ]]; then
-  echo "Groundwork settings applied. Saved keyd, screen-sharing, Blip, local inference, EasyEffects, and vault choices were preserved."
+  echo "Groundwork settings applied. Saved keyd, screen-sharing, Blip, local inference, EasyEffects, Tailscale, and vault choices were preserved."
   exit 0
 fi
+tailscale_clause=""
+if [[ $with_tailscale -eq 1 ]]; then
+  tailscale_clause=", Tailscale"
+fi
 if [[ $freetube_ready -eq 1 && $bitwarden_ready -eq 1 ]]; then
-  echo "Trackpad configuration, T3 Code, Herdr, Tailscale, Obsidian, Bitwarden, and FreeTube are installed."
+  echo "Trackpad configuration, T3 Code, Herdr${tailscale_clause}, Obsidian, Bitwarden, and FreeTube are installed."
 elif [[ $freetube_ready -eq 1 ]]; then
-  echo "Trackpad configuration, T3 Code, Herdr, Tailscale, Obsidian, and FreeTube are installed."
+  echo "Trackpad configuration, T3 Code, Herdr${tailscale_clause}, Obsidian, and FreeTube are installed."
   echo "Bitwarden desktop was not installed."
 elif [[ $bitwarden_ready -eq 1 ]]; then
-  echo "Trackpad configuration, T3 Code, Herdr, Tailscale, Obsidian, and Bitwarden are installed."
+  echo "Trackpad configuration, T3 Code, Herdr${tailscale_clause}, Obsidian, and Bitwarden are installed."
   echo "FreeTube was not installed."
 else
-  echo "Trackpad configuration, T3 Code, Herdr, Tailscale, and Obsidian are installed."
+  echo "Trackpad configuration, T3 Code, Herdr${tailscale_clause}, and Obsidian are installed."
   echo "Bitwarden desktop was not installed."
   echo "FreeTube was not installed."
 fi
@@ -2326,7 +2481,8 @@ if [[ $with_easyeffects -eq 1 ]]; then
   echo "Open Easy Effects from Super+Space. Sound stays uncolored until you add a preset; per-output presets are in docs/apps.md#easyeffects."
 fi
 echo "Remote access still requires your sign-in and tailnet policy; see docs/remote-access.md."
-echo "Complete tailnet sign-in with: sudo tailscale up --timeout=5m"
-echo "After reviewing the tailnet policy, enable private SSH with: sudo tailscale set --ssh"
+if [[ $with_tailscale -eq 1 ]]; then
+  echo "After reviewing the tailnet policy, enable private SSH with: sudo tailscale set --ssh"
+fi
 echo "Verify the setup using the first-run checklist in README.md."
 echo "Git, SSH account settings, and Omarchy desktop bindings were left alone."

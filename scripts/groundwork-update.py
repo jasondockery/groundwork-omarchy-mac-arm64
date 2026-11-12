@@ -214,6 +214,7 @@ def settings(required=True):
             or ('git_filter_repo' in value and type(value['git_filter_repo']) is not bool)
             or ('tmp_on_disk' in value and type(value['tmp_on_disk']) is not bool)
             or ('easyeffects' in value and type(value['easyeffects']) is not bool)
+            or ('tailscale' in value and type(value['tailscale']) is not bool)
             or ('scratch_dirs' in value and not valid_scratch_dirs(value['scratch_dirs']))
             or ('declined_migrations' in value and not valid_migration_ids(value['declined_migrations']))):
         raise UpdateError(f'Invalid updater settings in {CONFIG}; preserve and repair that file before updating.')
@@ -297,6 +298,16 @@ def easyeffects_enabled(value):
     return flag
 
 
+def tailscale_enabled(value):
+    """Saved Tailscale choice (decision 0025). On unless the machine saved false."""
+    if value is None or 'tailscale' not in value:
+        return True
+    flag = value['tailscale']
+    if type(flag) is not bool:
+        raise UpdateError(f'Invalid updater settings in {CONFIG}; preserve and repair that file before updating.')
+    return flag
+
+
 def valid_scratch_dirs(names):
     return (isinstance(names, list) and len(names) <= SCRATCH_DIRS_MAX
             and all(isinstance(name, str) and SCRATCH_DIR_NAME.fullmatch(name) for name in names))
@@ -331,7 +342,7 @@ def validate_registration(source):
 
 
 def register(source, keyd, screen_sharing, vault, blip='0', local_inference='0', declined=None, git_filter_repo=None,
-             tmp_on_disk=None, easyeffects=None):
+             tmp_on_disk=None, easyeffects=None, tailscale=None):
     source = Path(source).resolve()
     previous = validate_registration(source)
     if blip not in ('0', '1'):
@@ -344,6 +355,8 @@ def register(source, keyd, screen_sharing, vault, blip='0', local_inference='0',
         raise UpdateError('/tmp on disk choice must be 0 or 1.')
     if easyeffects not in (None, '0', '1'):
         raise UpdateError('EasyEffects choice must be 0 or 1.')
+    if tailscale not in (None, '0', '1'):
+        raise UpdateError('Tailscale choice must be 0 or 1.')
     value = dict(previous or {}, schema=1, source=str(source), keyd=keyd == '1',
                  screen_sharing=screen_sharing == '1', obsidian_vault=vault, blip=blip == '1',
                  local_inference=local_inference == '1')
@@ -360,6 +373,11 @@ def register(source, keyd, screen_sharing, vault, blip='0', local_inference='0',
         value.pop('easyeffects', None)
     elif easyeffects == '0':
         value['easyeffects'] = False
+    # On is the default, so only an opt-out is saved (decision 0025).
+    if tailscale == '1':
+        value.pop('tailscale', None)
+    elif tailscale == '0':
+        value['tailscale'] = False
     if declined is not None:
         names = parse_declined_migrations(declined)
         if names:
@@ -2650,6 +2668,7 @@ def main(args):
                  '--with-git-filter-repo', '--without-git-filter-repo',
                  '--with-tmp-on-disk', '--without-tmp-on-disk',
                  '--with-easyeffects', '--without-easyeffects',
+                 '--with-tailscale', '--without-tailscale',
                  '--migrate-to-omarchy-installers', '--keep-standalone-t3', '--update', '--help', '-h'}
         if any(option not in valid for option in options):
             print('Unknown setup argument; nothing changed.', file=sys.stderr)
@@ -2668,11 +2687,12 @@ def main(args):
                 or {'--with-local-inference', '--without-local-inference'} <= set(options)
                 or {'--with-git-filter-repo', '--without-git-filter-repo'} <= set(options)
                 or {'--with-tmp-on-disk', '--without-tmp-on-disk'} <= set(options)
-                or {'--with-easyeffects', '--without-easyeffects'} <= set(options)):
+                or {'--with-easyeffects', '--without-easyeffects'} <= set(options)
+                or {'--with-tailscale', '--without-tailscale'} <= set(options)):
             print('Choose only one option for each setup preference; nothing changed.', file=sys.stderr)
             return 64
         if '--help' in options or '-h' in options:
-            print('Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip] [--with-local-inference|--without-local-inference] [--with-git-filter-repo|--without-git-filter-repo] [--with-tmp-on-disk|--without-tmp-on-disk] [--with-easyeffects|--without-easyeffects] [--migrate-to-omarchy-installers] [--keep-standalone-t3]')
+            print('Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip] [--with-local-inference|--without-local-inference] [--with-git-filter-repo|--without-git-filter-repo] [--with-tmp-on-disk|--without-tmp-on-disk] [--with-easyeffects|--without-easyeffects] [--with-tailscale|--without-tailscale] [--migrate-to-omarchy-installers] [--keep-standalone-t3]')
             print('Saved setup choices are reused. Explicit options change those choices.')
             print('--migrate-to-omarchy-installers moves apps installed another way to Omarchy\'s own installer, even after an earlier no. See docs/decisions/0014-offer-migration-to-omarchy-installers.md.')
             print('--keep-standalone-t3 undoes the automatic t3-cli switch: it points ~/.local/bin/t3 back at the standalone t3 CLI it replaced and saves t3-cli as declined. See docs/decisions/0020-t3-code-through-omarchy-installer.md.')
@@ -2681,6 +2701,7 @@ def main(args):
             print('git-filter-repo is off unless --with-git-filter-repo is set. It installs per user with mise, never with sudo. --without-git-filter-repo records that preference as off and leaves an installed copy alone. See docs/git-filter-repo.md.')
             print('/tmp on disk is on unless --without-tmp-on-disk is set: setup masks tmp.mount, and the next reboot puts /tmp on the root filesystem. --without-tmp-on-disk records that preference as off and leaves an existing mask alone. See docs/decisions/0022-tmp-on-disk.md.')
             print('EasyEffects is on unless --without-easyeffects is set: setup installs easyeffects and lsp-plugins-lv2 and enables the user unit groundwork-easyeffects.service for the next desktop login. It does not start EasyEffects during setup. --without-easyeffects records that preference as off and leaves an existing install and user unit alone. See docs/decisions/0024-easyeffects-equalizer.md.')
+            print('Tailscale is on unless --without-tailscale is set: setup finishes it with Omarchy\'s service helpers. Sign-in stays a command you run yourself. Once this machine is signed in, setup sets the operator and enables Taildrop, the bar plugin, and the Admin Console app. --without-tailscale records that preference as off and leaves an existing install alone. See docs/decisions/0025-tailscale-omarchy-setup.md.')
             return 0
         if run(['uname', '-s']) != 'Linux' or run(['uname', '-m']) != 'aarch64' or not shutil.which('omarchy'):
             raise UpdateError('This layer requires Apple Silicon Omarchy.')
@@ -2713,24 +2734,28 @@ def main(args):
             lines = [int(value['keyd']), int(value['screen_sharing']), value['obsidian_vault'],
                      int(blip_enabled(value)), int(local_inference_enabled(value))]
             # A sixth line only when an offer was declined, git-filter-repo is on,
-            # /tmp on disk is off, or EasyEffects is off, so older readers see five.
-            # The seventh line is git-filter-repo (1, or empty when off), the eighth
-            # /tmp on disk (0 when off, empty when on), the ninth EasyEffects, only when off.
+            # /tmp on disk is off, EasyEffects is off, or Tailscale is off, so older
+            # readers see five. The seventh line is git-filter-repo (1, or empty when
+            # off), the eighth /tmp on disk (0 when off, empty when on), the ninth
+            # EasyEffects (0 when off, empty when on), the tenth Tailscale, only when off.
             declined = declined_migrations(value)
             gfr = git_filter_repo_enabled(value)
             tmp_off = not tmp_on_disk_enabled(value)
             easyeffects_off = not easyeffects_enabled(value)
-            if declined or gfr or tmp_off or easyeffects_off:
+            tailscale_off = not tailscale_enabled(value)
+            if declined or gfr or tmp_off or easyeffects_off or tailscale_off:
                 lines.append(','.join(declined))
-            if gfr or tmp_off or easyeffects_off:
+            if gfr or tmp_off or easyeffects_off or tailscale_off:
                 lines.append(1 if gfr else '')
-            if tmp_off or easyeffects_off:
+            if tmp_off or easyeffects_off or tailscale_off:
                 lines.append(0 if tmp_off else '')
-            if easyeffects_off:
+            if easyeffects_off or tailscale_off:
+                lines.append(0 if easyeffects_off else '')
+            if tailscale_off:
                 lines.append(0)
             print('\n'.join(str(line) for line in lines))
         return 0
-    if args and args[0] == 'register' and len(args) in (5, 6, 7, 8, 9, 10, 11) and args[2] in ('0', '1') and args[3] in ('0', '1'):
+    if args and args[0] == 'register' and len(args) in (5, 6, 7, 8, 9, 10, 11, 12) and args[2] in ('0', '1') and args[3] in ('0', '1'):
         if len(args) >= 6 and args[5] not in ('0', '1'):
             print('Invalid Blip choice; nothing changed.', file=sys.stderr)
             return 64
@@ -2745,6 +2770,9 @@ def main(args):
             return 64
         if len(args) >= 11 and args[10] not in ('0', '1'):
             print('Invalid EasyEffects choice; nothing changed.', file=sys.stderr)
+            return 64
+        if len(args) >= 12 and args[11] not in ('0', '1'):
+            print('Invalid Tailscale choice; nothing changed.', file=sys.stderr)
             return 64
         register(*args[1:])
         return 0

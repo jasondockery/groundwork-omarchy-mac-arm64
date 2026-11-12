@@ -1,11 +1,11 @@
 # 0004. Remote access and AI workbench
 
-Use Tailscale for private recovery and Herdr/T3 Code for AI-assisted development. `./install.sh` installs Herdr and Tailscale, enables `tailscaled`, and reconciles the official T3 Code Nightly CLI. It does not sign in to the user's tailnet or enable a public endpoint.
+Use Tailscale for private recovery and Herdr/T3 Code for AI-assisted development. `./install.sh` installs Herdr, finishes Tailscale through Omarchy's service helpers ([0025](0025-tailscale-omarchy-setup.md)), and reconciles the official T3 Code Nightly CLI. It does not sign in to the user's tailnet or enable a public endpoint.
 
 Follow [private access between your machines](../remote-access.md) for Omarchy installation, and the [shared guide](https://github.com/jasondockery/groundwork-core/blob/main/docs/tailscale.md) for policy, platform differences, and two-way acceptance checks. After reviewing that policy, complete these steps in the local terminal:
 
 ```bash
-sudo tailscale up --timeout=5m
+sudo tailscale up --accept-routes --timeout=5m
 sudo tailscale set --ssh
 tailscale status
 ```

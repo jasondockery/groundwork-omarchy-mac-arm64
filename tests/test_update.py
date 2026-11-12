@@ -602,6 +602,16 @@ class UpdateTests(unittest.TestCase):
         self.assertNotIn('easyeffects', json.loads(self.config.read_text()))
         self.assertTrue(updater.easyeffects_enabled(updater.settings()))
 
+    def test_tailscale_opt_out_is_saved_and_opting_back_in_removes_it(self):
+        # Decision 0025: only the opt-out is stored; on is the default.
+        vault = str(self.home / 'Notes')
+        updater.register(str(self.source), '0', '0', vault, '0', '0', '', '0', '1', '1', '0')
+        self.assertIs(json.loads(self.config.read_text())['tailscale'], False)
+        self.assertFalse(updater.tailscale_enabled(updater.settings()))
+        updater.register(str(self.source), '0', '0', vault, '0', '0', '', '0', '1', '1', '1')
+        self.assertNotIn('tailscale', json.loads(self.config.read_text()))
+        self.assertTrue(updater.tailscale_enabled(updater.settings()))
+
     def test_failed_keyd_copy_and_newer_candidate_keep_both_retry_boundaries_recoverable(self):
         installed = self.root / 'installed-keyd.conf'
         installed.write_bytes((self.source / 'keyd/default.conf').read_bytes())

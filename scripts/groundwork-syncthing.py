@@ -623,7 +623,7 @@ def apply():
     serving = service_active()
     if v4 is None and not serving:
         print('Syncthing is installed but not started: Tailscale has no address yet. '
-              'Sign in with sudo tailscale up, then rerun groundwork-update.', file=sys.stderr)
+              'Sign in with sudo tailscale up --accept-routes --timeout=5m, then rerun groundwork-update.', file=sys.stderr)
         return EXIT_WAITING
     where = gui_override()
     if where:
