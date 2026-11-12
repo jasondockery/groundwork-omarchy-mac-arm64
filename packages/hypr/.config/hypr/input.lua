@@ -1,7 +1,8 @@
 -- Personal Hyprland input overrides. This file layers on Omarchy's defaults
 -- in /usr/share/omarchy/default/hypr/input.lua. List only settings that
 -- differ, each with a reason. Keyboard layout, repeat, and compose stay
--- with Omarchy.
+-- with Omarchy. Gesture replacements are below; other gestures stay in
+-- /usr/share/omarchy/default/hypr/gestures.lua.
 
 hl.config({
   input = {
@@ -18,3 +19,16 @@ hl.config({
     },
   },
 })
+
+-- Three-finger left and right switch workspaces in Omarchy and fight
+-- three-finger drag, including text selection. Unset them, and replace
+-- four-finger move-window swipes with focus of the previous and next
+-- workspace. Unset first: Hyprland rejects a second gesture on the same
+-- fingers and direction. Three-finger up and down, and four-finger down,
+-- stay Omarchy's.
+hl.gesture({ fingers = 3, direction = "left", action = "unset" })
+hl.gesture({ fingers = 3, direction = "right", action = "unset" })
+hl.gesture({ fingers = 4, direction = "left", action = "unset" })
+hl.gesture({ fingers = 4, direction = "right", action = "unset" })
+hl.gesture({ fingers = 4, direction = "left", action = function() hl.dispatch(hl.dsp.focus({ workspace = "r-1" })) end })
+hl.gesture({ fingers = 4, direction = "right", action = function() hl.dispatch(hl.dsp.focus({ workspace = "r+1" })) end })

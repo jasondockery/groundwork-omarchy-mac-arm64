@@ -26,3 +26,18 @@ class InputOverrideTests(unittest.TestCase):
         for keyboard in ('repeat_rate', 'repeat_delay', 'numlock_by_default',
                          'kb_layout', 'kb_options'):
             self.assertNotIn(keyboard, self.text)
+
+    def test_four_finger_swipes_focus_workspaces(self):
+        gestures = [line.strip() for line in self.text.splitlines()
+                    if line.strip().startswith('hl.gesture(')]
+        self.assertEqual(gestures, [
+            'hl.gesture({ fingers = 3, direction = "left", action = "unset" })',
+            'hl.gesture({ fingers = 3, direction = "right", action = "unset" })',
+            'hl.gesture({ fingers = 4, direction = "left", action = "unset" })',
+            'hl.gesture({ fingers = 4, direction = "right", action = "unset" })',
+            'hl.gesture({ fingers = 4, direction = "left", action = function() hl.dispatch(hl.dsp.focus({ workspace = "r-1" })) end })',
+            'hl.gesture({ fingers = 4, direction = "right", action = function() hl.dispatch(hl.dsp.focus({ workspace = "r+1" })) end })',
+        ])
+        self.assertNotIn('hl.dsp.window.move', self.text)
+        self.assertNotIn('direction = "up"', self.text)
+        self.assertNotIn('direction = "down"', self.text)
