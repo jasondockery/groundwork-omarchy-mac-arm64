@@ -591,6 +591,8 @@ elif name == 'omarchy-installed-service-tailscale':
         sys.exit(0)
     if forced == '0':
         sys.exit(1)
+    if forced == 'timeout':
+        sys.exit(124)
     down = os.environ.get('FIXTURE_SERVICES_DOWN', '').split()
     if 'tailscaled' in down or 'tailscaled.service' in down:
         sys.exit(1)
@@ -2362,6 +2364,39 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertEqual(self.tailscale_followup_calls(self.calls()), [])
         self.assert_no_tailscale_up(self.calls())
         self.assertIn('Complete tailnet sign-in with: sudo tailscale up --accept-routes --timeout=5m', result.stdout)
+
+    def test_tailscale_timeout_on_unattended_update_leaves_tailscale_unchanged(self):
+        # Protects: a 15-second Tailscale check that does not finish is not a privileged change.
+        self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
+        self.env['FIXTURE_TAILSCALE_INSTALLED'] = 'timeout'
+        result = subprocess.run(['python3', str(REPO / 'scripts/groundwork-update.py'), 'setup', str(REPO), '--update'],
+                                env=self.env, capture_output=True, text=True, timeout=30, start_new_session=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Omarchy's Tailscale check did not finish within 15 seconds, so setup left Tailscale unchanged.", result.stderr)
+        self.assertIn('sudo tailscale up --accept-routes --timeout=5m', result.stdout)
+        self.assertNotIn('no terminal is available', result.stderr)
+        self.assertNotIn(['sudo', 'systemctl', 'enable', '--now', 'tailscaled.service'], self.calls())
+        self.assert_no_tailscale_up(self.calls())
+
+    def test_tailscale_timeout_on_direct_install_leaves_tailscale_unchanged(self):
+        # Protects: a direct install also leaves Tailscale unchanged when the check does not finish.
+        self.env['FIXTURE_TAILSCALE_INSTALLED'] = 'timeout'
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertIn("Omarchy's Tailscale check did not finish within 15 seconds, so setup left Tailscale unchanged.", result.stderr)
+        self.assertIn('sudo tailscale up --accept-routes --timeout=5m', result.stdout)
+        self.assertNotIn(['omarchy-pkg-add', 'tailscale'], self.calls())
+        self.assertNotIn(['sudo', 'systemctl', 'enable', '--now', 'tailscaled.service'], self.calls())
+        self.assert_no_tailscale_up(self.calls())
+
+    def test_tailscale_timeout_on_terminal_update_does_not_prompt(self):
+        # Protects: a terminal update does not ask for a password when only the Tailscale check timed out.
+        self.prepare_routine_update('--without-keyd', '--without-screen-sharing')
+        self.env.update(FIXTURE_REQUIRE_TTY='1', FIXTURE_TAILSCALE_INSTALLED='timeout')
+        result = self.run_with_controlling_terminal(command=[
+            'python3', str(REPO / 'scripts/groundwork-update.py'), 'setup', str(REPO), '--update'])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn(b'Fixture password:', result.stdout)
+        self.assertNotIn(['sudo', 'systemctl', 'enable', '--now', 'tailscaled.service'], self.calls())
 
 
 if __name__ == '__main__':

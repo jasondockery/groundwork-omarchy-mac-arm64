@@ -904,10 +904,14 @@ privileged_changes_needed() {
   # administrator permission. Retrying a launch of an installed brave-bin does not.
   brave_changes_needed && return 0
   if [[ $with_tailscale -eq 1 ]] && command -v omarchy-installed-service-tailscale >/dev/null; then
-    if ! timeout 15 omarchy-installed-service-tailscale >/dev/null 2>&1; then
-      return 0
-    fi
-    if tailscale_signed_in && ! tailscale_operator_current; then
+    # 124 is the 15-second timeout, and decision 0025 does not ask for administrator permission.
+    local helper_status=0
+    timeout 15 omarchy-installed-service-tailscale >/dev/null 2>&1 || helper_status=$?
+    if [[ $helper_status -eq 0 ]]; then
+      if tailscale_signed_in && ! tailscale_operator_current; then
+        return 0
+      fi
+    elif [[ $helper_status -ne 124 ]]; then
       return 0
     fi
   fi
