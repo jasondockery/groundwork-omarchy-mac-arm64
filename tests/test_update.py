@@ -498,7 +498,7 @@ class UpdateTests(unittest.TestCase):
         for name in ('seed-obsidian.py', 'groundwork-screen-share.py',
                      'groundwork-syncthing.py', 'omarchy-plugins.py',
                      'groundwork-node-pin.py', 'groundwork-commit-guard.py',
-                     'groundwork-tmp.py', 'groundwork-storage.py'):
+                     'groundwork-grep-threads.py', 'groundwork-tmp.py', 'groundwork-storage.py'):
             (self.seed / 'scripts' / name).write_text('# fixture\n')
         dropin = self.seed / 'config'
         dropin.mkdir()

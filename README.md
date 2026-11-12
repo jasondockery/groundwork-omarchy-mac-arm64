@@ -417,7 +417,7 @@ If `~/.config/hypr/mouse.lua` or `~/.config/hypr/omacontrol.lua` sets `touchpad.
 Omarchy already ships these, or owning them would freeze a file that `omarchy update` is supposed to change. Account material stays on the machine.
 
 - Stock Hyprland files: `bindings.lua`, `autostart.lua`, `monitors.lua`, `looknfeel.lua`, `hyprland.lua`
-- `~/.config/git/config` aliases, pull rebase, and diff defaults
+- `~/.config/git/config` aliases, pull rebase, and diff defaults. The one exception is `grep.threads` set to 4 through a Groundwork-owned git include: agents run many git grep searches, and upstream starts one worker per core ([decision 0001](docs/decisions/0001-do-not-apply-groundwork-on-omarchy.md)).
 - Bash aliases for `eza`, `bat`, `starship`, `zoxide`, and `fzf`
 - `~/.config/tmux/tmux.conf` (Omarchy's built-in config stays active)
 - zsh as the login shell, and Linuxbrew
