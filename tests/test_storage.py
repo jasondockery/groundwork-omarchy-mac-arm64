@@ -157,7 +157,6 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(settings[1], 'ExecStart=')
         self.assertIn('--add-prunenames "node_modules .turbo .next"', settings[2])
         self.assertIn('--add-prunepaths "/.snapshots @HOME@/.t3/worktrees @HOME@/.local/share/pnpm"', settings[2])
-
         body = text.replace('--add-prunenames', '').replace('--add-prunepaths', '')
         self.assertNotIn('--prunenames', body)
         self.assertNotIn('--prunepaths', body)
