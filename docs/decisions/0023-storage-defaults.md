@@ -20,5 +20,5 @@ zram, swappiness, page-cluster, the CPU governor, and snapper are already fine. 
 ## Not done
 
 - No live apply on the reference machine in this change. Doctor output from the machine, after the owner runs the apply, is the record that discards, the timer, and the drop-in are in place. The directory zstd level is not one of those records.
-- The template copies the vendor flags, so it can fall behind again. Recheck it when `omarchy-settings` changes `10-omarchy.conf` (compare `systemctl cat plocate-updatedb.service`), and by 2026-12-15. The package file would still supply `PRUNEFS` and `PRUNENAMES` through `--add-*`.
+- The template copies the vendor flags, so it can fall behind again. Recheck it when the Omarchy settings package (`omarchy-settings-dev` on edge) changes `10-omarchy.conf` (compare `systemctl cat plocate-updatedb.service`), and by 2026-12-15. The package file would still supply `PRUNEFS` and `PRUNENAMES` through `--add-*`.
 - No change to zram, swappiness, page-cluster, the CPU governor, or snapper.

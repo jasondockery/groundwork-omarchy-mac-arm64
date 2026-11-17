@@ -158,13 +158,6 @@ class StorageTests(unittest.TestCase):
         self.assertIn('--add-prunenames "node_modules .turbo .next"', settings[2])
         self.assertIn('--add-prunepaths "/.snapshots @HOME@/.t3/worktrees @HOME@/.local/share/pnpm"', settings[2])
 
-    def test_template_keeps_the_vendor_drop_in_flags(self):
-        # omarchy-settings ships 10-omarchy.conf with these two flags. A later drop-in that
-        # clears ExecStart replaces them, and updatedb then walks every btrfs snapshot (issue #157).
-        text = storage.TEMPLATE.read_text(encoding='utf-8')
-        command = [line for line in text.splitlines() if line.startswith('ExecStart=/')][0]
-        self.assertIn('--prune-bind-mounts=no', command)
-        self.assertRegex(command, r'--add-prunepaths "[^"]*(?<![\w.])/\.snapshots(?![\w.])')
         body = text.replace('--add-prunenames', '').replace('--add-prunepaths', '')
         self.assertNotIn('--prunenames', body)
         self.assertNotIn('--prunepaths', body)
@@ -177,6 +170,14 @@ class StorageTests(unittest.TestCase):
             self.assertNotIn('SW' + 'ORPS', source)
             self.assertNotIn('/home/' + account, source)
             self.assertNotIn(account, source.lower())
+
+    def test_template_keeps_the_vendor_drop_in_flags(self):
+        # omarchy-settings ships 10-omarchy.conf with these two flags. A later drop-in that
+        # clears ExecStart replaces them, and updatedb then walks every btrfs snapshot (issue #157).
+        text = storage.TEMPLATE.read_text(encoding='utf-8')
+        command = [line for line in text.splitlines() if line.startswith('ExecStart=/')][0]
+        self.assertIn('--prune-bind-mounts=no', command)
+        self.assertRegex(command, r'--add-prunepaths "[^"]*(?<![\w.])/\.snapshots(?![\w.])')
 
     def test_apply_sets_each_default_once(self):
         status, output, errors = self.apply()
@@ -358,6 +359,33 @@ class StorageTests(unittest.TestCase):
         self.assertTrue(storage.needs_privilege(self.world.machine()))
         status, _, errors = self.apply()
         self.assertEqual(status, 0, errors)
+        self.assertEqual(stat.S_IMODE(dropin.stat().st_mode), 0o644)
+
+    def test_old_dropin_without_the_vendor_flags_is_rewritten(self):
+        # What an earlier apply left on a machine before issue #157: the added names and paths
+        # without --prune-bind-mounts=no and the /.snapshots prune.
+        self.world.gran = '512B'
+        self.world.timer = 'enabled'
+        old = ('[Service]\n'
+               '# The empty ExecStart clears the package command so the next line is the only start.\n'
+               'ExecStart=\n'
+               '# Skip build output and large dependency trees from heavy JS monorepo test runs.\n'
+               f'ExecStart=/usr/bin/updatedb --add-prunenames "node_modules .turbo .next" '
+               f'--add-prunepaths "{self.home}/.t3/worktrees {self.home}/.local/share/pnpm"\n')
+        dropin = self.root / storage.DROPIN_RELATIVE
+        dropin.parent.mkdir(parents=True)
+        dropin.write_text(old)
+        dropin.chmod(0o644)
+        text, failed = self.report()
+        self.assertTrue(failed)
+        self.assertIn('out of date', text)
+        self.assertIn('/.snapshots', text)
+        self.assertTrue(storage.needs_privilege(self.world.machine()))
+        status, _, errors = self.apply()
+        self.assertEqual(status, 0, errors)
+        rendered = storage.render_dropin(storage.TEMPLATE.read_text(encoding='utf-8'), str(self.home))
+        self.assertEqual(dropin.read_text(encoding='utf-8'), rendered)
+        self.assertIn('--prune-bind-mounts=no', dropin.read_text(encoding='utf-8'))
         self.assertEqual(stat.S_IMODE(dropin.stat().st_mode), 0o644)
 
     def test_symlink_directory_is_left_alone(self):
