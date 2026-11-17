@@ -150,12 +150,21 @@ class StorageTests(unittest.TestCase):
         settings = [line for line in text.splitlines() if line and not line.startswith('#')]
         self.assertEqual(comments, [
             '# The empty ExecStart clears the package command so the next line is the only start.',
+            '# Repeat the flags the Omarchy settings package sets in its own drop-in: btrfs subvolumes look like bind mounts, and snapshots are not indexed.',
             '# Skip build output and large dependency trees from heavy JS monorepo test runs.',
         ])
         self.assertEqual(settings[0], '[Service]')
         self.assertEqual(settings[1], 'ExecStart=')
         self.assertIn('--add-prunenames "node_modules .turbo .next"', settings[2])
-        self.assertIn('--add-prunepaths "@HOME@/.t3/worktrees @HOME@/.local/share/pnpm"', settings[2])
+        self.assertIn('--add-prunepaths "/.snapshots @HOME@/.t3/worktrees @HOME@/.local/share/pnpm"', settings[2])
+
+    def test_template_keeps_the_vendor_drop_in_flags(self):
+        # omarchy-settings ships 10-omarchy.conf with these two flags. A later drop-in that
+        # clears ExecStart replaces them, and updatedb then walks every btrfs snapshot (issue #157).
+        text = storage.TEMPLATE.read_text(encoding='utf-8')
+        command = [line for line in text.splitlines() if line.startswith('ExecStart=/')][0]
+        self.assertIn('--prune-bind-mounts=no', command)
+        self.assertRegex(command, r'--add-prunepaths "[^"]*(?<![\w.])/\.snapshots(?![\w.])')
         body = text.replace('--add-prunenames', '').replace('--add-prunepaths', '')
         self.assertNotIn('--prunenames', body)
         self.assertNotIn('--prunepaths', body)
