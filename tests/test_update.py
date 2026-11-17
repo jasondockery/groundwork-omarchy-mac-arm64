@@ -642,8 +642,29 @@ class UpdateTests(unittest.TestCase):
     def test_failing_pacman_probe_leaves_the_original_error_alone(self):
         self.ffmpeg_mismatch({('pacman', '-Si', 'extra/ffmpeg'): updater.UpdateError('pacman failed (exit 1).')})
         errors = self.failed_omarchy_update()
+        self.assertIn(['pacman', '-Si', 'extra/ffmpeg'], self.machine_calls)
         self.assertNotIn('Hint:', errors)
         self.assertIn('Update incomplete', errors)
+
+    def test_pacman_queries_use_the_c_locale(self):
+        self.ffmpeg_mismatch()
+        self.failed_omarchy_update()
+        queries = [kwargs for call, kwargs in zip(self.machine_calls, self.machine_kwargs)
+                   if call[0] in ('pacman', 'vercmp')]
+        self.assertTrue(queries)
+        for kwargs in queries:
+            self.assertEqual(kwargs.get('extra_env'), {'LC_ALL': 'C'})
+
+    def test_pacman_fields_reads_only_the_first_entry_and_joins_wrapped_lines(self):
+        text = ('Repository      : omarchy\nName            : ffmpeg\nProvides        : a  b\n'
+                '                  c\n\nRepository      : extra\nName            : ffmpeg\n'
+                '                  tail\n')
+        fields = updater.pacman_fields(text)
+        self.assertEqual(fields['Repository'], 'omarchy')
+        self.assertEqual(fields['Provides'], 'a  b c')
+        self.assertNotIn('tail', ' '.join(fields.values()))
+        self.assertFalse(updater.PACKAGE_NAME.match('-foo'))
+        self.assertTrue(updater.PACKAGE_NAME.match('lib32-mesa+x'))
 
     def test_tmp_on_disk_opt_out_is_saved_and_opting_back_in_removes_it(self):
         # Decision 0022: only the opt-out is stored; on is the default.

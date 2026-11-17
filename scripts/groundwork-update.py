@@ -2494,13 +2494,21 @@ def resume_update(text):
 
 
 PACMAN_QUERY_SECONDS = 15
-PACKAGE_NAME = re.compile(r'^[a-z0-9@._+-]+$')
+PACKAGE_NAME = re.compile(r'^[a-z0-9@_+][a-z0-9@._+-]*$')
 
 
 def pacman_fields(text):
-    """The first value of each field in `pacman -Si` or `-Qi` output, with wrapped lines joined."""
+    """The first value of each field in `pacman -Si` or `-Qi` output, with wrapped lines joined.
+
+    pacman separates entries with a blank line, and `-Si` of a name in two repositories prints
+    both, so only the first entry is read.
+    """
     fields, name = {}, None
     for line in text.splitlines():
+        if not line.strip():
+            if fields:
+                break
+            continue
         head, separator, rest = line.partition(' : ')
         if separator and not line[:1].isspace() and head.strip():
             name = head.strip()
@@ -2518,7 +2526,8 @@ def ffmpeg_shadow_hint():
     so it cannot change the error the caller is already raising.
     """
     def query(*args):
-        return run(list(args), deadline=PACMAN_QUERY_SECONDS)
+        # pacman translates its field names; the C locale keeps them as parsed below.
+        return run(list(args), deadline=PACMAN_QUERY_SECONDS, extra_env={'LC_ALL': 'C'})
     try:
         first = pacman_fields(query('pacman', '-Si', 'ffmpeg'))
         if first.get('Repository') != 'omarchy' or not first.get('Version'):

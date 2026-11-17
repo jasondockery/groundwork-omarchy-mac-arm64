@@ -29,5 +29,5 @@ The `ffmpeg` PKGBUILD in `omacom/omarchy-pkgs` (`pkgbuilds/ffmpeg/PKGBUILD`, com
 
 ## Not done
 
-- Run on the reference machine on 2026-11-17 at 06:22 EST by the owner, and recorded in [status](../status.md): `ffmpeg 2:9.0.2-5`, `libplacebo 7.387.0-1` and `mpv 1:0.42.0-2` from `[extra]`, `ffmpeg -version` and `mpv --version` start, `ldd /usr/lib/libavfilter.so.12` shows no missing library, and `update-all` finished afterwards.
+- Run on the reference machine on 2026-11-17 at 06:22 EST by the owner, and recorded in [status](../status.md): `ffmpeg 2:9.0.2-5`, `libplacebo 7.387.0-1` and `mpv 1:0.42.0-2` from `[extra]`, `ffmpeg -version` and `mpv --version` start, `ldd /usr/lib/libavfilter.so.12` shows no missing library, and `update-all` finished afterwards (receipt `completed_with_warnings`: the one warning was an unrelated T3 Code staged-update check).
 - Recheck by 2026-12-15. Look at whether the feed's `ffmpeg` was rebuilt against the current `libplacebo`, whether it still shadows `extra`'s newer builds, whether `pacman -Q ffmpeg` has fallen behind `pacman -Si extra/ffmpeg`, and whether it still loads: `ffmpeg -version` and `mpv --version` start, and `ldd /usr/lib/libavfilter.so.12 | grep 'not found'` prints nothing. Remove the status row and the README paragraph when the feed no longer shadows `extra`.
