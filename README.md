@@ -329,7 +329,7 @@ omarchy update
 
 `omarchy-channel-current` should print `edge`. Do not run `omarchy-channel-set`. Reboot if `omarchy update` asks. Later system updates stay on this desktop and use `omarchy update`, which applies the `aarch64-apple` edge pacman config (`[omarchy]` at `https://pkgs.omarchy.org/edge/$arch`, then `[asahi-alarm]`, then Arch Linux ARM). A bare `pacman -Syu` skips that policy.
 
-If `update-all` stops with `installing libplacebo ... breaks dependency 'libplacebo.so=360-64' required by ffmpeg`, the `omarchy` repo's `ffmpeg` is older than Arch Linux ARM's and is shadowing it. All three packages go in one command, because `extra/ffmpeg` alone installs next to the old `libplacebo` and cannot load it. Run `sudo pacman -S extra/ffmpeg extra/libplacebo extra/mpv`, then run `update-all` again ([decision 0026](docs/decisions/0026-ffmpeg-from-alarm-on-apple-silicon.md)).
+If `update-all` stops with `installing libplacebo ... breaks dependency 'libplacebo.so=360-64' required by ffmpeg`, the `omarchy` repo's `ffmpeg` is older than Arch Linux ARM's and is shadowing it. All three packages go in one command, because `extra/ffmpeg` alone installs next to the old `libplacebo` and cannot load it. Run `sudo pacman -S extra/ffmpeg extra/libplacebo extra/mpv`, then run `update-all` again. After a failed `omarchy update`, `update-all` checks for this mismatch with read-only `pacman` queries and prints that command for you; it never runs it ([decision 0026](docs/decisions/0026-ffmpeg-from-alarm-on-apple-silicon.md)).
 
 Personal settings come from this repo, in an Omarchy terminal, after the base system is up. `./install.sh` checks out the pinned `core` submodule, so a separate recursive clone is unnecessary:
 
