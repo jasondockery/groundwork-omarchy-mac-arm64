@@ -132,7 +132,7 @@ def safe_home(environ):
 def locate_ok(home):
     worktrees = f'{home}/.t3/worktrees'
     pnpm = f'{home}/.local/share/pnpm'
-    return f'ok (also skips node_modules, .turbo, .next, {worktrees}, and {pnpm})'
+    return f'ok (also skips /.snapshots, node_modules, .turbo, .next, {worktrees}, and {pnpm})'
 
 
 def render_dropin(template, home):
@@ -391,7 +391,11 @@ def locate_problems(state):
         return ['systemctl could not show whether the plocate drop-in is loaded. Rerun update-all.']
     if dropin == 'unloaded':
         return ['the plocate drop-in is on disk, but systemd has not loaded it. Rerun update-all.']
-    if dropin in ('missing', 'differs'):
+    if dropin == 'differs':
+        return ['the plocate drop-in is out of date or does not match the Groundwork template. An older one lacks the '
+                "/.snapshots prune and --prune-bind-mounts=no that Omarchy's drop-in sets, so updatedb walks every btrfs "
+                'snapshot. Rerun update-all.']
+    if dropin == 'missing':
         home = state['home']
         return ['plocate still uses only the distribution prunes. '
                 f'Rerun update-all to add {", ".join(EXTRA_NAMES)}, and to skip {home}/.t3/worktrees and {home}/.local/share/pnpm.']
