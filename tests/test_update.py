@@ -627,8 +627,10 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(self.git('rev-parse', 'HEAD'), self.initial)
 
     def test_no_ffmpeg_hint_when_ffmpeg_is_not_from_the_omarchy_repo(self):
-        self.ffmpeg_mismatch({('pacman', '-Si', 'ffmpeg'): 'Repository      : extra\nVersion         : 2:9.0.2-5\n'})
+        # Only the repository differs from the mismatch fixture, so no later check can hide a broken one.
+        self.ffmpeg_mismatch({('pacman', '-Si', 'ffmpeg'): 'Repository      : extra\nVersion         : 2:9.0.2-2.1\n'})
         self.assertNotIn('Hint:', self.failed_omarchy_update())
+        self.assertNotIn(['pacman', '-Si', 'extra/ffmpeg'], self.machine_calls)
 
     def test_no_ffmpeg_hint_when_the_omarchy_build_is_not_older(self):
         self.ffmpeg_mismatch({('vercmp', '2:9.0.2-5', '2:9.0.2-2.1'): '0'})
