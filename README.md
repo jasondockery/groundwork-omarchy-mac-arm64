@@ -272,7 +272,7 @@ The install crosses the places in this table. Each step below names the one plac
 | Omarchy, new install | The installer has booted the new Omarchy desktop | `omarchy-channel-current`, `omarchy update`, then `./install.sh` |
 | Another computer | A Mac, Linux, or WSL machine that is not this Omarchy Mac | `groundwork-mac` bootstrap only |
 
-The chosen track is the newest [Omarchy Mac Installer](https://github.com/omacom/omarchy-mac-installer) prerelease plus its signed **edge** catalog. Apple Silicon has only an edge channel: `omarchy-channel-set` refuses `stable` on `aarch64-apple`, and the installer's stable and rc catalogs have no Mac release. The installer app runs in macOS and refuses an existing Omarchy; Remove Omarchy first, which wipes the Linux install. [PR #46](https://github.com/omacom/omarchy-mac-installer/pull/46) (reinstall over an existing install) is still open. `./install.sh` in this repo runs later, on the new Omarchy desktop. `groundwork-mac` runs on another computer. After first boot, check the channel with `omarchy-channel-current`; do not run `omarchy-channel-set edge`.
+The chosen track is the newest [Omarchy Mac Installer](https://github.com/omacom/omarchy-mac-installer) prerelease plus its signed **edge** catalog. Omarchy 4.5 (2026-11-04) added rc and stable to `aarch64-apple` ([omacom/omarchy#17498](https://github.com/omacom/omarchy/pull/17498)), and the installer now publishes `catalog-rc` (2026-11-02) and `catalog-stable` (2026-11-05). The default is still edge and Macs are not moved: upstream says stable has no Mac kernel or boot packages until rc → stable runs. This layer stays on edge ([decision 0002](docs/decisions/0002-edge-via-omarchy-mac-installer.md)). The installer app runs in macOS and refuses an existing Omarchy; Remove Omarchy first, which wipes the Linux install. [PR #46](https://github.com/omacom/omarchy-mac-installer/pull/46) (reinstall over an existing install) is still open. `./install.sh` in this repo runs later, on the new Omarchy desktop. `groundwork-mac` runs on another computer. After first boot, check the channel with `omarchy-channel-current`; do not run `omarchy-channel-set edge`.
 
 ## Run on: Omarchy, current install
 
@@ -301,13 +301,14 @@ defaults delete com.omarchy.mx.installer 2>/dev/null
 
 The Application Support directory can contain the image that preview downloaded. Copy it elsewhere before removing it if you still need it. Skip the whole block when that preview app is not installed.
 
-Still in macOS, download the newest installer prerelease from the upstream [installer releases](https://github.com/omacom/omarchy-mac-installer/releases). In Terminal.app, run `shasum -a 256` on the downloaded DMG and match it to the checksum published on that release. Open the DMG and launch the app. In the app, choose the signed **edge** catalog and confirm it enables this Mac (`apple,j274` for the reference M1 Mac mini). If Omarchy is already installed, the app refuses to continue until you Remove Omarchy, which wipes that Linux install. Read the partition plan in the app before you confirm it. New images ship `linux-aurora` (Limine), not `linux-asahi` or GRUB.
+Still in macOS, download the newest installer prerelease from the upstream [installer releases](https://github.com/omacom/omarchy-mac-installer/releases). In Terminal.app, run `shasum -a 256` on the downloaded DMG and match it to the checksum published on that release. Open the DMG and launch the app. From installer 2.3.14 the app opens on the stable channel, so choose **edge** in the Release channel menu. Then confirm the signed catalog enables this Mac (`apple,j274` for the reference M1 Mac mini). If Omarchy is already installed, the app refuses to continue until you Remove Omarchy, which wipes that Linux install. Read the partition plan in the app before you confirm it. New images ship `linux-aurora` (Limine), not `linux-asahi` or GRUB.
 
 The signed catalog picks the image. A later install uses the catalog's current selection, not a dated pin.
 
 The reference M1 Mac mini is `apple,j274`. It migrated on 2026-10-17 with installer **2.2.0** and image `omarchy-mac-edge-2026.10.14-79f8e36b977f`. Those are what this machine installed, not a pin for later installs. The catalog's latest observed requirements and selected image are recorded in [status](docs/status.md). These are pre-release artifacts.
 
 - Installer **2.2.0**, used on the mini: [installer release](https://github.com/omacom/omarchy-mac-installer/releases/tag/v2.2.0). DMG SHA-256: `749f94d729ae8f65629f7b0a51beab9c519af983d203a60134fd6562c979447b`.
+- Installer **2.3.16**, the newest observed on 2026-11-17 and the catalog's `latestVersion` (it is a GitHub pre-release): [installer release](https://github.com/omacom/omarchy-mac-installer/releases/tag/v2.3.16). DMG SHA-256: `0b70717b0bfa3277f41159b5de4a0cab9f75dda9ba64f13d4b4a02a7860dd027`. Check the digest on the release page before you open the DMG.
 - Signed rolling edge catalog: [catalog-edge](https://github.com/omacom/omarchy-mac-installer/releases/tag/catalog-edge).
 - Image the mini installed: [10.14 image](https://github.com/omacom/omarchy-mac-installer/releases/tag/omarchy-mac-edge-2026.10.14-79f8e36b977f). Image SHA-256: `2e7ef7e14e81ca62d6761c7a70db96d9d2e86ff07b6166530b5164c260406584`.
 
@@ -319,7 +320,7 @@ Stay here only when the installer app reboots the Mac into Apple's recovery scre
 
 You are here when the new desktop is up. Check Wi-Fi, the keyboard, and the trackpad. Check that **Super+Space** opens the Omarchy menu and that **Super+K** works. On this installer path the Qt 6.12 palette fix is [omarchy#14553](https://github.com/omacom/omarchy/pull/14553) in `quattro`. [omarchy-mac#707](https://github.com/omacom/omarchy-mac/issues/707) and [PR #710](https://github.com/omacom/omarchy-mac/pull/710) cover only the omarchy-mac `quattro` path. Keep the backup until those shortcuts and your files are usable.
 
-Confirm the update channel is `edge`. Apple Silicon has no other channel. In an Omarchy terminal:
+Confirm the update channel is `edge`. Apple Silicon now offers rc and stable too, but this layer stays on edge. In an Omarchy terminal:
 
 ```bash
 omarchy-channel-current
@@ -327,6 +328,8 @@ omarchy update
 ```
 
 `omarchy-channel-current` should print `edge`. Do not run `omarchy-channel-set`. Reboot if `omarchy update` asks. Later system updates stay on this desktop and use `omarchy update`, which applies the `aarch64-apple` edge pacman config (`[omarchy]` at `https://pkgs.omarchy.org/edge/$arch`, then `[asahi-alarm]`, then Arch Linux ARM). A bare `pacman -Syu` skips that policy.
+
+If `update-all` stops with `installing libplacebo ... breaks dependency 'libplacebo.so=360-64' required by ffmpeg`, the `omarchy` repo's `ffmpeg` is older than Arch Linux ARM's and is shadowing it. Run `sudo pacman -S extra/ffmpeg`, then run `update-all` again ([decision 0026](docs/decisions/0026-ffmpeg-from-alarm-on-apple-silicon.md)).
 
 Personal settings come from this repo, in an Omarchy terminal, after the base system is up. `./install.sh` checks out the pinned `core` submodule, so a separate recursive clone is unnecessary:
 
@@ -343,7 +346,7 @@ Still in an Omarchy terminal, complete the [private remote-access setup](docs/re
 
 Open T3 Code from the app launcher; after its first launch, `t3` also starts it from a terminal. Sign in to at least one provider, such as Codex or Claude, in T3 Code before starting an agent. Herdr opens with Omarchy's `Super+Ctrl+Return` shortcut and from a terminal.
 
-The installer is a one-time OS install. Ongoing fixes come from `omarchy update` on the edge channel. Before a later reinstall, read the upstream installer releases again. The signed edge catalog may select a newer image, and an existing install still has to be removed first.
+The installer is a one-time OS install. Ongoing fixes come from `omarchy update` on the edge channel (the `quattro` branch, ahead of the 4.5 release). Before a later reinstall, read the upstream installer releases again. The signed edge catalog may select a newer image, and an existing install still has to be removed first.
 
 This README records what the reference M1 Mac mini installed on 2026-10-17; the latest observed catalog selection is in [status](docs/status.md). File desktop, shell, binding, and shared-helper bugs on [omacom/omarchy](https://github.com/omacom/omarchy). File Apple Silicon package bugs, including the Mac's hardware services and boot chain, on [omacom/omarchy-mac-pkgs](https://github.com/omacom/omarchy-mac-pkgs). File package recipes, signing, and publication on [omacom/omarchy-pkgs](https://github.com/omacom/omarchy-pkgs). File installer or image bugs on [omacom/omarchy-mac-installer](https://github.com/omacom/omarchy-mac-installer). Send a hardware qualification report to [omarchy-m-testing.org](https://omarchy-m-testing.org). [omacom/omarchy-mac](https://github.com/omacom/omarchy-mac) is the legacy fork and is not where new package or hardware bugs go; reports already filed there stay there.
 
