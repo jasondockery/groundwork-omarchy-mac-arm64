@@ -1,6 +1,6 @@
 """Real local Git transport; isolated home and mocked machine-owner commands."""
 import fcntl
-from contextlib import contextmanager, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import hashlib
 import importlib.util
 import io
@@ -197,6 +197,7 @@ class UpdateTests(unittest.TestCase):
         self.initial = self.git('rev-parse', 'HEAD')
         self.machine_calls = []
         self.failure = None
+        self.pacman_answers = {}
         self.readelf = {}
         self.machine_kwargs = []
         self.blip_listed = False
@@ -256,6 +257,11 @@ class UpdateTests(unittest.TestCase):
             return (completed.stdout or '').strip()
         self.machine_calls.append(args)
         self.machine_kwargs.append(kwargs)
+        answer = self.pacman_answers.get(tuple(args))
+        if answer is not None:
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
         if args[0] == self.failure:
             raise updater.UpdateError('fixture stage failed')
         if args[0] == 't3':
@@ -580,7 +586,64 @@ class UpdateTests(unittest.TestCase):
         with self.assertRaises(updater.UpdateError):
             updater.update('all')
         self.assertEqual(self.git('rev-parse', 'HEAD'), self.initial)
-        self.assertEqual(self.machine_calls, [['omarchy', 'update']])
+        self.assertEqual(self.machine_calls[0], ['omarchy', 'update'])
+        # Only read-only package queries may follow the failure (issue #160).
+        self.assertTrue(all(call[0] in ('pacman', 'vercmp') for call in self.machine_calls[1:]), self.machine_calls)
+
+    def ffmpeg_mismatch(self, overrides=None):
+        answers = {
+            ('pacman', '-Si', 'ffmpeg'): 'Repository      : omarchy\nName            : ffmpeg\nVersion         : 2:9.0.2-2.1\n',
+            ('pacman', '-Si', 'extra/ffmpeg'): 'Repository      : extra\nName            : ffmpeg\nVersion         : 2:9.0.2-5\n',
+            ('vercmp', '2:9.0.2-5', '2:9.0.2-2.1'): '1',
+            ('pacman', '-Qi', 'ffmpeg'): 'Name            : ffmpeg\nDepends On      : alsa-lib  libplacebo  libplacebo.so=360-64\n                  zlib\n',
+            ('pacman', '-Si', 'libplacebo'): 'Repository      : extra\nName            : libplacebo\nProvides        : libplacebo.so=387-64\n',
+            ('pacman', '-Qi', 'libplacebo'): 'Name            : libplacebo\nRequired By     : ffmpeg  mpv  some-aur-thing  bad;name\n',
+            ('pacman', '-Si', 'extra/mpv'): 'Repository      : extra\nName            : mpv\n',
+            ('pacman', '-Si', 'extra/some-aur-thing'): updater.UpdateError('pacman failed (exit 1).'),
+        }
+        answers.update(overrides or {})
+        self.pacman_answers = answers
+
+    def failed_omarchy_update(self):
+        self.candidate()
+        self.failure = 'omarchy'
+        errors = io.StringIO()
+        with redirect_stderr(errors), self.assertRaises(updater.UpdateError):
+            updater.update('all')
+        return errors.getvalue()
+
+    def test_ffmpeg_shadow_prints_the_repair_command_and_runs_nothing(self):
+        self.ffmpeg_mismatch()
+        errors = self.failed_omarchy_update()
+        self.assertIn('Hint: this looks like the ffmpeg problem', errors)
+        self.assertIn('sudo pacman -S extra/ffmpeg extra/libplacebo extra/mpv\n', errors)
+        self.assertIn('libplacebo.so=360-64', errors)
+        self.assertNotIn('some-aur-thing', errors)
+        self.assertNotIn('bad;name', errors)
+        self.assertIn('was not run here', errors)
+        for call in self.machine_calls:
+            self.assertNotIn(call[0], ('sudo', 'pkexec'))
+            self.assertFalse(call[0] == 'pacman' and call[1].startswith('-S') and call[1] != '-Si', call)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), self.initial)
+
+    def test_no_ffmpeg_hint_when_ffmpeg_is_not_from_the_omarchy_repo(self):
+        self.ffmpeg_mismatch({('pacman', '-Si', 'ffmpeg'): 'Repository      : extra\nVersion         : 2:9.0.2-5\n'})
+        self.assertNotIn('Hint:', self.failed_omarchy_update())
+
+    def test_no_ffmpeg_hint_when_the_omarchy_build_is_not_older(self):
+        self.ffmpeg_mismatch({('vercmp', '2:9.0.2-5', '2:9.0.2-2.1'): '0'})
+        self.assertNotIn('Hint:', self.failed_omarchy_update())
+
+    def test_no_ffmpeg_hint_when_the_soname_pin_is_still_provided(self):
+        self.ffmpeg_mismatch({('pacman', '-Si', 'libplacebo'):
+                                'Repository      : extra\nProvides        : libplacebo.so=360-64\n'})
+        self.assertNotIn('Hint:', self.failed_omarchy_update())
+
+    def test_failing_pacman_probe_leaves_the_original_error_alone(self):
+        self.ffmpeg_mismatch({('pacman', '-Si', 'extra/ffmpeg'): updater.UpdateError('pacman failed (exit 1).')})
+        errors = self.failed_omarchy_update()
+        self.assertNotIn('Hint:', errors)
+        self.assertIn('Update incomplete', errors)
 
     def test_tmp_on_disk_opt_out_is_saved_and_opting_back_in_removes_it(self):
         # Decision 0022: only the opt-out is stored; on is the default.

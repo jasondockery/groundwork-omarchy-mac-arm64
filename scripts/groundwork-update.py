@@ -2493,6 +2493,65 @@ def resume_update(text):
     return 1 if result == 'completed_with_warnings' else 0
 
 
+PACMAN_QUERY_SECONDS = 15
+PACKAGE_NAME = re.compile(r'^[a-z0-9@._+-]+$')
+
+
+def pacman_fields(text):
+    """The first value of each field in `pacman -Si` or `-Qi` output, with wrapped lines joined."""
+    fields, name = {}, None
+    for line in text.splitlines():
+        head, separator, rest = line.partition(' : ')
+        if separator and not line[:1].isspace() and head.strip():
+            name = head.strip()
+            fields.setdefault(name, rest.strip())
+        elif name and line[:1].isspace() and line.strip():
+            fields[name] += ' ' + line.strip()
+    return fields
+
+
+def ffmpeg_shadow_hint():
+    """Decision 0026: say how to repair the omarchy repo's ffmpeg shadowing Arch Linux ARM's.
+
+    Read-only pacman queries after `omarchy update` has failed. Returns text only when this
+    machine has that mismatch. It never installs anything, and a failing query returns None,
+    so it cannot change the error the caller is already raising.
+    """
+    def query(*args):
+        return run(list(args), deadline=PACMAN_QUERY_SECONDS)
+    try:
+        first = pacman_fields(query('pacman', '-Si', 'ffmpeg'))
+        if first.get('Repository') != 'omarchy' or not first.get('Version'):
+            return None
+        extra = pacman_fields(query('pacman', '-Si', 'extra/ffmpeg'))
+        if not extra.get('Version') or int(query('vercmp', extra['Version'], first['Version']) or 0) <= 0:
+            return None
+        pins = [item for item in pacman_fields(query('pacman', '-Qi', 'ffmpeg')).get('Depends On', '').split()
+                if item.startswith('libplacebo.so=')]
+        provided = pacman_fields(query('pacman', '-Si', 'libplacebo')).get('Provides', '').split()
+        if not pins or not any(item.startswith('libplacebo.so=') for item in provided):
+            return None
+        if all(pin in provided for pin in pins):
+            return None
+        names = ['ffmpeg', 'libplacebo']
+        for name in pacman_fields(query('pacman', '-Qi', 'libplacebo')).get('Required By', '').split():
+            if name in names or not PACKAGE_NAME.match(name):
+                continue
+            try:
+                query('pacman', '-Si', f'extra/{name}')
+            except UpdateError:
+                continue
+            names.append(name)
+    except (UpdateError, OSError, ValueError):
+        return None
+    command = 'sudo pacman -S ' + ' '.join(f'extra/{name}' for name in names)
+    return (f"Hint: this looks like the ffmpeg problem in docs/decisions/0026-ffmpeg-from-alarm-on-apple-silicon.md. "
+            f"The omarchy repo's ffmpeg {first['Version']} is older than Arch Linux ARM's {extra['Version']} and needs "
+            f"{' '.join(pins)}, which the repository's libplacebo no longer provides. If the pacman error above names "
+            f"libplacebo and ffmpeg, run this yourself (it needs sudo and was not run here):\n  {command}\n"
+            "then rerun the same update-all command.")
+
+
 def update(scope, check=False):
     if platform.system() != 'Linux' or platform.machine() != 'aarch64' or not shutil.which('omarchy'):
         raise UpdateError('This updater requires Apple Silicon Omarchy. Use your platform entry point on other systems.')
@@ -2525,7 +2584,13 @@ def update(scope, check=False):
                 return
             if scope == 'all':
                 print('Updating Omarchy through omarchy update…', flush=True)
-                run(['omarchy', 'update'], deadline=3600, capture=False)
+                try:
+                    run(['omarchy', 'update'], deadline=3600, capture=False)
+                except UpdateError:
+                    hint = ffmpeg_shadow_hint()
+                    if hint:
+                        print(hint, file=sys.stderr)
+                    raise
                 completed.append('Omarchy update command completed')
             if preflight(source) != (before, branch, remote, merge):
                 raise UpdateError('Checkout or upstream changed during the update. Retry after reviewing it.')
