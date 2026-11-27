@@ -2561,7 +2561,10 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertFalse(lua.is_symlink())
         self.assertNotEqual(lua.resolve(), (REPO / 'config/groundwork-antigravity.lua').resolve())
         self.assertIn('SUPER + SHIFT + V', lua.read_text())
-        self.assertIn('Antigravity', result.stdout)
+        self.assertIn(
+            "T3 Code's Antigravity provider is enabled with binaryPath pinned to that agy",
+            result.stdout)
+        self.assertIn('Super+Shift+V focuses it after Hyprland loads the binding', result.stdout)
         self.assertNotIn('antigravity', json.loads(
             (self.root / 'home/.config/groundwork/omarchy.json').read_text()))
 
@@ -2656,10 +2659,13 @@ raise SystemExit(os.WEXITSTATUS(status))
         )
         settings.write_text(original)
         settings.chmod(0o640)
+        pin = "T3 Code's Antigravity provider is enabled with binaryPath pinned to that agy"
         result = self.run_install('--without-keyd', '--without-screen-sharing')
         self.assertEqual(settings.read_text(), original)
         self.assertEqual(settings.stat().st_mode & 0o777, 0o640)
         self.assertNotIn('sekret-value', result.stdout + result.stderr)
+        self.assertNotIn(pin, result.stdout + result.stderr)
+        self.assertIn('already has an Antigravity provider entry', result.stdout)
         broken = '{ "apiKey": "sekret-value" \n'
         settings.write_text(broken)
         (self.root / 'calls.jsonl').unlink()
@@ -2667,6 +2673,8 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertEqual(settings.read_text(), broken)
         self.assertIn('not valid JSON', result.stderr)
         self.assertNotIn('sekret-value', result.stdout + result.stderr)
+        self.assertNotIn(pin, result.stdout + result.stderr)
+        self.assertNotIn('already has an Antigravity provider entry', result.stdout)
 
     def test_t3code_home_receives_the_provider(self):
         self.enable_pacman()
@@ -2688,6 +2696,10 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertEqual(target.read_text(), '-- real\n')
         self.assertTrue(bindings.is_symlink())
         self.assertIn('symlink', result.stderr)
+        self.assertNotIn('Super+Shift+V', result.stdout)
+        self.assertIn('key binding was not applied', result.stderr)
+        self.assertIn('Omarchy desktop bindings were left alone', result.stdout)
+        self.assertNotIn('binding added here is Super+Shift+V', result.stdout)
 
     def test_unmappable_agy_is_dropped_and_not_pinned(self):
         self.enable_pacman()

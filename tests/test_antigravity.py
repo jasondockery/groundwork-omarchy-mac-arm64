@@ -59,6 +59,7 @@ class SettingsMergeTests(unittest.TestCase):
         path.chmod(0o640)
         status, stdout, stderr = self.merge()
         self.assertEqual(status, 0)
+        self.assertEqual(stdout, 'added\n')
         self.assertNotIn(SECRET, stdout + stderr)
         saved = json.loads(path.read_text())
         self.assertEqual(saved['theme'], 'omarchy')
@@ -89,14 +90,36 @@ class SettingsMergeTests(unittest.TestCase):
         before = path.stat().st_mtime_ns
         status, stdout, stderr = self.merge()
         self.assertEqual(status, 0, stderr)
+        self.assertEqual(stdout, 'already-present\n')
+        self.assertNotIn('pinned', stdout)
         self.assertEqual(path.read_text(), original)
         self.assertNotIn(SECRET, stdout + stderr)
         self.assertEqual(path.stat().st_mtime_ns, before)
+
+    def test_an_enabled_instance_at_this_agy_reports_already_present_pinned(self):
+        path = self.settings_path()
+        path.parent.mkdir(parents=True)
+        original = json.dumps({
+            'providerInstances': {
+                'antigravity': {
+                    'driver': 'antigravity',
+                    'enabled': True,
+                    'config': {'binaryPath': str(self.agy), 'apiKey': SECRET},
+                },
+            },
+        }, indent=2) + '\n'
+        path.write_text(original)
+        status, stdout, stderr = self.merge()
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(stdout, 'already-present pinned\n')
+        self.assertEqual(path.read_text(), original)
+        self.assertNotIn(SECRET, stdout + stderr)
 
     def test_missing_file_is_created_mode_0600(self):
         status, stdout, stderr = self.merge()
         path = self.settings_path()
         self.assertEqual(status, 0, stderr)
+        self.assertEqual(stdout, 'added\n')
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         saved = json.loads(path.read_text())
         self.assertEqual(saved['providerInstances']['antigravity']['config']['binaryPath'], str(self.agy))
@@ -106,8 +129,9 @@ class SettingsMergeTests(unittest.TestCase):
         path = self.settings_path()
         path.parent.mkdir(parents=True)
         path.write_text('{"theme": "omarchy"}\n')
-        status, _stdout, stderr = self.merge()
+        status, stdout, stderr = self.merge()
         self.assertEqual(status, 0, stderr)
+        self.assertEqual(stdout, 'added\n')
         saved = json.loads(path.read_text())
         self.assertEqual(saved['theme'], 'omarchy')
         self.assertEqual(saved['providerInstances']['antigravity']['driver'], 'antigravity')
@@ -119,6 +143,7 @@ class SettingsMergeTests(unittest.TestCase):
         path.write_text(original)
         status, stdout, stderr = self.merge()
         self.assertEqual(status, 0)
+        self.assertEqual(stdout, 'left-untouched\n')
         self.assertEqual(path.read_text(), original)
         self.assertIn('not valid JSON', stderr)
         self.assertNotIn(SECRET, stdout + stderr)
@@ -132,8 +157,9 @@ class SettingsMergeTests(unittest.TestCase):
         ):
             with self.subTest(original=original):
                 path.write_text(original)
-                status, _stdout, stderr = self.merge()
+                status, stdout, stderr = self.merge()
                 self.assertEqual(status, 0)
+                self.assertEqual(stdout, 'left-untouched\n')
                 self.assertEqual(path.read_text(), original)
                 self.assertIn(message, stderr)
 
@@ -148,14 +174,16 @@ class SettingsMergeTests(unittest.TestCase):
         self.assertTrue(self.settings_path().is_file())
 
     def test_relative_t3code_home_and_bad_agy_paths_do_not_write(self):
-        status, _stdout, stderr = self.merge(environ={**self.environ, 'T3CODE_HOME': 'relative'})
+        status, stdout, stderr = self.merge(environ={**self.environ, 'T3CODE_HOME': 'relative'})
         self.assertEqual(status, 1)
+        self.assertEqual(stdout, '')
         self.assertIn('absolute', stderr)
         self.assertFalse(self.settings_path().exists())
         for binary in ('relative/agy', str(self.agy) + '\n', ''):
             with self.subTest(binary=binary):
-                status, _stdout, stderr = self.merge(binary=binary)
+                status, stdout, stderr = self.merge(binary=binary)
                 self.assertEqual(status, 1)
+                self.assertEqual(stdout, '')
                 self.assertFalse((self.home / '.t3').exists())
 
     def test_symlink_settings_are_not_followed(self):
@@ -166,6 +194,7 @@ class SettingsMergeTests(unittest.TestCase):
         path.symlink_to(target)
         status, stdout, stderr = self.merge()
         self.assertEqual(status, 0)
+        self.assertEqual(stdout, 'left-untouched\n')
         self.assertEqual(target.read_text(), '{"apiKey": "' + SECRET + '"}\n')
         self.assertIn('symlink', stderr)
         self.assertNotIn(SECRET, stdout + stderr)
@@ -295,12 +324,28 @@ class BindingTests(unittest.TestCase):
         path.parent.mkdir(parents=True)
         path.symlink_to(target)
         status, _stdout, stderr = self.invoke(['bind'])
-        # The copied binding is a new regular file. The symlink is not edited.
-        self.assertEqual(status, antigravity.CHANGED)
+        # The copied lua file can be new. The symlink is not a loaded binding.
+        self.assertEqual(status, antigravity.NOT_BOUND)
         self.assertEqual(target.read_text(), '-- real\n')
         self.assertIn('symlink', stderr)
         self.assertTrue(path.is_symlink())
         self.assertEqual(path.resolve(), target.resolve())
+        again, _stdout, stderr = self.invoke(['bind'])
+        self.assertEqual(again, antigravity.NOT_BOUND, stderr)
+
+    def test_a_non_regular_or_non_utf8_bindings_file_is_not_bound(self):
+        path = self.bindings()
+        path.parent.mkdir(parents=True)
+        path.mkdir()
+        status, _stdout, stderr = self.invoke(['bind'])
+        self.assertEqual(status, antigravity.NOT_BOUND, stderr)
+        self.assertIn('not a regular file', stderr)
+        path.rmdir()
+        path.write_bytes(b'\xff\xfe not utf-8\n')
+        status, _stdout, stderr = self.invoke(['bind'])
+        self.assertEqual(status, antigravity.NOT_BOUND, stderr)
+        self.assertIn('not UTF-8', stderr)
+        self.assertEqual(path.read_bytes(), b'\xff\xfe not utf-8\n')
 
     def test_unbind_removes_only_the_owned_line(self):
         path = self.bindings()

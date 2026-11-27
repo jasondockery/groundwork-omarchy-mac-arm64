@@ -44,13 +44,15 @@ After a pacman-owned `agy` passes the check, setup merges one instance into `${T
 
 Leave every other field at T3's default. In particular leave `authMethod` unset so it stays `oauth-personal` (a personal account with Ultra needs that). Do not write `apiKey`, models, or account ids. Do not print the file or any value from it. Invalid JSON, a root that is not an object, and a `providerInstances` value that is not an object are left untouched. An existing `antigravity` instance is left byte for byte, including `enabled: false` or a different `binaryPath`. A missing file is created mode `0600`. A symlink settings file is not followed. `T3CODE_HOME` empty or unset means `~/.t3`; a relative `T3CODE_HOME` is refused. The write is atomic and keeps the existing file mode. T3 reads the file while it is open; do not restart or quit T3 for this merge.
 
+The merge reports `added`, `already-present`, or `left-untouched`. Say the provider is enabled and pinned only for `added`, or for `already-present` when that instance is already enabled and its `binaryPath` is this `agy`. On `left-untouched`, keep the warning and do not claim the pin.
+
 ## Launcher and key binding
 
 Use the desktop entry the `antigravity` package installs. Write `~/.local/share/applications/antigravity.desktop` only when `pacman -Qlq antigravity` succeeds and lists no `.desktop` file, and do not replace a file this layer did not write.
 
 The only Hyprland binding is `config/groundwork-antigravity.lua`: `Super+Shift+V` launches `antigravity` and focuses its window class. Checked 2026-11-27 against `omacom/omarchy` `quattro` `default/hypr`: `Super+Shift+A` is ChatGPT and `Super+Shift+G` is Signal in the global region, and `Super+Shift+O` is Obsidian. `Super+V` in a terminal is paste; this chord is `Super+Shift+V`. The focus pattern is `StartupWMClass` from the package's desktop entry when that class is a plain name, otherwise `antigravity`.
 
-Setup copies that file to `~/.config/hypr/groundwork-antigravity.lua`. The copy is a regular file, not a link into this checkout. It appends one `dofile` line to `~/.config/hypr/bindings.lua` when that file is a regular file and the line is absent. It does not rewrite the rest of the file. It does not edit `bindings.lua` when that path is a symlink: a stowed Hypr file edited through the link dirties this checkout and blocks `update-all`. Do not stow this binding and do not put it in `packages/hypr`.
+Setup copies that file to `~/.config/hypr/groundwork-antigravity.lua`. The copy is a regular file, not a link into this checkout. It appends one `dofile` line to `~/.config/hypr/bindings.lua` when that file is a regular file and the line is absent. It does not rewrite the rest of the file. It does not edit `bindings.lua` when that path is a symlink, is not a regular file, or is not UTF-8: a stowed Hypr file edited through the link dirties this checkout and blocks `update-all`. Name `Super+Shift+V` only when that dofile line is in the regular `bindings.lua` Hyprland loads. Do not stow this binding and do not put it in `packages/hypr`.
 
 When the desktop app is missing or fails its check, remove only that `dofile` line. `--without-antigravity` removes nothing.
 

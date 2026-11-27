@@ -1580,6 +1580,7 @@ reject_added_antigravity_package() {
 }
 install_antigravity() {
   local binary="" desktop_binary="" cli_ok=0 desktop_ok=0 bind_status=0
+  local merge_status=0 merge_report=""
   if provider_ready agy; then
     if ! agy_package_path >/dev/null; then
       echo "agy is already installed at $(command -v agy), so the antigravity-cli package was not installed."
@@ -1628,10 +1629,20 @@ install_antigravity() {
     fi
   fi
   if [[ $cli_ok -eq 1 && -n $binary ]]; then
-    python3 "$root/scripts/groundwork-antigravity.py" merge-settings "$binary"
-    echo "agy is installed. T3 Code's Antigravity provider is enabled with binaryPath pinned to that agy. Sign in from T3 Code: Settings, Providers, Antigravity, Sign in. See docs/apps/antigravity.md."
+    # stdout is added, already-present, already-present pinned, or left-untouched.
+    # The pinned sentence is true only for added, or for an existing instance
+    # that is already enabled at this agy. The settings file is not printed.
+    merge_status=0
+    merge_report=$(python3 "$root/scripts/groundwork-antigravity.py" merge-settings "$binary") || merge_status=$?
+    if [[ $merge_status -eq 0 && ( $merge_report == added || $merge_report == 'already-present pinned' ) ]]; then
+      echo "agy is installed. T3 Code's Antigravity provider is enabled with binaryPath pinned to that agy. Sign in from T3 Code: Settings, Providers, Antigravity, Sign in. See docs/apps/antigravity.md."
+    elif [[ $merge_status -eq 0 && $merge_report == already-present ]]; then
+      echo "agy is installed. T3 Code already has an Antigravity provider entry, so settings.json was left unchanged."
+    fi
   fi
   if [[ $desktop_ok -eq 1 ]]; then
+    # 0 and 10 mean the dofile line is in the regular bindings.lua. 11 means
+    # it is not, including a symlink that was left unedited.
     bind_status=0
     python3 "$root/scripts/groundwork-antigravity.py" bind || bind_status=$?
     if [[ $bind_status -eq 0 || $bind_status -eq 10 ]]; then

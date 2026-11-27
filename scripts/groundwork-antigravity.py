@@ -15,6 +15,9 @@ and its parents must be regular; a symlink is not followed and not written.
 
 Nothing from settings.json is printed. apiKey is never written or read back
 out. binaryPath is the absolute pacman-owned agy the caller checked.
+stdout is one status word: added, already-present, or left-untouched.
+already-present pinned means the existing instance is enabled and its
+binaryPath is this agy. The file body is not printed.
 
 bind copies config/groundwork-antigravity.lua to
 ~/.config/hypr/groundwork-antigravity.lua (a regular file, not a link into
@@ -27,8 +30,11 @@ query succeeds and lists none.
 unbind removes only that dofile line. It does not remove the package, the
 settings entry, or any other line.
 
-Exit 0 when nothing was written, 10 when a Hypr file changed, 1 on a bad
-argument or a failed write.
+Exit 0 when the dofile line is already in a regular bindings.lua and nothing
+else was written. Exit 10 when a Hypr file changed and that line is in the
+regular bindings.lua Hyprland loads. Exit 11 when that line is not in that
+file after the attempt. Exit 1 on a bad argument or a failed write.
+merge-settings exits 0 for added, already-present, and left-untouched.
 """
 import json
 import os
@@ -52,6 +58,11 @@ DEFAULT_FOCUS = '^antigravity$'
 FOCUS_CLASS = re.compile(r'[A-Za-z0-9_-]+')
 DESKTOP_MARKER = 'X-Groundwork-Antigravity=1'
 CHANGED = 10
+# The dofile line is not in the regular bindings.lua Hyprland loads.
+NOT_BOUND = 11
+STATUS_ADDED = 'added'
+STATUS_PRESENT = 'already-present'
+STATUS_UNTOUCHED = 'left-untouched'
 
 
 def config_dir(environ):
@@ -141,11 +152,27 @@ def refuse_binary(binary):
     return None
 
 
+def instance_is_pinned(instance, binary):
+    """True when this instance is enabled and its binaryPath is `binary`."""
+    if not isinstance(instance, dict) or instance.get('enabled') is not True:
+        return False
+    config = instance.get('config')
+    return isinstance(config, dict) and config.get('binaryPath') == binary
+
+
+def report_status(status):
+    """Print one status line. Never print settings.json."""
+    print(status)
+    return 0
+
+
 def merge_settings(binary, environ):
     """Add the Antigravity instance when it is absent. Return an exit status.
 
-    A reason to leave the file alone is printed and returns 0. A bad agy
-    path or a failed write returns 1. The file body is never printed.
+    stdout is added, already-present, or left-untouched. already-present
+    pinned means the existing instance is already enabled at this agy.
+    A reason to leave the file alone goes to stderr. A bad agy path or a
+    failed write returns 1 and prints no status. The file body is never printed.
     """
     problem = refuse_binary(binary)
     if problem:
@@ -159,11 +186,11 @@ def merge_settings(binary, environ):
     if contains_symlink(path):
         print(f'T3 Code settings.json is a symlink or sits under one, so it was left unchanged: {path}',
               file=sys.stderr)
-        return 0
+        return report_status(STATUS_UNTOUCHED)
     if path.exists() and not path.is_file():
         print(f'T3 Code settings.json is not a regular file, so it was left unchanged: {path}',
               file=sys.stderr)
-        return 0
+        return report_status(STATUS_UNTOUCHED)
     if not path.exists():
         document = {'providerInstances': {INSTANCE_KEY: instance_document(binary)}}
         try:
@@ -171,21 +198,21 @@ def merge_settings(binary, environ):
         except OSError as error:
             print(f'T3 Code settings.json was not created: {path} ({error})', file=sys.stderr)
             return 1
-        return 0
+        return report_status(STATUS_ADDED)
     try:
         original = path.read_bytes()
     except OSError as error:
         print(f'T3 Code settings.json could not be read, so it was left unchanged: {path} ({error})',
               file=sys.stderr)
-        return 0
+        return report_status(STATUS_UNTOUCHED)
     try:
         value = json.loads(original.decode('utf-8'))
     except (UnicodeError, json.JSONDecodeError):
         print(f'T3 Code settings.json is not valid JSON, so it was left unchanged: {path}', file=sys.stderr)
-        return 0
+        return report_status(STATUS_UNTOUCHED)
     if not isinstance(value, dict):
         print(f'T3 Code settings.json is not a JSON object, so it was left unchanged: {path}', file=sys.stderr)
-        return 0
+        return report_status(STATUS_UNTOUCHED)
     instances = value.get('providerInstances', None)
     if instances is None:
         instances = {}
@@ -193,9 +220,11 @@ def merge_settings(binary, environ):
     elif not isinstance(instances, dict):
         print('T3 Code providerInstances is not a JSON object, so settings.json was left unchanged.',
               file=sys.stderr)
-        return 0
+        return report_status(STATUS_UNTOUCHED)
     if INSTANCE_KEY in instances:
-        return 0
+        if instance_is_pinned(instances[INSTANCE_KEY], binary):
+            return report_status(STATUS_PRESENT + ' pinned')
+        return report_status(STATUS_PRESENT)
     instances[INSTANCE_KEY] = instance_document(binary)
     mode = stat.S_IMODE(path.stat().st_mode)
     try:
@@ -203,7 +232,7 @@ def merge_settings(binary, environ):
     except OSError as error:
         print(f'T3 Code settings.json was left unchanged: {path} ({error})', file=sys.stderr)
         return 1
-    return 0
+    return report_status(STATUS_ADDED)
 
 
 def template_text():
@@ -343,17 +372,33 @@ def bindings_path(environ):
     return config_dir(environ) / 'hypr' / 'bindings.lua'
 
 
+def binding_line_loaded(environ):
+    """True when the dofile line is in the regular bindings.lua Hyprland loads."""
+    path = bindings_path(environ)
+    if path.is_symlink() or contains_symlink(path) or not path.is_file():
+        return False
+    try:
+        text = path.read_text(encoding='utf-8')
+    except (OSError, UnicodeError):
+        return False
+    return BINDING_LINE in text.splitlines()
+
+
 def append_binding_line(environ):
-    """Append the one dofile line. Return CHANGED, 0, or 1. Never follow a symlink."""
+    """Append the one dofile line. Return CHANGED, 0, NOT_BOUND, or 1.
+
+    NOT_BOUND means the line is not in a regular bindings.lua. Never follow
+    a symlink.
+    """
     path = bindings_path(environ)
     if path.is_symlink() or contains_symlink(path):
         print(f'Refusing to edit a symlink: {path}', file=sys.stderr)
         print('Add the Antigravity dofile line yourself, or move that symlink aside. '
               'See docs/apps/antigravity.md.', file=sys.stderr)
-        return 0
+        return NOT_BOUND
     if path.exists() and not path.is_file():
         print(f'Refusing to edit {path} because it is not a regular file.', file=sys.stderr)
-        return 0
+        return NOT_BOUND
     line = (BINDING_LINE + '\n').encode()
     if not path.exists():
         atomic_write(path, line, 0o644)
@@ -363,7 +408,7 @@ def append_binding_line(environ):
         text = original.decode('utf-8')
     except UnicodeError:
         print(f'Leaving {path} alone because it is not UTF-8.', file=sys.stderr)
-        return 0
+        return NOT_BOUND
     if BINDING_LINE in text.splitlines():
         return 0
     if original.endswith(b'\n') or original == b'':
@@ -404,6 +449,8 @@ def bind(environ):
     status = append_binding_line(environ)
     if status == 1:
         return 1
+    if not binding_line_loaded(environ):
+        return NOT_BOUND
     if changed or status == CHANGED:
         return CHANGED
     return 0
