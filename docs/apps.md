@@ -1,6 +1,6 @@
 # Desktop apps and personal notes
 
-`./install.sh` ensures Obsidian, the Bitwarden CLI (`bw`), the Bitwarden desktop app, FreeTube, and EasyEffects are available alongside T3 Code Nightly, Herdr, and Tailscale. It offers Brave through Omarchy's browser installer and registers the official Bitwarden extension for installed Chromium. Omarchy (`omacom/omarchy` `quattro`) continues to own desktop bindings and application updates, including the Qt 6.12 palette fix [omarchy#14553](https://github.com/omacom/omarchy/pull/14553) on this path. Account sign-in, extension approval, and sync enrollment stay local to each user.
+`./install.sh` ensures Obsidian, the Bitwarden CLI (`bw`), the Bitwarden desktop app, FreeTube, EasyEffects, and Antigravity (`agy` and the desktop app) are available alongside T3 Code Nightly, Herdr, and Tailscale. It offers Brave through Omarchy's browser installer and registers the official Bitwarden extension for installed Chromium. Omarchy (`omacom/omarchy` `quattro`) continues to own desktop bindings and application updates, including the Qt 6.12 palette fix [omarchy#14553](https://github.com/omacom/omarchy/pull/14553) on this path. Account sign-in, extension approval, and sync enrollment stay local to each user.
 
 ## Brave
 
@@ -73,6 +73,21 @@ Setup no longer runs `t3.codes/install.sh` or `t3 update`. If `~/.local/bin/t3` 
 ```
 
 When the T3 Code app is not installed yet, the move runs Omarchy's installer first and checks that build. When the app is already there, it is not reinstalled. Either way, `~/.local/bin/t3` then points at `~/.t3/bin/t3`. `~/.t3` (threads, settings, theme), `~/.config/t3code`, `~/.config/t3code-v2`, `~/.config/t3code-flags.conf` and `~/.cache/t3code-updater` are kept. The old CLI builds in `~/.t3/runtime/versions` are safe to delete afterwards. To undo either the move or the automatic switch, run `./install.sh --keep-standalone-t3`, as the move prints. It points the link back at the build it replaced and saves your no, so neither setup nor `update-all` switches it again. Pointing the link back by hand is not switched again either, but setup then keeps offering the move.
+
+## Antigravity
+
+Setup installs Google Antigravity on Apple Silicon Omarchy: the `agy` command, through Omarchy's `omarchy-install-ai-cli agy`, and the Antigravity desktop app, without launching it. Both are kept only when their programs can map on this kernel's pages (16 KiB on Apple Silicon). An `agy` or desktop app you already installed another way is left in place and named in the setup output. `--without-antigravity` skips all of this and does not remove anything already installed.
+
+T3 Code gets an Antigravity provider only when that entry is not already in its settings, pointed at the `agy` from the `antigravity-cli` package. Your own entry, including one you turned off, is not changed. Sign-in is manual and happens once per machine:
+
+1. Open T3 Code. Go to **Settings → Providers → Antigravity → Sign in**.
+2. Use the personal Google account that has Google AI Ultra. When the sign-in page gives you a code, paste that code back into T3. T3's sign-in is separate from a sign-in in the desktop app and from a sign-in in the terminal.
+3. Optionally open **Antigravity** from the app launcher and sign in there too.
+4. Optionally run `agy` once in a terminal. If it cannot use the keyring, follow Antigravity's CLI getting-started notes for keyring sign-in. Cursor on this machine already uses `gnome-libsecret` for the same kind of secret.
+
+`Super+Shift+V` opens or focuses Antigravity Desktop after you install it. `Super+Shift+A` and `Super+Shift+G` stay Omarchy's ChatGPT and Signal shortcuts. The binding is one added line in `~/.config/hypr/bindings.lua` and a small file next to it; the rest of Omarchy's keys stay as they are.
+
+`omarchy update` updates both packages. This layer does not. To stop setup from installing them, run `./install.sh --without-antigravity`. That does not uninstall them, does not edit T3's settings, and does not remove the key. To remove them later, quit the app and run `omarchy-remove-ai-cli agy` and `omarchy-remove-ai-antigravity`. The desktop remover leaves `~/.gemini` in place.
 
 ## Cursor
 

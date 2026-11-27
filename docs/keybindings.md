@@ -19,6 +19,7 @@ Omarchy owns the live keymap on this machine. This repo leaves it in place. Prac
 | `Super+1` through `Super+0` | Select workspace on this monitor (`Super+0` is workspace 10) |
 | `Super+Shift+1` through `Super+Shift+0` | Move the current window to that workspace on this monitor |
 | `Super+Shift+O` | Open Obsidian |
+| `Super+Shift+V` | Open or focus Antigravity Desktop |
 
 Stock directional desktop navigation uses arrows. To cycle without reaching for them, use `Alt+Tab` for windows or `Super+Tab` for workspaces. `Super+H/J/K/L` is not a stock directional keymap: `Super+K` already opens help and `Super+L` cycles the workspace between dwindle tiling, scrolling, and floating. This layer preserves those bindings. On Apple keyboards attached to this machine, `Super` is Command and `Alt` is Option.
 
@@ -77,4 +78,4 @@ Try one short loop: launch Herdr, split below and beside, focus each pane, renam
 
 The [original Groundwork curriculum](https://jasondockery.github.io/groundwork/) remains available for shell, Git, and agent-supervision practice. Its older keymap is not the keymap installed here. Mac/Linux/Windows parity and migration work are separate from this native Omarchy setup.
 
-References: [Omarchy hotkeys](https://github.com/omacom/omarchy/blob/quattro/manual/07-hotkeys.md), [Omarchy tmux config](https://github.com/omacom/omarchy/blob/quattro/config/tmux/tmux.conf), [Omarchy Herdr config](https://github.com/omacom/omarchy/blob/quattro/config/herdr/config.toml), and [T3 Code keybindings](https://github.com/pingdotgg/t3code/blob/main/docs/user/keybindings.md). Bindings reviewed on 2026-10-28 against Omarchy v4.5.0-rc2 (a release candidate; the installed edge build may differ), whose release notes list the moved shortcuts. `omarchy update` owns future changes.
+References: [Omarchy hotkeys](https://github.com/omacom/omarchy/blob/quattro/manual/07-hotkeys.md), [Omarchy tmux config](https://github.com/omacom/omarchy/blob/quattro/config/tmux/tmux.conf), [Omarchy Herdr config](https://github.com/omacom/omarchy/blob/quattro/config/herdr/config.toml), and [T3 Code keybindings](https://github.com/pingdotgg/t3code/blob/main/docs/user/keybindings.md). Bindings reviewed on 2026-10-28 against Omarchy v4.5.0-rc2 (a release candidate; the installed edge build may differ), whose release notes list the moved shortcuts. `Super+Shift+V` for Antigravity was checked on 2026-11-27 against Omarchy `quattro` `default/hypr`: `Super+Shift+A` is ChatGPT and `Super+Shift+G` is Signal, and `Super+V` in a terminal is paste. `omarchy update` owns future changes.

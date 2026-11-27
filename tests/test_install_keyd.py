@@ -44,6 +44,87 @@ def remember_root(paths):
         owners[path] = 'root:root'
     owner_file.write_text(json.dumps(owners))
 
+def aarch64_elf(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # EI_DATA little-endian, e_machine EM_AARCH64 (183). Twenty bytes is enough
+    # for groundwork-update.py's elf_machine.
+    path.write_bytes(bytes([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01]) + bytes(12) + bytes([0xb7, 0x00]))
+    path.chmod(0o755)
+
+def own_path(path, package):
+    owned = root / 'pacman-owned'
+    lines = owned.read_text().splitlines() if owned.exists() else []
+    row = str(path) + ' ' + package
+    if row not in lines:
+        lines.append(row)
+    owned.write_text('\\n'.join(lines) + '\\n')
+
+def record_package(package, files, version):
+    dest = root / 'pacman-installed'
+    dest.mkdir(exist_ok=True)
+    (dest / package).write_text('\\n'.join(files) + '\\n')
+    (dest / (package + '.version')).write_text(version + '\\n')
+
+def drop_package(package):
+    listing = root / 'pacman-installed' / package
+    if not listing.exists():
+        return
+    files = listing.read_text().splitlines()
+    for line in files:
+        path = pathlib.Path(line)
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+    listing.unlink()
+    (root / 'pacman-installed' / (package + '.version')).unlink(missing_ok=True)
+    owned = root / 'pacman-owned'
+    if owned.exists():
+        kept = [line for line in owned.read_text().splitlines() if line.split(' ', 1)[0] not in files]
+        owned.write_text((''.join(line + '\\n' for line in kept)))
+
+def antigravity_load(target):
+    base = pathlib.Path(target).name
+    if base == 'agy':
+        if os.environ.get('FIXTURE_AGY_UNMAPPABLE') == '1':
+            return ('0x100', '0x100', '0x100')
+        return ('0x10000', '0x000000', '0x0000000000400000')
+    if base == 'antigravity':
+        if os.environ.get('FIXTURE_ANTIGRAVITY_DESKTOP_UNMAPPABLE') == '1':
+            return ('0x100', '0x100', '0x100')
+        return ('0x10000', '0x000000', '0x0000000000400000')
+    return None
+
+def install_antigravity_cli():
+    version = os.environ.get('FIXTURE_AGY_VERSION', '1.5.18-1')
+    elf = root / 'usr' / 'bin' / 'agy'
+    aarch64_elf(elf)
+    command = root / 'bin' / 'agy'
+    if not command.exists():
+        command.symlink_to(elf)
+    note = root / 'usr' / 'share' / 'doc' / 'antigravity-cli' / 'README'
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text('docs\\n')
+    own_path(command, 'antigravity-cli')
+    own_path(elf, 'antigravity-cli')
+    record_package('antigravity-cli', [str(elf), str(command), str(note)], version)
+
+def install_antigravity_desktop():
+    version = os.environ.get('FIXTURE_ANTIGRAVITY_VERSION', '2.35.2-1')
+    elf = root / 'opt' / 'Antigravity' / 'antigravity'
+    aarch64_elf(elf)
+    command = root / 'bin' / 'antigravity'
+    if not command.exists():
+        command.symlink_to(elf)
+    files = [str(elf), str(command)]
+    own_path(command, 'antigravity')
+    own_path(elf, 'antigravity')
+    if os.environ.get('FIXTURE_ANTIGRAVITY_NO_DESKTOP') != '1':
+        desktop = root / 'usr' / 'share' / 'applications' / 'antigravity.desktop'
+        desktop.parent.mkdir(parents=True, exist_ok=True)
+        wmclass = os.environ.get('FIXTURE_ANTIGRAVITY_WMCLASS', 'antigravity')
+        desktop.write_text('[Desktop Entry]\\nName=Antigravity\\nExec=antigravity\\nStartupWMClass=%s\\nType=Application\\n' % wmclass)
+        files.append(str(desktop))
+    record_package('antigravity', files, version)
+
 if name == 'uname':
     print('Linux' if args == ['-s'] else os.environ.get('FIXTURE_ARCH', 'aarch64'))
 elif name == 'sudo':
@@ -160,7 +241,13 @@ elif name == 'stat':
         raise SystemExit('missing host tool: stat')
     sys.exit(subprocess.call([host_binary, *args]))
 elif name == 'omarchy-mise-default-tools':
-    sys.exit(1 if os.environ.get('FIXTURE_MISE_OPTED_OUT') == '1' else 0)
+    if os.environ.get('FIXTURE_MISE_OPTED_OUT') == '1':
+        sys.exit(1)
+    # agy is not one of Omarchy's declared providers unless a test says so.
+    # The other names stay declared, which is what the provider loop requires.
+    if args == ['declares', 'agy'] and os.environ.get('FIXTURE_MISE_DECLARES_AGY') != '1':
+        sys.exit(1)
+    sys.exit(0)
 elif name == 'mise':
     if os.environ.get('FIXTURE_MISE_FAILURE') == '1':
         sys.exit(1)
@@ -378,8 +465,14 @@ elif name == 'getconf':
     print(os.environ.get('FIXTURE_PAGESIZE', '4096') if args == ['PAGESIZE'] else '')
 elif name == 'readelf':
     align = os.environ.get('FIXTURE_LOAD_ALIGN', '')
+    offset = '0x000000'
+    vaddr = '0x0000000000400000'
+    if args[:1] == ['-lW'] and len(args) > 1:
+        forced = antigravity_load(args[-1])
+        if forced:
+            align, offset, vaddr = forced
     if args[:1] == ['-lW'] and align:
-        print('  LOAD 0x000000 0x0000000000400000 0x0000000000400000 0x000100 0x000100 R E ' + align)
+        print('  LOAD ' + offset + ' ' + vaddr + ' ' + vaddr + ' 0x000100 0x000100 R E ' + align)
 elif name == 'bun':
     if args == ['--version']:
         sys.exit(int(os.environ.get('FIXTURE_BUN_STATUS', '0')))
@@ -538,7 +631,39 @@ elif name == 'omarchy' and args[:2] == ['default', 'browser']:
     if not target.exists():
         sys.exit(1)
     sys.exit(subprocess.call([str(target), *args[2:]]))
+elif name == 'omarchy-install-ai-cli':
+    if args != ['agy']:
+        sys.exit(1)
+    status = int(os.environ.get('FIXTURE_AGY_INSTALL_STATUS', '0'))
+    if status:
+        sys.exit(status)
+    if (root / 'bin' / 'agy').exists():
+        print('agy is already on PATH; leaving that copy in place.')
+        sys.exit(0)
+    install_antigravity_cli()
+    sys.exit(0)
+elif name == 'omarchy-pkg-add-curated':
+    if args == ['antigravity']:
+        status = int(os.environ.get('FIXTURE_ANTIGRAVITY_ADD_STATUS', '0'))
+        if status:
+            sys.exit(status)
+        install_antigravity_desktop()
+        sys.exit(0)
+    if args == ['antigravity-cli']:
+        install_antigravity_cli()
+        sys.exit(0)
+    sys.exit(1)
 elif name == 'omarchy':
+    if args[:2] == ['pkg', 'drop'] and len(args) == 3 and args[2] in ('antigravity', 'antigravity-cli'):
+        drop_package(args[2])
+        sys.exit(0)
+    if args[:3] == ['pkg', 'add', 'antigravity-cli']:
+        install_antigravity_cli()
+    elif args[:3] == ['pkg', 'add', 'antigravity']:
+        status = int(os.environ.get('FIXTURE_ANTIGRAVITY_ADD_STATUS', '0'))
+        if status:
+            sys.exit(status)
+        install_antigravity_desktop()
     if args[:2] == ['pkg', 'add'] and len(args) > 2 and args[2] in ('ollama', 'ollama-vulkan', 'vulkan-tools'):
         if args[2] == 'ollama':
             target = root / 'bin' / 'ollama'
@@ -651,7 +776,8 @@ class InstallKeydTests(unittest.TestCase):
         stub.write_text(STUB)
         stub.chmod(0o755)
         for name in ('uname', 'omarchy', 'omarchy-mise-default-tools', 'omarchy-install-dev-env', 'omarchy-remove-dev-env', 'stow', 'herdr', 'tailscale', 'keyd', 'sudo', 'hyprctl', 'curl', 'obsidian', 'bw', 'flatpak', 'chromium', 'claude', 'codex', 'opencode', 'grok', 'cursor', 'mise', 'wayvnc', 'systemctl', 'ufw', 'getconf', 'readelf', 'syncthing', 'loginctl', 'stat', 'lsof', 'shellcheck',
-                     'omarchy-install-ai-t3-code', 'omarchy-installed-service-tailscale', 'omarchy-pkg-add',
+                     'omarchy-install-ai-t3-code', 'omarchy-install-ai-cli', 'omarchy-pkg-add-curated',
+                     'omarchy-installed-service-tailscale', 'omarchy-pkg-add',
                      'omarchy-plugin-enable', 'omarchy-plugin-list', 'omarchy-webapp-install'):
             (self.bin / name).symlink_to(stub)
         (self.bin / 'git').symlink_to(host_tool('git'))
@@ -707,6 +833,12 @@ class InstallKeydTests(unittest.TestCase):
     def calls(self):
         log = self.root / 'calls.jsonl'
         return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+    def enable_pacman(self):
+        """The fixture omits pacman unless a test needs package ownership or the feed."""
+        path = self.bin / 'pacman'
+        if not path.exists():
+            path.symlink_to(self.bin / 'stub')
 
     def test_install_writes_plugin_cache_without_calling_plugin_add(self):
         self.run_install()
@@ -1198,6 +1330,7 @@ raise SystemExit(os.WEXITSTATUS(status))
                               (('--with-tmp-on-disk', '--without-tmp-on-disk'), False),
                               (('--with-easyeffects', '--without-easyeffects'), False),
                               (('--with-tailscale', '--without-tailscale'), False),
+                              (('--with-antigravity', '--without-antigravity'), False),
                               (('--help',), True)]:
             with self.subTest(args=args):
                 self.run_install(*args, success=success)
@@ -1895,6 +2028,8 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertIn('--with-easyeffects', result.stdout)
         self.assertIn('--without-easyeffects', result.stdout)
         self.assertIn('--without-tailscale', result.stdout)
+        self.assertIn('--without-antigravity', result.stdout)
+        self.assertIn('--with-antigravity', result.stdout)
         self.assertIn('groundwork-easyeffects.service', result.stdout)
         self.assertIn('next desktop login', result.stdout)
 
@@ -2397,6 +2532,202 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn(b'Fixture password:', result.stdout)
         self.assertNotIn(['sudo', 'systemctl', 'enable', '--now', 'tailscaled.service'], self.calls())
+
+
+    def test_antigravity_installs_agy_and_pins_t3_without_replacing_bindings(self):
+        self.enable_pacman()
+        bindings = self.root / 'home/.config/hypr/bindings.lua'
+        bindings.parent.mkdir(parents=True)
+        original = '-- user binds\no.bind("SUPER + SHIFT + O", "Obsidian")\n'
+        bindings.write_text(original)
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertIn(['omarchy-install-ai-cli', 'agy'], self.calls())
+        self.assertIn(['omarchy-pkg-add-curated', 'antigravity'], self.calls())
+        self.assertNotIn(['omarchy', 'pkg', 'add', 'antigravity-cli'], self.calls())
+        settings_path = self.root / 'home/.t3/userdata/settings.json'
+        settings = json.loads(settings_path.read_text())
+        instance = settings['providerInstances']['antigravity']
+        self.assertEqual(instance['driver'], 'antigravity')
+        self.assertIs(instance['enabled'], True)
+        self.assertTrue(instance['config']['binaryPath'].endswith('/usr/bin/agy'))
+        self.assertTrue(Path(instance['config']['binaryPath']).is_file())
+        self.assertNotIn('apiKey', instance['config'])
+        text = bindings.read_text()
+        self.assertTrue(text.startswith(original))
+        self.assertEqual(text.count('dofile('), 1)
+        self.assertFalse(bindings.is_symlink())
+        lua = self.root / 'home/.config/hypr/groundwork-antigravity.lua'
+        self.assertTrue(lua.is_file())
+        self.assertFalse(lua.is_symlink())
+        self.assertNotEqual(lua.resolve(), (REPO / 'config/groundwork-antigravity.lua').resolve())
+        self.assertIn('SUPER + SHIFT + V', lua.read_text())
+        self.assertIn('Antigravity', result.stdout)
+        self.assertNotIn('antigravity', json.loads(
+            (self.root / 'home/.config/groundwork/omarchy.json').read_text()))
+
+    def test_without_antigravity_changes_nothing_and_stays_off(self):
+        settings = self.root / 'home/.t3/userdata/settings.json'
+        settings.parent.mkdir(parents=True)
+        original_settings = '{"providerInstances":{"claude":{"driver":"claude","config":{"apiKey":"sekret-value"}}}}\n'
+        settings.write_text(original_settings)
+        settings.chmod(0o640)
+        bindings = self.root / 'home/.config/hypr/bindings.lua'
+        bindings.parent.mkdir(parents=True)
+        bindings.write_text('-- mine\n')
+        agy = self.bin / 'agy'
+        agy.write_text('#!/bin/sh\nexit 0\n')
+        agy.chmod(0o755)
+        result = self.run_install('--without-antigravity', '--without-keyd', '--without-screen-sharing')
+        self.assertIn('Skipped Antigravity setup', result.stdout)
+        self.assertEqual(settings.read_text(), original_settings)
+        self.assertEqual(settings.stat().st_mode & 0o777, 0o640)
+        self.assertEqual(bindings.read_text(), '-- mine\n')
+        self.assertFalse((self.root / 'home/.config/hypr/groundwork-antigravity.lua').exists())
+        self.assertFalse(any(call[:2] == ['omarchy-install-ai-cli', 'agy'] for call in self.calls()))
+        self.assertFalse(any(call[:3] == ['omarchy', 'pkg', 'add'] and 'antigravity' in call[-1]
+                             for call in self.calls()))
+        self.assertNotIn('sekret-value', result.stdout + result.stderr)
+        saved = json.loads((self.root / 'home/.config/groundwork/omarchy.json').read_text())
+        self.assertIs(saved['antigravity'], False)
+        (self.root / 'calls.jsonl').unlink()
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertIn('Skipped Antigravity setup', result.stdout)
+        self.assertEqual(settings.read_text(), original_settings)
+        self.assertEqual(bindings.read_text(), '-- mine\n')
+        self.assertIs(json.loads(
+            (self.root / 'home/.config/groundwork/omarchy.json').read_text())['antigravity'], False)
+
+    def test_desktop_page_failure_keeps_agy_and_skips_the_binding(self):
+        self.enable_pacman()
+        self.env['FIXTURE_ANTIGRAVITY_DESKTOP_UNMAPPABLE'] = '1'
+        bindings = self.root / 'home/.config/hypr/bindings.lua'
+        bindings.parent.mkdir(parents=True)
+        bindings.write_text('-- user\n')
+        self.run_install('--without-keyd', '--without-screen-sharing')
+        settings = json.loads((self.root / 'home/.t3/userdata/settings.json').read_text())
+        self.assertEqual(settings['providerInstances']['antigravity']['driver'], 'antigravity')
+        self.assertEqual(bindings.read_text(), '-- user\n')
+        self.assertFalse((self.root / 'home/.config/hypr/groundwork-antigravity.lua').exists())
+        self.assertIn(['omarchy', 'pkg', 'drop', 'antigravity'], self.calls())
+        self.assertNotIn(['omarchy', 'pkg', 'drop', 'antigravity-cli'], self.calls())
+
+    def test_existing_agy_is_kept_and_not_pinned(self):
+        agy = self.bin / 'agy'
+        agy.write_text('#!/bin/sh\nexit 0\n')
+        agy.chmod(0o755)
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertNotIn(['omarchy-install-ai-cli', 'agy'], self.calls())
+        self.assertIn('already installed', result.stdout)
+        settings = self.root / 'home/.t3/userdata/settings.json'
+        if settings.exists():
+            self.assertNotIn('antigravity', json.loads(settings.read_text()).get('providerInstances', {}))
+        self.assertTrue(agy.is_file())
+        self.assertFalse(agy.is_symlink())
+
+    def test_agy_installer_fallback_is_omarchy_pkg_add(self):
+        self.enable_pacman()
+        (self.bin / 'omarchy-install-ai-cli').unlink()
+        self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertIn(['omarchy', 'pkg', 'add', 'antigravity-cli'], self.calls())
+        settings = json.loads((self.root / 'home/.t3/userdata/settings.json').read_text())
+        self.assertEqual(settings['providerInstances']['antigravity']['driver'], 'antigravity')
+
+    def test_mise_declared_agy_skips_the_package_installer(self):
+        self.env['FIXTURE_MISE_DECLARES_AGY'] = '1'
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertIn(['mise', 'install', 'agy'], self.calls())
+        self.assertNotIn(['omarchy-install-ai-cli', 'agy'], self.calls())
+        self.assertIn('binaryPath was not set', result.stdout)
+        settings = self.root / 'home/.t3/userdata/settings.json'
+        if settings.exists():
+            self.assertNotIn('antigravity', json.loads(settings.read_text()).get('providerInstances', {}))
+
+    def test_existing_antigravity_instance_and_invalid_json_are_not_rewritten(self):
+        self.enable_pacman()
+        settings = self.root / 'home/.t3/userdata/settings.json'
+        settings.parent.mkdir(parents=True)
+        original = (
+            '{\n'
+            '  "providerInstances": {\n'
+            '    "antigravity": {"driver": "antigravity", "enabled": false, '
+            '"config": {"binaryPath": "/tmp/custom-agy", "apiKey": "sekret-value"}}\n'
+            '  }\n'
+            '}\n'
+        )
+        settings.write_text(original)
+        settings.chmod(0o640)
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertEqual(settings.read_text(), original)
+        self.assertEqual(settings.stat().st_mode & 0o777, 0o640)
+        self.assertNotIn('sekret-value', result.stdout + result.stderr)
+        broken = '{ "apiKey": "sekret-value" \n'
+        settings.write_text(broken)
+        (self.root / 'calls.jsonl').unlink()
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertEqual(settings.read_text(), broken)
+        self.assertIn('not valid JSON', result.stderr)
+        self.assertNotIn('sekret-value', result.stdout + result.stderr)
+
+    def test_t3code_home_receives_the_provider(self):
+        self.enable_pacman()
+        custom = self.root / 'custom-t3'
+        self.env['T3CODE_HOME'] = str(custom)
+        self.run_install('--without-keyd', '--without-screen-sharing')
+        saved = json.loads((custom / 'userdata' / 'settings.json').read_text())
+        self.assertEqual(saved['providerInstances']['antigravity']['driver'], 'antigravity')
+        self.assertFalse((self.root / 'home/.t3/userdata/settings.json').exists())
+
+    def test_symlink_bindings_file_is_not_edited_by_setup(self):
+        self.enable_pacman()
+        target = self.root / 'real-bindings.lua'
+        target.write_text('-- real\n')
+        bindings = self.root / 'home/.config/hypr/bindings.lua'
+        bindings.parent.mkdir(parents=True)
+        bindings.symlink_to(target)
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertEqual(target.read_text(), '-- real\n')
+        self.assertTrue(bindings.is_symlink())
+        self.assertIn('symlink', result.stderr)
+
+    def test_unmappable_agy_is_dropped_and_not_pinned(self):
+        self.enable_pacman()
+        self.env['FIXTURE_AGY_UNMAPPABLE'] = '1'
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertIn(['omarchy', 'pkg', 'drop', 'antigravity-cli'], self.calls())
+        self.assertNotIn(['omarchy', 'pkg', 'drop', 'antigravity'], self.calls())
+        self.assertIn('Removed the antigravity-cli package this run had added.', result.stderr)
+        settings = self.root / 'home/.t3/userdata/settings.json'
+        if settings.exists():
+            self.assertNotIn('antigravity', json.loads(settings.read_text()).get('providerInstances', {}))
+        self.assertTrue((self.root / 'home/.config/hypr/groundwork-antigravity.lua').is_file())
+
+    def test_a_remembered_agy_version_is_not_installed_again(self):
+        self.enable_pacman()
+        self.env['FIXTURE_AGY_UNMAPPABLE'] = '1'
+        self.run_install('--without-keyd', '--without-screen-sharing')
+        remembered = self.root / 'home/.local/state/groundwork/antigravity-cli-rejected.json'
+        self.assertIn('1.5.18-1', remembered.read_text())
+        self.env.pop('FIXTURE_AGY_UNMAPPABLE')
+        self.env['FIXTURE_FEED'] = 'antigravity-cli'
+        self.env['FIXTURE_FEED_VERSION'] = '1.5.18-1'
+        (self.root / 'calls.jsonl').unlink()
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertNotIn(['omarchy-install-ai-cli', 'agy'], self.calls())
+        self.assertIn('will not try it again', result.stderr)
+
+    def test_desktop_package_fallback_is_omarchy_pkg_add(self):
+        self.enable_pacman()
+        (self.bin / 'omarchy-pkg-add-curated').unlink()
+        self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertIn(['omarchy', 'pkg', 'add', 'antigravity'], self.calls())
+        settings = json.loads((self.root / 'home/.t3/userdata/settings.json').read_text())
+        self.assertTrue(settings['providerInstances']['antigravity']['config']['binaryPath'].endswith('/usr/bin/agy'))
+
+    def test_agy_install_failure_stops_setup(self):
+        self.env['FIXTURE_AGY_INSTALL_STATUS'] = '1'
+        result = self.run_install('--without-keyd', '--without-screen-sharing', success=False)
+        self.assertIn('omarchy-install-ai-cli agy failed.', result.stderr)
+        self.assertFalse((self.root / 'home/.t3/userdata/settings.json').exists())
 
 
 if __name__ == '__main__':

@@ -8,7 +8,7 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip] [--with-local-inference|--without-local-inference] [--with-git-filter-repo|--without-git-filter-repo] [--with-tmp-on-disk|--without-tmp-on-disk] [--with-easyeffects|--without-easyeffects] [--with-tailscale|--without-tailscale] [--migrate-to-omarchy-installers] [--keep-standalone-t3]"
+  echo "Usage: ./install.sh [--with-keyd|--without-keyd] [--with-screen-sharing|--without-screen-sharing] [--with-blip|--without-blip] [--with-local-inference|--without-local-inference] [--with-git-filter-repo|--without-git-filter-repo] [--with-tmp-on-disk|--without-tmp-on-disk] [--with-easyeffects|--without-easyeffects] [--with-tailscale|--without-tailscale] [--with-antigravity|--without-antigravity] [--migrate-to-omarchy-installers] [--keep-standalone-t3]"
   echo "Caps Lock defaults to Escape on tap and Control while held."
   echo "Saved setup choices are reused; explicit options change those choices."
   echo "--without-keyd leaves any existing keyd configuration and service unchanged."
@@ -25,6 +25,8 @@ usage() {
   echo "--without-easyeffects records that preference as off and leaves an existing install and user unit alone. See docs/decisions/0024-easyeffects-equalizer.md."
   echo "--with-tailscale (the default) finishes Tailscale with Omarchy's service helpers. Once this machine is signed in, that includes the operator, Taildrop receive service, bar plugin, and Admin Console app. Sign-in stays a command you run yourself."
   echo "--without-tailscale records that preference as off and leaves an existing Tailscale install alone. See docs/decisions/0025-tailscale-omarchy-setup.md."
+  echo "--with-antigravity (the default) installs the agy CLI and the Antigravity desktop app, checks both for this kernel's pages, and pins T3 Code's Antigravity provider at the pacman-owned agy. It does not launch either app."
+  echo "--without-antigravity records that preference as off and leaves an existing install, T3 Code provider entry, and key binding alone. See docs/apps/antigravity.md."
   echo "--migrate-to-omarchy-installers moves apps installed another way to Omarchy's own installer,"
   echo "  even after an earlier no. Without it, setup asks first and updates only report."
   echo "--keep-standalone-t3 points ~/.local/bin/t3 back at the standalone t3 CLI that setup switched"
@@ -39,6 +41,8 @@ with_git_filter_repo=0
 with_tmp_on_disk=1
 with_easyeffects=1
 with_tailscale=1
+with_antigravity=1
+antigravity_bound=0
 keyd_choice=""
 sharing_choice=""
 blip_choice=""
@@ -47,6 +51,7 @@ git_filter_repo_choice=""
 tmp_on_disk_choice=""
 easyeffects_choice=""
 tailscale_choice=""
+antigravity_choice=""
 updating=0
 update_plugins=0
 migrate_requested=0
@@ -120,6 +125,14 @@ for arg in "$@"; do
       fi
       tailscale_choice=$arg
       [[ $arg == --with-tailscale ]] && with_tailscale=1 || with_tailscale=0
+      ;;
+    --with-antigravity | --without-antigravity)
+      if [[ -n $antigravity_choice && $antigravity_choice != "$arg" ]]; then
+        echo "Choose only one of --with-antigravity and --without-antigravity." >&2
+        exit 64
+      fi
+      antigravity_choice=$arg
+      [[ $arg == --with-antigravity ]] && with_antigravity=1 || with_antigravity=0
       ;;
     --update) updating=1 ;;
     --update-plugins) update_plugins=1 ;;
@@ -246,6 +259,17 @@ if [[ -n $stored ]]; then
         ;;
     esac
   fi
+  # Only an opt-out is saved; no line means on (issue 162).
+  if [[ -z $antigravity_choice ]]; then
+    case ${preferences[10]-} in
+      '') ;;
+      0) with_antigravity=0 ;;
+      *)
+        echo "Saved Antigravity choice is invalid. Preserve ~/.config/groundwork/omarchy.json and repair it before rerunning." >&2
+        exit 1
+        ;;
+    esac
+  fi
 fi
 
 # An updater installed before the Brave spec fast-forwards and then runs this
@@ -257,8 +281,8 @@ fi
 
 # Fail before installing packages or moving files when the checkout is incomplete.
 # The Bitwarden extension id and Brave policies are read from core, not a copy here.
-[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$root/scripts/groundwork-node-pin.py" && -f "$root/scripts/groundwork-commit-guard.py" && -f "$root/scripts/groundwork-grep-threads.py" && -f "$root/scripts/groundwork-tmp.py" && -f "$root/scripts/groundwork-storage.py" && -f "$root/config/plocate-updatedb.service.d.conf" && -f "$root/config/groundwork-easyeffects.service" && -f "$root/core/browser/brave.json" && ! -L "$root/core/browser/brave.json" ]] || {
-  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, Node pin helper, commit guard helper, grep threads helper, temp storage helper, storage helper, plocate drop-in, EasyEffects unit, or Brave spec is missing." >&2
+[[ -f "$root/keyd/default.conf" && -f "$root/packages/hypr/.config/hypr/input.lua" && -f "$root/scripts/seed-obsidian.py" && -f "$root/scripts/groundwork-screen-share.py" && -f "$root/scripts/groundwork-syncthing.py" && -f "$root/scripts/omarchy-plugins.py" && -f "$root/scripts/groundwork-node-pin.py" && -f "$root/scripts/groundwork-commit-guard.py" && -f "$root/scripts/groundwork-grep-threads.py" && -f "$root/scripts/groundwork-tmp.py" && -f "$root/scripts/groundwork-storage.py" && -f "$root/scripts/groundwork-antigravity.py" && -f "$root/config/plocate-updatedb.service.d.conf" && -f "$root/config/groundwork-easyeffects.service" && -f "$root/config/groundwork-antigravity.lua" && -f "$root/core/browser/brave.json" && ! -L "$root/core/browser/brave.json" ]] || {
+  echo "The checkout is incomplete: keyd config, Hyprland input override, Obsidian helper, Syncthing helper, plugin helper, Node pin helper, commit guard helper, grep threads helper, temp storage helper, storage helper, Antigravity helper, plocate drop-in, EasyEffects unit, Antigravity binding, or Brave spec is missing." >&2
   exit 1
 }
 
@@ -942,6 +966,16 @@ privileged_changes_needed() {
     command -v easyeffects >/dev/null || return 0
     easyeffects_plugins_present || return 0
   fi
+  # agy and the Antigravity desktop app (issue 162). A version already refused
+  # on this kernel is not a reason to ask for administrator permission.
+  if [[ $with_antigravity -eq 1 ]]; then
+    if ! command -v agy >/dev/null; then
+      python3 "$root/scripts/groundwork-update.py" package-rejected antigravity-cli || return 0
+    fi
+    if ! command -v antigravity >/dev/null; then
+      python3 "$root/scripts/groundwork-update.py" package-rejected antigravity || return 0
+    fi
+  fi
   # TRIM, fstrim.timer, or the plocate drop-in still pending (decision 0023).
   # Read-only. A directory zstd level is not applied.
   if python3 "$root/scripts/groundwork-storage.py" needed; then
@@ -1432,6 +1466,188 @@ if [[ $with_easyeffects -eq 1 ]]; then
   install_easyeffects
 else
   echo "Skipped EasyEffects setup; any existing EasyEffects install and service were left alone."
+fi
+
+# Antigravity CLI and desktop (issue 162). On by default. agy comes from
+# Omarchy's omarchy-install-ai-cli when that command exists, otherwise from
+# the antigravity-cli package. When Omarchy's mise tools declare agy, that
+# install is used instead. The desktop package is installed without launching
+# it. Both are checked with decision 0018's LOAD rule on aarch64 ELF files.
+# A failure is remembered like Bitwarden. A desktop failure does not drop a
+# passing agy and does not skip the T3 Code pin. --without-antigravity does
+# not call this, so an existing install, settings entry, and binding stay.
+agy_added=0
+desktop_added=0
+agy_resolved_path() {
+  local executable resolved
+  executable=$(command -v agy) || return 1
+  resolved=$(readlink -f -- "$executable") || return 1
+  [[ $resolved == /* && $resolved != *$'\n'* && -f $resolved && ! -L $resolved ]] || return 1
+  printf '%s\n' "$resolved"
+}
+agy_package_path() {
+  local resolved owner
+  resolved=$(agy_resolved_path) || return 1
+  owner=$(pacman -Qoq "$resolved" 2>/dev/null) || return 1
+  [[ $owner == antigravity-cli ]] || return 1
+  printf '%s\n' "$resolved"
+}
+antigravity_resolved_path() {
+  local executable resolved
+  executable=$(command -v antigravity) || return 1
+  resolved=$(readlink -f -- "$executable") || return 1
+  [[ $resolved == /* && $resolved != *$'\n'* && -f $resolved && ! -L $resolved ]] || return 1
+  printf '%s\n' "$resolved"
+}
+antigravity_package_path() {
+  local resolved owner
+  resolved=$(antigravity_resolved_path) || return 1
+  owner=$(pacman -Qoq "$resolved" 2>/dev/null) || return 1
+  [[ $owner == antigravity ]] || return 1
+  printf '%s\n' "$resolved"
+}
+install_agy_command() {
+  local had=0
+  if pacman -Q antigravity-cli >/dev/null 2>&1; then
+    had=1
+  fi
+  if command -v omarchy-mise-default-tools >/dev/null && omarchy-mise-default-tools declares agy; then
+    if ! command -v mise >/dev/null; then
+      echo "Omarchy's mise tool manager is unavailable, so agy was not installed. Update Omarchy, then rerun ./install.sh." >&2
+      return 1
+    fi
+    if ! timeout --kill-after=5s 300 mise install agy; then
+      echo "mise install agy failed." >&2
+      return 1
+    fi
+    hash -r
+  elif command -v omarchy-install-ai-cli >/dev/null; then
+    if ! timeout --kill-after=5s 600 omarchy-install-ai-cli agy; then
+      echo "omarchy-install-ai-cli agy failed." >&2
+      return 1
+    fi
+    hash -r
+  elif ! omarchy pkg add antigravity-cli; then
+    echo "omarchy pkg add antigravity-cli failed." >&2
+    return 1
+  else
+    hash -r
+  fi
+  if ! provider_ready agy; then
+    echo "agy is still unavailable after install." >&2
+    return 1
+  fi
+  if [[ $had -eq 0 ]] && pacman -Q antigravity-cli >/dev/null 2>&1; then
+    agy_added=1
+  fi
+}
+install_antigravity_desktop_command() {
+  local had=0
+  if pacman -Q antigravity >/dev/null 2>&1; then
+    had=1
+  fi
+  if command -v omarchy-pkg-add-curated >/dev/null; then
+    if ! omarchy-pkg-add-curated antigravity; then
+      echo "omarchy-pkg-add-curated antigravity failed." >&2
+      return 1
+    fi
+  elif ! omarchy pkg add antigravity; then
+    echo "omarchy pkg add antigravity failed." >&2
+    return 1
+  fi
+  hash -r
+  if ! command -v antigravity >/dev/null; then
+    echo "antigravity is still unavailable after install." >&2
+    return 1
+  fi
+  if [[ $had -eq 0 ]] && pacman -Q antigravity >/dev/null 2>&1; then
+    desktop_added=1
+  fi
+}
+reject_added_antigravity_package() {
+  local package=$1 added=$2 version
+  if version=$(python3 "$root/scripts/groundwork-update.py" reject-package "$package"); then
+    echo "Remembered $package $version as unusable on this kernel's pages. Setup will not try that version again until the feed has another." >&2
+  fi
+  if [[ $added -eq 1 ]]; then
+    if omarchy pkg drop "$package"; then
+      echo "Removed the $package package this run had added." >&2
+    else
+      echo "Could not remove the $package package this run added. Remove it with: omarchy pkg drop $package" >&2
+    fi
+    hash -r
+  fi
+}
+install_antigravity() {
+  local binary="" desktop_binary="" cli_ok=0 desktop_ok=0 bind_status=0
+  if provider_ready agy; then
+    if ! agy_package_path >/dev/null; then
+      echo "agy is already installed at $(command -v agy), so the antigravity-cli package was not installed."
+    fi
+  elif python3 "$root/scripts/groundwork-update.py" package-rejected antigravity-cli; then
+    echo "antigravity-cli already failed its page-size check on this kernel. Setup will not try it again until the feed has another version." >&2
+  elif ! install_agy_command; then
+    echo "agy was not installed." >&2
+    exit 1
+  fi
+  if binary=$(agy_package_path); then
+    if python3 "$root/scripts/groundwork-update.py" check-package-pages antigravity-cli; then
+      cli_ok=1
+    else
+      reject_added_antigravity_package antigravity-cli "$agy_added"
+      binary=""
+    fi
+  elif provider_ready agy; then
+    echo "agy is not pacman package antigravity-cli, so T3 Code's Antigravity binaryPath was not set."
+    if binary=$(agy_resolved_path); then
+      python3 "$root/scripts/groundwork-update.py" check-elf-pages "$binary" || true
+    fi
+    binary=""
+  fi
+  if command -v antigravity >/dev/null; then
+    if ! antigravity_package_path >/dev/null; then
+      echo "antigravity is already installed at $(command -v antigravity), so the antigravity package was not installed."
+    fi
+  elif python3 "$root/scripts/groundwork-update.py" package-rejected antigravity; then
+    echo "antigravity already failed its page-size check on this kernel. Setup will not try it again until the feed has another version." >&2
+  elif ! install_antigravity_desktop_command; then
+    echo "Antigravity Desktop was not installed. A passing agy and the T3 Code provider are not affected." >&2
+  fi
+  if desktop_binary=$(antigravity_package_path); then
+    if python3 "$root/scripts/groundwork-update.py" check-package-pages antigravity; then
+      desktop_ok=1
+    else
+      reject_added_antigravity_package antigravity "$desktop_added"
+      echo "Antigravity Desktop cannot be mapped on this kernel's pages. agy and the T3 Code provider are not affected." >&2
+    fi
+  elif desktop_binary=$(antigravity_resolved_path); then
+    if python3 "$root/scripts/groundwork-update.py" check-elf-pages "$desktop_binary"; then
+      desktop_ok=1
+    else
+      echo "Antigravity Desktop cannot be mapped on this kernel's pages, so its key binding was not added." >&2
+    fi
+  fi
+  if [[ $cli_ok -eq 1 && -n $binary ]]; then
+    python3 "$root/scripts/groundwork-antigravity.py" merge-settings "$binary"
+    echo "agy is installed. T3 Code's Antigravity provider is enabled with binaryPath pinned to that agy. Sign in from T3 Code: Settings, Providers, Antigravity, Sign in. See docs/apps/antigravity.md."
+  fi
+  if [[ $desktop_ok -eq 1 ]]; then
+    bind_status=0
+    python3 "$root/scripts/groundwork-antigravity.py" bind || bind_status=$?
+    if [[ $bind_status -eq 0 || $bind_status -eq 10 ]]; then
+      [[ $bind_status -ne 10 ]] || antigravity_bound=1
+      echo "Antigravity Desktop is installed. Open it from the app launcher. Super+Shift+V focuses it after Hyprland loads the binding."
+    else
+      echo "Antigravity Desktop is installed. Its key binding was not applied." >&2
+    fi
+  else
+    python3 "$root/scripts/groundwork-antigravity.py" unbind || true
+  fi
+}
+if [[ $with_antigravity -eq 1 ]]; then
+  install_antigravity
+else
+  echo "Skipped Antigravity setup; any existing agy, Antigravity Desktop, T3 Code provider, and key binding were left alone."
 fi
 
 # Brave's release channel, through Omarchy. Brave Origin is a different browser
@@ -2027,7 +2243,8 @@ install_syncthing
 register_choices() {
   python3 "$root/scripts/groundwork-update.py" register "$root" "$with_keyd" "$with_screen_sharing" \
     "${GROUNDWORK_OBSIDIAN_VAULT:-$HOME/Documents/Obsidian/my_obsidian_vault}" "$with_blip" "$with_local_inference" \
-    "$declined_migrations" "$with_git_filter_repo" "$with_tmp_on_disk" "$with_easyeffects" "$with_tailscale"
+    "$declined_migrations" "$with_git_filter_repo" "$with_tmp_on_disk" "$with_easyeffects" "$with_tailscale" \
+    "$with_antigravity"
 }
 register_choices
 saved_declines=$declined_migrations
@@ -2495,4 +2712,8 @@ if [[ $with_tailscale -eq 1 ]]; then
   echo "After reviewing the tailnet policy, enable private SSH with: sudo tailscale set --ssh"
 fi
 echo "Verify the setup using the first-run checklist in README.md."
-echo "Git, SSH account settings, and Omarchy desktop bindings were left alone."
+if [[ $antigravity_bound -eq 1 ]]; then
+  echo "Git and SSH account settings were left alone. The one desktop binding added here is Super+Shift+V for Antigravity."
+else
+  echo "Git, SSH account settings, and Omarchy desktop bindings were left alone."
+fi

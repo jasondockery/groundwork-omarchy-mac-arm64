@@ -504,12 +504,14 @@ class UpdateTests(unittest.TestCase):
         for name in ('seed-obsidian.py', 'groundwork-screen-share.py',
                      'groundwork-syncthing.py', 'omarchy-plugins.py',
                      'groundwork-node-pin.py', 'groundwork-commit-guard.py',
-                     'groundwork-grep-threads.py', 'groundwork-tmp.py', 'groundwork-storage.py'):
+                     'groundwork-grep-threads.py', 'groundwork-tmp.py', 'groundwork-storage.py',
+                     'groundwork-antigravity.py'):
             (self.seed / 'scripts' / name).write_text('# fixture\n')
         dropin = self.seed / 'config'
         dropin.mkdir()
         (dropin / 'plocate-updatedb.service.d.conf').write_text('# fixture\n')
         (dropin / 'groundwork-easyeffects.service').write_text('# fixture\n')
+        (dropin / 'groundwork-antigravity.lua').write_text('-- fixture\n')
         self.commit(self.seed)
         self.command('git', '-C', str(self.seed), 'push', 'origin', 'main')
         self.assertEqual(self.git('rev-parse', 'HEAD'), pinned)
@@ -697,6 +699,21 @@ class UpdateTests(unittest.TestCase):
         updater.register(str(self.source), '0', '0', vault, '0', '0', '', '0', '1', '1', '1')
         self.assertNotIn('tailscale', json.loads(self.config.read_text()))
         self.assertTrue(updater.tailscale_enabled(updater.settings()))
+
+    def test_antigravity_opt_out_is_saved_and_opting_back_in_removes_it(self):
+        # Issue 162: only the opt-out is stored; on is the default.
+        vault = str(self.home / 'Notes')
+        updater.register(str(self.source), '0', '0', vault, '0', '0', '', '0', '1', '1', '1', '0')
+        saved = json.loads(self.config.read_text())
+        self.assertIs(saved['antigravity'], False)
+        self.assertFalse(updater.antigravity_enabled(updater.settings()))
+        updater.register(str(self.source), '0', '0', vault, '0', '0', '', '0', '1', '1', '1', '1')
+        self.assertNotIn('antigravity', json.loads(self.config.read_text()))
+        self.assertTrue(updater.antigravity_enabled(updater.settings()))
+        broken = dict(json.loads(self.config.read_text()), antigravity='no')
+        self.config.write_text(json.dumps(broken))
+        with self.assertRaises(updater.UpdateError):
+            updater.settings()
 
     def test_failed_keyd_copy_and_newer_candidate_keep_both_retry_boundaries_recoverable(self):
         installed = self.root / 'installed-keyd.conf'

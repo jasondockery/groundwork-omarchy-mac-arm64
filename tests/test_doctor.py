@@ -39,6 +39,7 @@ class HostToolsTests(unittest.TestCase):
         self.bin.mkdir()
         for name in TOOLS:
             self.stub(name, PROCPS_PS if name == 'ps' else '#!/bin/sh\nexit 0\n')
+        self.stub('agy', '#!/bin/sh\nif [ "$1" = --version ]; then echo 1.5.12; exit 0; fi\nexit 0\n')
         home = self.root / 'home'
         home.mkdir()
         system = self.root / 'system'
@@ -107,7 +108,8 @@ class HostToolsTests(unittest.TestCase):
         status, text = self.doctor()
         self.assertEqual(status, 0)
         self.assertEqual(text, 'Host tools: ok (lsof, ps -o lstart=, rg, jq, shellcheck, ssh, git)\n'
-                               f'Temp storage: ok ({TEMP_OK})\n' + self.storage_ok())
+                               f'Temp storage: ok ({TEMP_OK})\n'
+                               'Antigravity: ok (agy 1.5.12)\n' + self.storage_ok())
         self.assertEqual(self.doctor('--brief'), (0, ''))
 
     def test_each_missing_tool_names_its_install_line(self):
@@ -141,6 +143,7 @@ class HostToolsTests(unittest.TestCase):
         self.assertEqual(text, 'Host tools: 1 problem\n'
                                '  lsof is missing (lsof). Install it with: sudo pacman -S --needed lsof\n'
                                f'Temp storage: ok ({TEMP_OK})\n'
+                               'Antigravity: ok (agy 1.5.12)\n'
                                + self.storage_ok())
 
     def test_several_missing_tools_are_each_listed(self):
@@ -233,6 +236,60 @@ class HostToolsTests(unittest.TestCase):
         self.assertIn('obsidian bw readelf lsof; do', apply)
         self.assertIn('sudo -n true 2>/dev/null; then', apply.split('install_shellcheck() {', 1)[1])
         self.assertEqual(dict((c, p) for c, p, _ in doctor.HOST_TOOLS)['shellcheck'], 'shellcheck-bin')
+
+    def agy_version(self, text, status=0):
+        self.stub('agy', '#!/bin/sh\n'
+                         'if [ "$1" = --version ]; then printf "%s\\n" ' + json_quote(text) + f'; exit {status}; fi\n'
+                         'exit 0\n')
+
+    def test_agy_older_than_1_5_1_is_a_problem(self):
+        self.agy_version('1.5.0')
+        status, text = self.doctor()
+        self.assertEqual(status, 1)
+        self.assertIn('agy 1.5.0 is older than 1.5.1', text)
+        self.assertIn('omarchy update', text)
+        self.assertNotIn('--help', text)
+
+    def test_agy_before_1_5_12_is_recommended_up(self):
+        self.agy_version('agy version 1.5.11 (linux-arm64)')
+        status, text = self.doctor()
+        self.assertEqual(status, 1)
+        self.assertIn('agy 1.5.11 runs, and 1.5.12 or newer is recommended', text)
+
+    def test_agy_1_5_12_and_newer_pass(self):
+        self.agy_version('1.5.18')
+        status, text = self.doctor()
+        self.assertEqual(status, 0)
+        self.assertIn('Antigravity: ok (agy 1.5.18)', text)
+        self.assertEqual(self.doctor('--brief'), (0, ''))
+
+    def test_missing_agy_names_the_omarchy_installer(self):
+        (self.bin / 'agy').unlink()
+        status, text = self.doctor()
+        self.assertEqual(status, 1)
+        self.assertIn('agy is missing (antigravity-cli). Install it with: omarchy-install-ai-cli agy', text)
+
+    def test_opt_out_does_not_report_a_missing_agy(self):
+        (self.bin / 'agy').unlink()
+        config = Path(self.environ['XDG_CONFIG_HOME']) / 'groundwork'
+        config.mkdir(parents=True)
+        (config / 'omarchy.json').write_text('{"antigravity": false}\n')
+        status, text = self.doctor()
+        self.assertEqual(status, 0)
+        self.assertNotIn('Antigravity:', text)
+        self.assertNotIn('agy is missing', text)
+
+    def test_unreadable_agy_version_is_a_problem(self):
+        self.stub('agy', '#!/bin/sh\nexit 1\n')
+        status, text = self.doctor()
+        self.assertEqual(status, 1)
+        self.assertIn('could not be read from agy --version', text)
+        self.assertNotIn('--help', text)
+
+
+def json_quote(text):
+    """A single-quoted shell string. The version text is chosen by the test."""
+    return "'" + text.replace("'", "'\\''") + "'"
 
 
 if __name__ == '__main__':

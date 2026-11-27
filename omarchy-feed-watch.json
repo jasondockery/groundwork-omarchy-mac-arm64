@@ -212,6 +212,7 @@
     "ai-providers": "Omarchy's declared mise tools.",
     "lsof": "omarchy pkg add lsof, a default host tool (decision 0021).",
     "tailscale": "Omarchy's omarchy-install-service-tailscale helpers (decision 0025). Setup calls those helpers and leaves tailscale up for you.",
+    "antigravity": "omarchy-install-ai-cli agy (package antigravity-cli) and the antigravity desktop package, installed without launching it (issue 162). Setup checks both with decision 0018's LOAD rule and pins T3 Code's Antigravity binaryPath at the pacman-owned agy.",
     "packages.txt": "An optional list; each entry is added by hand with omarchy pkg add."
   }
 }
