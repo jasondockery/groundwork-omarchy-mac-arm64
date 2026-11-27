@@ -402,6 +402,8 @@ class TempStorageTests(unittest.TestCase):
             (self.bin / name).chmod(0o755)
         (self.bin / 'ps').write_text('#!/bin/sh\necho "Tue Nov  3 21:38:13 2026"\n')
         (self.bin / 'ps').chmod(0o755)
+        (self.bin / 'agy').write_text('#!/bin/sh\nif [ "$1" = --version ]; then echo 1.5.12; exit 0; fi\nexit 0\n')
+        (self.bin / 'agy').chmod(0o755)
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             status = doctor.main([], self.environ)

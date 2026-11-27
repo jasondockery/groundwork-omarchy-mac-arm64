@@ -15,6 +15,14 @@ Checks:
               of /tmp and a masked systemd-tmpfiles-clean.timer, and the scratch roots
               omarchy.json names (decision 0022, issue #138). A checkout without
               the temp-storage helper reports that gap.
+  antigravity agy from the antigravity-cli package (issue 162). Missing agy is
+              reported when the setup choice is on. When the feed version is in
+              antigravity-cli-rejected.json for this page size, that line says
+              the version was refused and does not suggest installing it. A
+              version older than 1.5.1 cannot satisfy T3 Code's Antigravity
+              provider. 1.5.1 through 1.5.11 still runs; 1.5.12 or newer is
+              recommended. The probe is `agy --version` only.
+              `--without-antigravity` skips this check.
   storage     TRIM through LUKS and the plocate prune drop-in (decision 0023).
               Each gap is printed with the command that fixes it. A directory
               property cannot choose a zstd level, so that check does not set
@@ -30,8 +38,10 @@ fails, 2 for bad usage.
 """
 import argparse
 import importlib.util
+import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -50,6 +60,12 @@ HOST_TOOLS = (
     ('git', 'git', 'sudo pacman -S --needed git'),
 )
 PS_PROBE_SECONDS = 5
+# T3 Code's Antigravity provider needs agy 1.5.1. 1.5.12 or newer is what
+# current Omarchy feeds ship and what this layer recommends (issue 162).
+AGY_MINIMUM = (1, 5, 1)
+AGY_RECOMMENDED = (1, 5, 12)
+AGY_PROBE_SECONDS = 5
+AGY_VERSION = re.compile(r'(\d+)\.(\d+)\.(\d+)')
 
 
 def load_storage():
@@ -89,6 +105,127 @@ def host_tool_problems(environ):
             problems.append(f'{found} does not support `ps -o lstart=`, which lock-liveness checks read. '
                             f'Install {package} with: {install}')
     return problems
+
+
+def antigravity_opted_out(environ):
+    """True only when omarchy.json saves antigravity as false. A missing or broken file stays on."""
+    home = environ.get('HOME') or ''
+    if not home:
+        return False
+    config_home = environ.get('XDG_CONFIG_HOME') or str(Path(home) / '.config')
+    path = Path(config_home) / 'groundwork' / 'omarchy.json'
+    try:
+        if path.is_symlink() or not path.is_file():
+            return False
+        value = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeError, ValueError):
+        return False
+    return isinstance(value, dict) and value.get('antigravity') is False
+
+
+def parse_agy_version(text):
+    """The first x.y.z in `text`, or None."""
+    match = AGY_VERSION.search(text or '')
+    if not match:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+def read_agy_version(agy, environ):
+    """Version tuple from `agy --version`, or None when it cannot be read.
+
+    stdin is closed and the wait is bounded. This does not pass --help.
+    """
+    try:
+        result = subprocess.run([agy, '--version'], env=environ, stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, errors='replace',
+                                timeout=AGY_PROBE_SECONDS)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return parse_agy_version(result.stdout + '\n' + result.stderr)
+
+
+def antigravity_state_dir(environ):
+    state_home = environ.get('XDG_STATE_HOME') or ''
+    if not state_home:
+        home = environ.get('HOME') or ''
+        if not home:
+            return None
+        state_home = str(Path(home) / '.local' / 'state')
+    return Path(state_home) / 'groundwork'
+
+
+def antigravity_cli_feed_version(environ):
+    """Version `pacman -Si antigravity-cli` offers, or None when it cannot be read."""
+    probe = dict(environ)
+    probe['LC_ALL'] = 'C'
+    try:
+        result = subprocess.run(['pacman', '-Si', 'antigravity-cli'], env=probe,
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                errors='replace', timeout=AGY_PROBE_SECONDS)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        key, _, value = line.partition(':')
+        if key.strip() == 'Version' and value.strip():
+            return value.strip()
+    return None
+
+
+def refused_antigravity_cli_version(environ):
+    """The feed version remembered as refused for this page size, or None."""
+    version = antigravity_cli_feed_version(environ)
+    if not version:
+        return None
+    state = antigravity_state_dir(environ)
+    if state is None:
+        return None
+    path = state / 'antigravity-cli-rejected.json'
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        document = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    try:
+        page = str(os.sysconf('SC_PAGESIZE'))
+    except (OSError, ValueError, AttributeError):
+        return None
+    versions = document.get(page)
+    if not isinstance(versions, list):
+        return None
+    if any(item == version for item in versions if isinstance(item, str)):
+        return version
+    return None
+
+
+def antigravity_report(environ):
+    """(problems, summary), or None when Antigravity is opted out."""
+    if antigravity_opted_out(environ):
+        return None
+    found = shutil.which('agy', path=environ.get('PATH', ''))
+    if not found:
+        refused = refused_antigravity_cli_version(environ)
+        if refused:
+            return ([f'agy is missing (antigravity-cli). {refused} was refused for this kernel\'s '
+                     'page size. Wait for another version in the feed.'], '')
+        return (['agy is missing (antigravity-cli). Install it with: omarchy-install-ai-cli agy'], '')
+    version = read_agy_version(found, environ)
+    if version is None:
+        return ([f'{found} is installed but its version could not be read from agy --version.'], '')
+    rendered = '.'.join(str(part) for part in version)
+    if version < AGY_MINIMUM:
+        return ([f'agy {rendered} is older than 1.5.1, which T3 Code\'s Antigravity provider needs. '
+                 'Update it with: omarchy update'], '')
+    if version < AGY_RECOMMENDED:
+        return ([f'agy {rendered} runs, and 1.5.12 or newer is recommended. Update it with: omarchy update'], '')
+    return ([], f'agy {rendered}')
 
 
 def temp_storage(environ):
@@ -132,6 +269,9 @@ def main(argv=None, environ=None):
     environ = dict(os.environ if environ is None else environ)
     names = ', '.join('ps -o lstart=' if command == 'ps' else command for command, _, _ in HOST_TOOLS)
     sections = [('Host tools', host_tool_problems(environ), names), ('Temp storage', *temp_storage(environ))]
+    antigravity = antigravity_report(environ)
+    if antigravity is not None:
+        sections.append(('Antigravity', *antigravity))
     status = 0
     for label, problems, summary in sections:
         if args.brief:

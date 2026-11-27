@@ -1,0 +1,12 @@
+-- Groundwork Antigravity binding. This is the only Hyprland binding this
+-- layer adds. Omarchy ships none for Antigravity (omacom/omarchy quattro
+-- default/hypr, checked 2026-11-27). SUPER+SHIFT+A is ChatGPT and
+-- SUPER+SHIFT+G is Signal in the global region, and SUPER+SHIFT+O is
+-- Obsidian, so this uses SUPER+SHIFT+V, which those binding files do not
+-- bind. Super+V in a terminal is paste; this chord is Super+Shift+V.
+-- launch is the package command. focus is the desktop entry's window class
+-- when that class is a plain name, otherwise the command name.
+-- Loaded from bindings.lua after Omarchy defines `o`. This file is a regular
+-- copy, not a link into the Groundwork checkout: editing a stowed Hypr file
+-- dirties that checkout and blocks update-all.
+o.bind("SUPER + SHIFT + V", "Antigravity", { launch = "antigravity", focus = "^antigravity$" })
