@@ -2,6 +2,7 @@
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import stat
 import unittest
@@ -114,6 +115,73 @@ class SettingsMergeTests(unittest.TestCase):
         self.assertEqual(stdout, 'already-present pinned\n')
         self.assertEqual(path.read_text(), original)
         self.assertNotIn(SECRET, stdout + stderr)
+
+    def test_a_file_created_during_an_exclusive_create_is_not_clobbered(self):
+        path = self.settings_path()
+        path.parent.mkdir(parents=True)
+        t3 = (
+            '{\n'
+            '  "providerInstances": {\n'
+            '    "claude": {"driver": "claude", "config": {"apiKey": "%s"}}\n'
+            '  }\n'
+            '}\n' % SECRET
+        ).encode()
+        real_open = os.open
+
+        def racing_open(file, flags, mode=0o777, *, dir_fd=None):
+            if dir_fd is None and not isinstance(file, int) and Path(file) == path and flags & os.O_EXCL:
+                holder = real_open(file, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o640)
+                os.write(holder, t3)
+                os.close(holder)
+                os.chmod(path, 0o640)
+            if dir_fd is None:
+                return real_open(file, flags, mode)
+            return real_open(file, flags, mode, dir_fd=dir_fd)
+
+        with patch.object(antigravity.os, 'open', racing_open):
+            status, stdout, stderr = self.merge()
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(stdout, 'added\n')
+        saved = json.loads(path.read_text())
+        self.assertEqual(saved['providerInstances']['claude']['config']['apiKey'], SECRET)
+        self.assertEqual(saved['providerInstances']['antigravity']['driver'], 'antigravity')
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o640)
+        self.assertNotIn(SECRET, stdout + stderr)
+
+    def test_a_settings_file_that_keeps_changing_is_not_replaced(self):
+        path = self.settings_path()
+        path.parent.mkdir(parents=True)
+        path.write_bytes(
+            b'{"providerInstances":{"claude":{"driver":"claude","config":{"apiKey":"'
+            + SECRET.encode() + b'"}}}}\n')
+        real_read = Path.read_bytes
+        state = {'n': 0}
+
+        def changing(self_path):
+            current = real_read(self_path)
+            if Path(self_path) != path:
+                return current
+            state['n'] += 1
+            fresh = (json.dumps({
+                'stamp': state['n'],
+                'providerInstances': {
+                    'claude': {'driver': 'claude', 'config': {'apiKey': SECRET}},
+                },
+            }, indent=2) + '\n').encode()
+            descriptor = os.open(path, os.O_WRONLY | os.O_TRUNC)
+            os.write(descriptor, fresh)
+            os.close(descriptor)
+            return current
+
+        with patch.object(Path, 'read_bytes', changing):
+            status, stdout, stderr = self.merge()
+        self.assertEqual(status, 1, stderr)
+        self.assertEqual(stdout, '')
+        saved = path.read_bytes()
+        self.assertNotIn(b'antigravity', saved)
+        self.assertIn(SECRET.encode(), saved)
+        self.assertNotIn(SECRET, stdout + stderr)
+        self.assertGreaterEqual(state['n'], 2)
 
     def test_missing_file_is_created_mode_0600(self):
         status, stdout, stderr = self.merge()
@@ -317,6 +385,19 @@ class BindingTests(unittest.TestCase):
         self.assertEqual(self.bindings().read_text(), antigravity.BINDING_LINE + '\n')
         self.assertFalse(self.bindings().is_symlink())
 
+    def test_an_unowned_lua_file_is_not_loaded(self):
+        lua = self.lua()
+        lua.parent.mkdir(parents=True)
+        lua.write_text('-- mine, not Groundwork\n')
+        bindings = self.bindings()
+        bindings.write_text('-- user\n')
+        status, stdout, stderr = self.invoke(['bind'])
+        self.assertEqual(status, antigravity.NOT_BOUND, stderr)
+        self.assertEqual(lua.read_text(), '-- mine, not Groundwork\n')
+        self.assertEqual(bindings.read_text(), '-- user\n')
+        self.assertNotIn(antigravity.BINDING_LINE, bindings.read_text())
+        self.assertNotIn('Super+Shift+V', stdout)
+
     def test_a_symlink_bindings_file_is_not_edited(self):
         target = self.root / 'real-bindings.lua'
         target.write_text('-- real\n')
@@ -357,6 +438,12 @@ class BindingTests(unittest.TestCase):
         again, _stdout, _stderr = self.invoke(['unbind'])
         self.assertEqual(again, 0)
         self.assertEqual(path.read_text(), '-- user\n-- trailing\n')
+        path.write_text(antigravity.BINDING_LINE + '\n')
+        status, _stdout, stderr = self.invoke(['unbind'])
+        self.assertEqual(status, antigravity.CHANGED, stderr)
+        self.assertTrue(path.is_file())
+        self.assertEqual(path.read_text(), '\n')
+        self.assertNotIn(antigravity.BINDING_LINE, path.read_text())
 
     def test_focus_class_comes_from_the_package_desktop_entry(self):
         desktop = self.root / 'antigravity.desktop'

@@ -8,10 +8,14 @@
 
 merge-settings adds providerInstances.antigravity only when that key is
 absent. An existing instance, including one with enabled false or its own
-binaryPath, is left byte for byte. A missing file is created mode 0600.
-Invalid JSON, a non-object root, and a providerInstances value that is not
-an object are left untouched. T3CODE_HOME empty or unset is ~/.t3. The file
-and its parents must be regular; a symlink is not followed and not written.
+binaryPath, is left byte for byte. A missing file is created mode 0600 with
+O_EXCL. A file that appears in between is merged instead of replaced. An
+existing file is replaced only when its bytes still match the snapshot just
+read; a file that keeps changing is left as it is and the command exits 1
+with no status word. Invalid JSON, a non-object root, and a providerInstances
+value that is not an object are left untouched. T3CODE_HOME empty or unset is
+~/.t3. The file and its parents must be regular; a symlink is not followed
+and not written.
 
 Nothing from settings.json is printed. apiKey is never written or read back
 out. binaryPath is the absolute pacman-owned agy the caller checked.
@@ -23,11 +27,14 @@ bind copies config/groundwork-antigravity.lua to
 ~/.config/hypr/groundwork-antigravity.lua (a regular file, not a link into
 this checkout) and appends one dofile line to bindings.lua when that file is
 a regular file and the line is absent. A symlink bindings.lua is not edited.
-The focus class comes from the antigravity package's desktop entry when that
-class is a plain name. A desktop entry is written only when the package
-query succeeds and lists none.
+A groundwork-antigravity.lua that does not contain the Groundwork marker is
+left alone, the dofile line is not added, and bind returns 11. The focus
+class comes from the antigravity package's desktop entry when that class is
+a plain name. A desktop entry is written only when the package query
+succeeds and lists none.
 
-unbind removes only that dofile line. It does not remove the package, the
+unbind removes only that dofile line. It does not delete bindings.lua, even
+when that line was the whole file. It does not remove the package, the
 settings entry, or any other line.
 
 Exit 0 when the dofile line is already in a regular bindings.lua and nothing
@@ -63,6 +70,8 @@ NOT_BOUND = 11
 STATUS_ADDED = 'added'
 STATUS_PRESENT = 'already-present'
 STATUS_UNTOUCHED = 'left-untouched'
+# Reads, then a compare-and-swap. A file T3 keeps saving exhausts this and stops.
+MERGE_ATTEMPTS = 4
 
 
 def config_dir(environ):
@@ -130,6 +139,41 @@ def atomic_write(path, content, mode):
             temporary.unlink()
 
 
+def create_exclusive(path, content, mode):
+    """Create `path` with O_EXCL. FileExistsError when the path already exists."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        view = memoryview(content)
+        while view:
+            written = os.write(descriptor, view)
+            if written == 0:
+                raise OSError(f'Could not write {path}.')
+            view = view[written:]
+        os.fsync(descriptor)
+        os.fchmod(descriptor, mode)
+    except Exception:
+        os.close(descriptor)
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+    os.close(descriptor)
+
+
+def replace_if_unchanged(path, snapshot, content, mode):
+    """Replace `path` only when it still holds `snapshot`. False when it changed."""
+    try:
+        current = path.read_bytes()
+    except OSError:
+        return False
+    if current != snapshot or path.is_symlink() or not path.is_file():
+        return False
+    atomic_write(path, content, mode)
+    return True
+
+
 def instance_document(binary):
     # enabled on the instance is enough. authMethod stays at T3's
     # oauth-personal default, which is what a personal Ultra account uses.
@@ -171,8 +215,9 @@ def merge_settings(binary, environ):
 
     stdout is added, already-present, or left-untouched. already-present
     pinned means the existing instance is already enabled at this agy.
-    A reason to leave the file alone goes to stderr. A bad agy path or a
-    failed write returns 1 and prints no status. The file body is never printed.
+    A reason to leave the file alone goes to stderr. A bad agy path, a failed
+    write, or a file that keeps changing returns 1 and prints no status.
+    The file body is never printed.
     """
     problem = refuse_binary(binary)
     if problem:
@@ -183,56 +228,70 @@ def merge_settings(binary, environ):
     except OSError as error:
         print(f'T3 Code settings were not changed ({error}).', file=sys.stderr)
         return 1
-    if contains_symlink(path):
-        print(f'T3 Code settings.json is a symlink or sits under one, so it was left unchanged: {path}',
-              file=sys.stderr)
-        return report_status(STATUS_UNTOUCHED)
-    if path.exists() and not path.is_file():
-        print(f'T3 Code settings.json is not a regular file, so it was left unchanged: {path}',
-              file=sys.stderr)
-        return report_status(STATUS_UNTOUCHED)
-    if not path.exists():
-        document = {'providerInstances': {INSTANCE_KEY: instance_document(binary)}}
+    for _attempt in range(MERGE_ATTEMPTS):
+        if contains_symlink(path):
+            print(f'T3 Code settings.json is a symlink or sits under one, so it was left unchanged: {path}',
+                  file=sys.stderr)
+            return report_status(STATUS_UNTOUCHED)
+        if path.exists() and not path.is_file():
+            print(f'T3 Code settings.json is not a regular file, so it was left unchanged: {path}',
+                  file=sys.stderr)
+            return report_status(STATUS_UNTOUCHED)
+        if not path.exists():
+            document = {'providerInstances': {INSTANCE_KEY: instance_document(binary)}}
+            payload = (json.dumps(document, indent=2, ensure_ascii=False) + '\n').encode()
+            try:
+                create_exclusive(path, payload, 0o600)
+            except FileExistsError:
+                continue
+            except OSError as error:
+                print(f'T3 Code settings.json was not created: {path} ({error})', file=sys.stderr)
+                return 1
+            return report_status(STATUS_ADDED)
         try:
-            atomic_write(path, (json.dumps(document, indent=2, ensure_ascii=False) + '\n').encode(), 0o600)
+            original = path.read_bytes()
         except OSError as error:
-            print(f'T3 Code settings.json was not created: {path} ({error})', file=sys.stderr)
+            if not path.exists():
+                continue
+            print(f'T3 Code settings.json could not be read, so it was left unchanged: {path} ({error})',
+                  file=sys.stderr)
+            return report_status(STATUS_UNTOUCHED)
+        try:
+            value = json.loads(original.decode('utf-8'))
+        except (UnicodeError, json.JSONDecodeError):
+            print(f'T3 Code settings.json is not valid JSON, so it was left unchanged: {path}', file=sys.stderr)
+            return report_status(STATUS_UNTOUCHED)
+        if not isinstance(value, dict):
+            print(f'T3 Code settings.json is not a JSON object, so it was left unchanged: {path}', file=sys.stderr)
+            return report_status(STATUS_UNTOUCHED)
+        instances = value.get('providerInstances', None)
+        if instances is None:
+            instances = {}
+            value['providerInstances'] = instances
+        elif not isinstance(instances, dict):
+            print('T3 Code providerInstances is not a JSON object, so settings.json was left unchanged.',
+                  file=sys.stderr)
+            return report_status(STATUS_UNTOUCHED)
+        if INSTANCE_KEY in instances:
+            if instance_is_pinned(instances[INSTANCE_KEY], binary):
+                return report_status(STATUS_PRESENT + ' pinned')
+            return report_status(STATUS_PRESENT)
+        instances[INSTANCE_KEY] = instance_document(binary)
+        try:
+            mode = stat.S_IMODE(path.stat().st_mode)
+        except OSError:
+            continue
+        content = (json.dumps(value, indent=2, ensure_ascii=False) + '\n').encode()
+        try:
+            if not replace_if_unchanged(path, original, content, mode):
+                continue
+        except OSError as error:
+            print(f'T3 Code settings.json was left unchanged: {path} ({error})', file=sys.stderr)
             return 1
         return report_status(STATUS_ADDED)
-    try:
-        original = path.read_bytes()
-    except OSError as error:
-        print(f'T3 Code settings.json could not be read, so it was left unchanged: {path} ({error})',
-              file=sys.stderr)
-        return report_status(STATUS_UNTOUCHED)
-    try:
-        value = json.loads(original.decode('utf-8'))
-    except (UnicodeError, json.JSONDecodeError):
-        print(f'T3 Code settings.json is not valid JSON, so it was left unchanged: {path}', file=sys.stderr)
-        return report_status(STATUS_UNTOUCHED)
-    if not isinstance(value, dict):
-        print(f'T3 Code settings.json is not a JSON object, so it was left unchanged: {path}', file=sys.stderr)
-        return report_status(STATUS_UNTOUCHED)
-    instances = value.get('providerInstances', None)
-    if instances is None:
-        instances = {}
-        value['providerInstances'] = instances
-    elif not isinstance(instances, dict):
-        print('T3 Code providerInstances is not a JSON object, so settings.json was left unchanged.',
-              file=sys.stderr)
-        return report_status(STATUS_UNTOUCHED)
-    if INSTANCE_KEY in instances:
-        if instance_is_pinned(instances[INSTANCE_KEY], binary):
-            return report_status(STATUS_PRESENT + ' pinned')
-        return report_status(STATUS_PRESENT)
-    instances[INSTANCE_KEY] = instance_document(binary)
-    mode = stat.S_IMODE(path.stat().st_mode)
-    try:
-        atomic_write(path, (json.dumps(value, indent=2, ensure_ascii=False) + '\n').encode(), mode)
-    except OSError as error:
-        print(f'T3 Code settings.json was left unchanged: {path} ({error})', file=sys.stderr)
-        return 1
-    return report_status(STATUS_ADDED)
+    print(f'T3 Code settings.json kept changing, so the Antigravity provider was not added: {path}',
+          file=sys.stderr)
+    return 1
 
 
 def template_text():
@@ -337,7 +396,7 @@ def ensure_launcher(environ, desktops):
 
 def write_lua(environ, focus_class):
     """Copy the binding. Return True when the file changed. Refuse a symlink."""
-    path = config_dir(environ) / 'hypr' / 'groundwork-antigravity.lua'
+    path = lua_path(environ)
     if contains_symlink(path):
         print(f'Refusing to replace a symlink: {path}', file=sys.stderr)
         return False
@@ -370,6 +429,22 @@ def write_lua(environ, focus_class):
 
 def bindings_path(environ):
     return config_dir(environ) / 'hypr' / 'bindings.lua'
+
+
+def lua_path(environ):
+    return config_dir(environ) / 'hypr' / 'groundwork-antigravity.lua'
+
+
+def groundwork_lua_loaded(environ):
+    """True when the copied lua file is a regular file with the Groundwork marker."""
+    path = lua_path(environ)
+    if path.is_symlink() or contains_symlink(path) or not path.is_file():
+        return False
+    try:
+        text = path.read_text(encoding='utf-8')
+    except (OSError, UnicodeError):
+        return False
+    return OWNED_LUA_MARKER in text
 
 
 def binding_line_loaded(environ):
@@ -434,9 +509,10 @@ def remove_binding_line(environ):
     if len(kept) == len(lines):
         return 0
     updated = ''.join(kept).encode()
+    # hyprland.lua requires bindings.lua with no pcall. An empty file still
+    # satisfies that require; deleting it stops the rest of the config.
     if not updated.strip():
-        path.unlink()
-        return CHANGED
+        updated = b'\n'
     atomic_write(path, updated, stat.S_IMODE(path.stat().st_mode))
     return CHANGED
 
@@ -446,6 +522,9 @@ def bind(environ):
     ensure_launcher(environ, desktops)
     focus = focus_class_from(desktops) if desktops else 'antigravity'
     changed = write_lua(environ, focus)
+    # A file this layer did not write must not be loaded from bindings.lua.
+    if not groundwork_lua_loaded(environ):
+        return NOT_BOUND
     status = append_binding_line(environ)
     if status == 1:
         return 1

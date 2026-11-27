@@ -2704,6 +2704,21 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertFalse((self.root / 'home/.config/hypr/groundwork-antigravity.lua').exists())
         self.assertFalse((self.root / 'home/.t3/userdata/settings.json').exists())
 
+    def test_an_unowned_antigravity_lua_is_not_announced(self):
+        self.enable_pacman()
+        hypr = self.root / 'home/.config/hypr'
+        hypr.mkdir(parents=True)
+        lua = hypr / 'groundwork-antigravity.lua'
+        lua.write_text('-- mine, not Groundwork\n')
+        bindings = hypr / 'bindings.lua'
+        bindings.write_text('-- user\n')
+        result = self.run_install('--without-keyd', '--without-screen-sharing')
+        self.assertEqual(lua.read_text(), '-- mine, not Groundwork\n')
+        self.assertEqual(bindings.read_text(), '-- user\n')
+        self.assertNotIn('Super+Shift+V', result.stdout)
+        self.assertIn('key binding was not applied', result.stderr)
+        self.assertNotIn('binding added here is Super+Shift+V', result.stdout)
+
     def test_symlink_bindings_file_is_not_edited_by_setup(self):
         self.enable_pacman()
         target = self.root / 'real-bindings.lua'
