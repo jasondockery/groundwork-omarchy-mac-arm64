@@ -16,10 +16,13 @@ Checks:
               omarchy.json names (decision 0022, issue #138). A checkout without
               the temp-storage helper reports that gap.
   antigravity agy from the antigravity-cli package (issue 162). Missing agy is
-              reported when the setup choice is on. A version older than 1.5.1
-              cannot satisfy T3 Code's Antigravity provider. 1.5.1 through
-              1.5.11 still runs; 1.5.12 or newer is recommended. The probe is
-              `agy --version` only. `--without-antigravity` skips this check.
+              reported when the setup choice is on. When the feed version is in
+              antigravity-cli-rejected.json for this page size, that line says
+              the version was refused and does not suggest installing it. A
+              version older than 1.5.1 cannot satisfy T3 Code's Antigravity
+              provider. 1.5.1 through 1.5.11 still runs; 1.5.12 or newer is
+              recommended. The probe is `agy --version` only.
+              `--without-antigravity` skips this check.
   storage     TRIM through LUKS and the plocate prune drop-in (decision 0023).
               Each gap is printed with the command that fixes it. A directory
               property cannot choose a zstd level, so that check does not set
@@ -144,12 +147,74 @@ def read_agy_version(agy, environ):
     return parse_agy_version(result.stdout + '\n' + result.stderr)
 
 
+def antigravity_state_dir(environ):
+    state_home = environ.get('XDG_STATE_HOME') or ''
+    if not state_home:
+        home = environ.get('HOME') or ''
+        if not home:
+            return None
+        state_home = str(Path(home) / '.local' / 'state')
+    return Path(state_home) / 'groundwork'
+
+
+def antigravity_cli_feed_version(environ):
+    """Version `pacman -Si antigravity-cli` offers, or None when it cannot be read."""
+    probe = dict(environ)
+    probe['LC_ALL'] = 'C'
+    try:
+        result = subprocess.run(['pacman', '-Si', 'antigravity-cli'], env=probe,
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                errors='replace', timeout=AGY_PROBE_SECONDS)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        key, _, value = line.partition(':')
+        if key.strip() == 'Version' and value.strip():
+            return value.strip()
+    return None
+
+
+def refused_antigravity_cli_version(environ):
+    """The feed version remembered as refused for this page size, or None."""
+    version = antigravity_cli_feed_version(environ)
+    if not version:
+        return None
+    state = antigravity_state_dir(environ)
+    if state is None:
+        return None
+    path = state / 'antigravity-cli-rejected.json'
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        document = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    try:
+        page = str(os.sysconf('SC_PAGESIZE'))
+    except (OSError, ValueError, AttributeError):
+        return None
+    versions = document.get(page)
+    if not isinstance(versions, list):
+        return None
+    if any(item == version for item in versions if isinstance(item, str)):
+        return version
+    return None
+
+
 def antigravity_report(environ):
     """(problems, summary), or None when Antigravity is opted out."""
     if antigravity_opted_out(environ):
         return None
     found = shutil.which('agy', path=environ.get('PATH', ''))
     if not found:
+        refused = refused_antigravity_cli_version(environ)
+        if refused:
+            return ([f'agy is missing (antigravity-cli). {refused} was refused for this kernel\'s '
+                     'page size. Wait for another version in the feed.'], '')
         return (['agy is missing (antigravity-cli). Install it with: omarchy-install-ai-cli agy'], '')
     version = read_agy_version(found, environ)
     if version is None:

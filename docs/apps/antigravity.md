@@ -24,7 +24,7 @@ Apple Silicon kernels use 16 KiB pages. There is no separate arm64 build to fall
 
 The strict `p_align >= page` rule stays in `package_alignment_problem` for Bitwarden, Brave, and local inference. These two packages use the 0018 predicate because a segment whose alignment is below the page still maps when its offset and virtual address both start on a page.
 
-A failure is remembered by page size, the same way Bitwarden is. A package this run added is removed with `omarchy pkg drop`. A package that was already installed is kept and reported, and setup does not try that version again until the feed has another. The CLI and the desktop app are independent: a desktop failure does not remove a passing `agy` and does not skip the T3 Code pin. The key binding is skipped when the desktop app is missing or fails its check.
+A failure is remembered by page size, the same way Bitwarden is. A package this run added is removed with `omarchy pkg drop`. A package that was already installed is kept and reported, and setup does not try that version again until the feed has another. When `agy` is missing and that feed version is in `antigravity-cli-rejected.json` for this page size, the doctor says the version was refused for page size and does not suggest installing it. The CLI and the desktop app are independent: a desktop failure does not remove a passing `agy` and does not skip the T3 Code pin. The key binding is skipped when the desktop app is missing or fails its check.
 
 ## T3 Code provider
 

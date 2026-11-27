@@ -7,6 +7,7 @@ decide a result. The temp-storage findings are in test_tmp_on_disk.
 import contextlib
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -268,6 +269,27 @@ class HostToolsTests(unittest.TestCase):
         status, text = self.doctor()
         self.assertEqual(status, 1)
         self.assertIn('agy is missing (antigravity-cli). Install it with: omarchy-install-ai-cli agy', text)
+
+    def test_a_refused_feed_version_is_not_an_install_hint(self):
+        (self.bin / 'agy').unlink()
+        page = str(os.sysconf('SC_PAGESIZE'))
+        state = Path(self.environ['XDG_STATE_HOME']) / 'groundwork'
+        state.mkdir(parents=True)
+        (state / 'antigravity-cli-rejected.json').write_text(json.dumps({page: ['1.5.18-1']}) + '\n')
+        self.stub('pacman', '#!/bin/sh\n'
+                            'if [ "$1" = -Si ] && [ "$2" = antigravity-cli ]; then\n'
+                            '  printf "Version         : 1.5.18-1\\n"\n'
+                            '  exit 0\n'
+                            'fi\n'
+                            'exit 1\n')
+        status, text = self.doctor()
+        self.assertEqual(status, 1)
+        self.assertIn('1.5.18-1 was refused for this kernel\'s page size', text)
+        self.assertIn('Wait for another version in the feed', text)
+        self.assertNotIn('omarchy-install-ai-cli agy', text)
+        (state / 'antigravity-cli-rejected.json').write_text(json.dumps({page: ['1.5.17-1']}) + '\n')
+        status, text = self.doctor()
+        self.assertIn('omarchy-install-ai-cli agy', text)
 
     def test_opt_out_does_not_report_a_missing_agy(self):
         (self.bin / 'agy').unlink()
