@@ -30,21 +30,21 @@ import sys
 import unittest
 
 REPO = Path(__file__).resolve().parents[1]
-SHARDS = 6
+SHARDS = 8
 
-# Mean seconds per test, by test module, from hosted run 41208883401
-# (main a708938, ubuntu-26.04, 780 tests in 1126 s). Re-measure from a hosted
-# run's per-test log timestamps when shards drift apart.
+# Mean seconds per test, by test module, from hosted run 46025417431
+# (64b8f811, ubuntu-26.04, 992 logged tests, 1610 s of test time). Re-measure
+# from a hosted run's per-test log timestamps when shards drift apart.
 WEIGHTS = {
-    'test_t3_install': 6.03,
-    'test_brave': 5.18,
-    'test_migration_offer': 4.34,
-    'test_install_keyd': 3.83,
-    'test_syncthing': 0.43,
-    'test_omarchy_plugins': 0.35,
-    'test_update': 0.22,
-    'test_omarchy_feed_watch': 0.10,
-    'test_commit_guard': 0.14,
+    'test_t3_install': 6.86,
+    'test_brave': 6.51,
+    'test_migration_offer': 5.38,
+    'test_install_keyd': 4.76,
+    'test_syncthing': 0.46,
+    'test_omarchy_plugins': 0.31,
+    'test_update': 0.20,
+    'test_commit_guard': 0.13,
+    'test_omarchy_feed_watch': 0.09,
 }
 DEFAULT_WEIGHT = 0.05
 
