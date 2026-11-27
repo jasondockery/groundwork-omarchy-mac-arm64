@@ -116,72 +116,139 @@ class SettingsMergeTests(unittest.TestCase):
         self.assertEqual(path.read_text(), original)
         self.assertNotIn(SECRET, stdout + stderr)
 
-    def test_a_file_created_during_an_exclusive_create_is_not_clobbered(self):
+    def fresh_settings(self, stamp):
+        return (json.dumps({
+            'stamp': stamp,
+            'providerInstances': {
+                'claude': {'driver': 'claude', 'config': {'apiKey': SECRET}},
+            },
+        }, indent=2) + '\n').encode()
+
+    def write_direct(self, path, content):
+        descriptor = os.open(path, os.O_WRONLY | os.O_TRUNC)
+        os.write(descriptor, content)
+        os.close(descriptor)
+
+    def test_a_file_created_during_link_is_not_clobbered(self):
         path = self.settings_path()
         path.parent.mkdir(parents=True)
-        t3 = (
-            '{\n'
-            '  "providerInstances": {\n'
-            '    "claude": {"driver": "claude", "config": {"apiKey": "%s"}}\n'
-            '  }\n'
-            '}\n' % SECRET
-        ).encode()
-        real_open = os.open
+        t3 = self.fresh_settings('created-by-t3')
+        real_link = os.link
 
-        def racing_open(file, flags, mode=0o777, *, dir_fd=None):
-            if dir_fd is None and not isinstance(file, int) and Path(file) == path and flags & os.O_EXCL:
-                holder = real_open(file, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o640)
-                os.write(holder, t3)
-                os.close(holder)
+        def racing_link(src, dst, *args, **kwargs):
+            if Path(dst) == path and not path.exists():
+                descriptor = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_EXCL, 0o640)
+                os.write(descriptor, t3)
+                os.close(descriptor)
                 os.chmod(path, 0o640)
-            if dir_fd is None:
-                return real_open(file, flags, mode)
-            return real_open(file, flags, mode, dir_fd=dir_fd)
+            return real_link(src, dst, *args, **kwargs)
 
-        with patch.object(antigravity.os, 'open', racing_open):
+        with patch.object(antigravity.os, 'link', racing_link):
             status, stdout, stderr = self.merge()
         self.assertEqual(status, 0, stderr)
         self.assertEqual(stdout, 'added\n')
         saved = json.loads(path.read_text())
+        self.assertEqual(saved['stamp'], 'created-by-t3')
         self.assertEqual(saved['providerInstances']['claude']['config']['apiKey'], SECRET)
         self.assertEqual(saved['providerInstances']['antigravity']['driver'], 'antigravity')
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o640)
+        self.assertEqual(list(path.parent.glob('.groundwork-antigravity-*')), [])
         self.assertNotIn(SECRET, stdout + stderr)
 
-    def test_a_settings_file_that_keeps_changing_is_not_replaced(self):
+    def test_a_save_after_fsync_is_retried_without_clobber(self):
         path = self.settings_path()
         path.parent.mkdir(parents=True)
-        path.write_bytes(
-            b'{"providerInstances":{"claude":{"driver":"claude","config":{"apiKey":"'
-            + SECRET.encode() + b'"}}}}\n')
+        path.write_bytes(self.fresh_settings('before'))
+        real_fsync = os.fsync
         real_read = Path.read_bytes
-        state = {'n': 0}
+        state = {'armed': False, 'used': False}
 
-        def changing(self_path):
+        def fsync(descriptor):
+            real_fsync(descriptor)
+            state['armed'] = True
+
+        def read(self_path):
             current = real_read(self_path)
-            if Path(self_path) != path:
+            if Path(self_path) != path or not state['armed'] or state['used']:
                 return current
-            state['n'] += 1
-            fresh = (json.dumps({
-                'stamp': state['n'],
-                'providerInstances': {
-                    'claude': {'driver': 'claude', 'config': {'apiKey': SECRET}},
-                },
-            }, indent=2) + '\n').encode()
-            descriptor = os.open(path, os.O_WRONLY | os.O_TRUNC)
-            os.write(descriptor, fresh)
-            os.close(descriptor)
-            return current
+            state['armed'] = False
+            state['used'] = True
+            fresh = self.fresh_settings('saved-during-setup')
+            self.write_direct(path, fresh)
+            return fresh
 
-        with patch.object(Path, 'read_bytes', changing):
+        with patch.object(antigravity.os, 'fsync', fsync), patch.object(Path, 'read_bytes', read):
+            status, stdout, stderr = self.merge()
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(stdout, 'added\n')
+        self.assertTrue(state['used'])
+        saved = json.loads(path.read_text())
+        self.assertEqual(saved['stamp'], 'saved-during-setup')
+        self.assertEqual(saved['providerInstances']['claude']['config']['apiKey'], SECRET)
+        self.assertEqual(saved['providerInstances']['antigravity']['driver'], 'antigravity')
+        self.assertNotIn(SECRET, stdout + stderr)
+
+    def test_a_save_after_fsync_stops_at_the_attempt_cap(self):
+        path = self.settings_path()
+        path.parent.mkdir(parents=True)
+        path.write_bytes(self.fresh_settings('before'))
+        real_fsync = os.fsync
+        real_read = Path.read_bytes
+        real_replace = os.replace
+        state = {'armed': False, 'fsyncs': 0, 'replaces': 0, 'n': 0}
+
+        def fsync(descriptor):
+            real_fsync(descriptor)
+            state['fsyncs'] += 1
+            state['armed'] = True
+
+        def read(self_path):
+            current = real_read(self_path)
+            if Path(self_path) != path or not state['armed']:
+                return current
+            state['armed'] = False
+            state['n'] += 1
+            fresh = self.fresh_settings(state['n'])
+            self.write_direct(path, fresh)
+            return fresh
+
+        def replace(src, dst):
+            state['replaces'] += 1
+            return real_replace(src, dst)
+
+        with patch.object(antigravity.os, 'fsync', fsync), patch.object(Path, 'read_bytes', read), \
+                patch.object(antigravity.os, 'replace', replace):
             status, stdout, stderr = self.merge()
         self.assertEqual(status, 1, stderr)
         self.assertEqual(stdout, '')
+        self.assertEqual(state['replaces'], 0)
+        self.assertEqual(state['n'], antigravity.MERGE_ATTEMPTS)
+        self.assertEqual(state['fsyncs'], antigravity.MERGE_ATTEMPTS)
         saved = path.read_bytes()
         self.assertNotIn(b'antigravity', saved)
         self.assertIn(SECRET.encode(), saved)
         self.assertNotIn(SECRET, stdout + stderr)
-        self.assertGreaterEqual(state['n'], 2)
+        self.assertEqual(list(path.parent.glob('.groundwork-antigravity-*')), [])
+
+    def test_a_save_after_replace_is_not_reported_as_added(self):
+        path = self.settings_path()
+        path.parent.mkdir(parents=True)
+        path.write_bytes(self.fresh_settings('before'))
+        newer = self.fresh_settings('after-replace')
+        real_replace = os.replace
+
+        def racing_replace(src, dst):
+            real_replace(src, dst)
+            if Path(dst) == path:
+                self.write_direct(path, newer)
+
+        with patch.object(antigravity.os, 'replace', racing_replace):
+            status, stdout, stderr = self.merge()
+        self.assertEqual(status, 1, stderr)
+        self.assertEqual(stdout, '')
+        self.assertEqual(path.read_bytes(), newer)
+        self.assertNotIn(b'antigravity', path.read_bytes())
+        self.assertNotIn(SECRET, stdout + stderr)
 
     def test_missing_file_is_created_mode_0600(self):
         status, stdout, stderr = self.merge()

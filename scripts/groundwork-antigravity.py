@@ -8,14 +8,15 @@
 
 merge-settings adds providerInstances.antigravity only when that key is
 absent. An existing instance, including one with enabled false or its own
-binaryPath, is left byte for byte. A missing file is created mode 0600 with
-O_EXCL. A file that appears in between is merged instead of replaced. An
-existing file is replaced only when its bytes still match the snapshot just
-read; a file that keeps changing is left as it is and the command exits 1
-with no status word. Invalid JSON, a non-object root, and a providerInstances
-value that is not an object are left untouched. T3CODE_HOME empty or unset is
-~/.t3. The file and its parents must be regular; a symlink is not followed
-and not written.
+binaryPath, is left byte for byte. A missing file is published mode 0600 by
+linking a finished temporary file, so the name never appears half-written. A
+file that appears in between is merged instead of replaced. An existing file
+is replaced only when a re-read immediately before the replace still matches
+the snapshot. A file that keeps changing, or that does not hold the bytes
+just written, exits 1 with no status word. Invalid JSON, a non-object root,
+and a providerInstances value that is not an object are left untouched.
+T3CODE_HOME empty or unset is ~/.t3. The file and its parents must be
+regular; a symlink is not followed and not written.
 
 Nothing from settings.json is printed. apiKey is never written or read back
 out. binaryPath is the absolute pacman-owned agy the caller checked.
@@ -70,7 +71,8 @@ NOT_BOUND = 11
 STATUS_ADDED = 'added'
 STATUS_PRESENT = 'already-present'
 STATUS_UNTOUCHED = 'left-untouched'
-# Reads, then a compare-and-swap. A file T3 keeps saving exhausts this and stops.
+# Each attempt finishes a temp file, then compares immediately before publishing.
+# A file T3 keeps saving exhausts this and stops.
 MERGE_ATTEMPTS = 4
 
 
@@ -139,39 +141,72 @@ def atomic_write(path, content, mode):
             temporary.unlink()
 
 
-def create_exclusive(path, content, mode):
-    """Create `path` with O_EXCL. FileExistsError when the path already exists."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+def durable_temp(directory, content, mode):
+    """A finished file in `directory`. The body is fsynced and the mode is set before return."""
+    descriptor, name = tempfile.mkstemp(prefix='.groundwork-antigravity-', dir=directory)
+    temporary = Path(name)
     try:
         view = memoryview(content)
         while view:
             written = os.write(descriptor, view)
             if written == 0:
-                raise OSError(f'Could not write {path}.')
+                raise OSError(f'Could not write {temporary}.')
             view = view[written:]
-        os.fsync(descriptor)
         os.fchmod(descriptor, mode)
+        os.fsync(descriptor)
     except Exception:
         os.close(descriptor)
-        try:
-            path.unlink()
-        except OSError:
-            pass
+        temporary.unlink(missing_ok=True)
         raise
     os.close(descriptor)
+    return temporary
+
+
+def link_new_file(path, content, mode):
+    """Publish `content` as a new file. FileExistsError when `path` already exists.
+
+    The body is fsynced before the name is linked, so a reader never sees a
+    half-written file. On any error only the temporary name is removed.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = durable_temp(path.parent, content, mode)
+    try:
+        os.link(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def replace_if_unchanged(path, snapshot, content, mode):
-    """Replace `path` only when it still holds `snapshot`. False when it changed."""
+    """Replace `path` with `content` when it still holds `snapshot`.
+
+    Return 'replaced' when the name holds `content`, 'changed' when the
+    snapshot is stale, and 'lost' when the name changed after the replace.
+    The temporary file is durable before the compare. The compare is the
+    last step before os.replace.
+    """
+    temporary = durable_temp(path.parent, content, mode)
     try:
-        current = path.read_bytes()
+        if path.is_symlink() or not path.is_file():
+            return 'changed'
+        try:
+            current = path.read_bytes()
+        except OSError:
+            return 'changed'
+        # A few microseconds remain between this compare and os.replace
+        # because T3 Code does not lock settings.json.
+        if current != snapshot:
+            return 'changed'
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    try:
+        if path.is_symlink() or not path.is_file() or path.read_bytes() != content:
+            return 'lost'
     except OSError:
-        return False
-    if current != snapshot or path.is_symlink() or not path.is_file():
-        return False
-    atomic_write(path, content, mode)
-    return True
+        return 'lost'
+    return 'replaced'
 
 
 def instance_document(binary):
@@ -241,7 +276,7 @@ def merge_settings(binary, environ):
             document = {'providerInstances': {INSTANCE_KEY: instance_document(binary)}}
             payload = (json.dumps(document, indent=2, ensure_ascii=False) + '\n').encode()
             try:
-                create_exclusive(path, payload, 0o600)
+                link_new_file(path, payload, 0o600)
             except FileExistsError:
                 continue
             except OSError as error:
@@ -283,10 +318,15 @@ def merge_settings(binary, environ):
             continue
         content = (json.dumps(value, indent=2, ensure_ascii=False) + '\n').encode()
         try:
-            if not replace_if_unchanged(path, original, content, mode):
-                continue
+            outcome = replace_if_unchanged(path, original, content, mode)
         except OSError as error:
             print(f'T3 Code settings.json was left unchanged: {path} ({error})', file=sys.stderr)
+            return 1
+        if outcome == 'changed':
+            continue
+        if outcome != 'replaced':
+            print(f'T3 Code settings.json changed while it was being updated, so the Antigravity '
+                  f'provider was not added: {path}', file=sys.stderr)
             return 1
         return report_status(STATUS_ADDED)
     print(f'T3 Code settings.json kept changing, so the Antigravity provider was not added: {path}',
