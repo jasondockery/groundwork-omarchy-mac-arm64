@@ -2685,6 +2685,25 @@ raise SystemExit(os.WEXITSTATUS(status))
         self.assertEqual(saved['providerInstances']['antigravity']['driver'], 'antigravity')
         self.assertFalse((self.root / 'home/.t3/userdata/settings.json').exists())
 
+    def test_relative_t3code_home_stops_setup_before_the_binding(self):
+        # A refused merge exits 1 before the desktop binding and does not claim the pin.
+        self.enable_pacman()
+        self.env['T3CODE_HOME'] = 'relative'
+        bindings = self.root / 'home/.config/hypr/bindings.lua'
+        bindings.parent.mkdir(parents=True)
+        bindings.write_text('-- user\n')
+        pin = "T3 Code's Antigravity provider is enabled with binaryPath pinned to that agy"
+        result = self.run_install('--without-keyd', '--without-screen-sharing', success=False)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('absolute', result.stderr)
+        self.assertIn('was not pinned', result.stderr)
+        self.assertNotIn(pin, result.stdout + result.stderr)
+        self.assertNotIn('Super+Shift+V', result.stdout)
+        self.assertNotIn('binding added here is Super+Shift+V', result.stdout)
+        self.assertEqual(bindings.read_text(), '-- user\n')
+        self.assertFalse((self.root / 'home/.config/hypr/groundwork-antigravity.lua').exists())
+        self.assertFalse((self.root / 'home/.t3/userdata/settings.json').exists())
+
     def test_symlink_bindings_file_is_not_edited_by_setup(self):
         self.enable_pacman()
         target = self.root / 'real-bindings.lua'

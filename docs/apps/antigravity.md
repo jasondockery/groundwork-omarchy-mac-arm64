@@ -44,7 +44,7 @@ After a pacman-owned `agy` passes the check, setup merges one instance into `${T
 
 Leave every other field at T3's default. In particular leave `authMethod` unset so it stays `oauth-personal` (a personal account with Ultra needs that). Do not write `apiKey`, models, or account ids. Do not print the file or any value from it. Invalid JSON, a root that is not an object, and a `providerInstances` value that is not an object are left untouched. An existing `antigravity` instance is left byte for byte, including `enabled: false` or a different `binaryPath`. A missing file is created mode `0600`. A symlink settings file is not followed. `T3CODE_HOME` empty or unset means `~/.t3`; a relative `T3CODE_HOME` is refused. The write is atomic and keeps the existing file mode. T3 reads the file while it is open; do not restart or quit T3 for this merge.
 
-The merge reports `added`, `already-present`, or `left-untouched`. Say the provider is enabled and pinned only for `added`, or for `already-present` when that instance is already enabled and its `binaryPath` is this `agy`. On `left-untouched`, keep the warning and do not claim the pin.
+The merge reports `added`, `already-present`, or `left-untouched`. Say the provider is enabled and pinned only for `added`, or for `already-present` when that instance is already enabled and its `binaryPath` is this `agy`. On `left-untouched`, keep the warning and do not claim the pin; setup continues. A nonzero merge, including a relative `T3CODE_HOME` or a failed write, prints no status. Setup says the provider was not pinned and exits 1 before the desktop binding.
 
 ## Launcher and key binding
 

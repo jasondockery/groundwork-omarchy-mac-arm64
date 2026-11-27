@@ -1632,11 +1632,17 @@ install_antigravity() {
     # stdout is added, already-present, already-present pinned, or left-untouched.
     # The pinned sentence is true only for added, or for an existing instance
     # that is already enabled at this agy. The settings file is not printed.
+    # A nonzero status is a refused path or a failed write: stop before the
+    # desktop binding. left-untouched is exit 0; its warning is already on
+    # stderr, and setup continues without the pin sentence.
     merge_status=0
     merge_report=$(python3 "$root/scripts/groundwork-antigravity.py" merge-settings "$binary") || merge_status=$?
-    if [[ $merge_status -eq 0 && ( $merge_report == added || $merge_report == 'already-present pinned' ) ]]; then
+    if [[ $merge_status -ne 0 ]]; then
+      echo "T3 Code's Antigravity provider was not pinned. Fix the message above, then rerun ./install.sh or update-all." >&2
+      exit 1
+    elif [[ $merge_report == added || $merge_report == 'already-present pinned' ]]; then
       echo "agy is installed. T3 Code's Antigravity provider is enabled with binaryPath pinned to that agy. Sign in from T3 Code: Settings, Providers, Antigravity, Sign in. See docs/apps/antigravity.md."
-    elif [[ $merge_status -eq 0 && $merge_report == already-present ]]; then
+    elif [[ $merge_report == already-present ]]; then
       echo "agy is installed. T3 Code already has an Antigravity provider entry, so settings.json was left unchanged."
     fi
   fi
